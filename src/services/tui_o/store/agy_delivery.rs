@@ -11,14 +11,14 @@ use uuid::Uuid;
 pub(crate) type Hash = [u8; 32];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct TurnKey {
+pub struct TurnKey {
     pub destination: NonZeroU64,
     pub id: NonZeroU64,
     pub nonce: Uuid,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct TurnLease {
+pub struct TurnLease {
     pub key: TurnKey,
     pub revision: NonZeroU64,
 }

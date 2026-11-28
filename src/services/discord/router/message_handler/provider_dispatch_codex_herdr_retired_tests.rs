@@ -10,7 +10,7 @@ const RETIRED: &str = "fedcba9876543210fedcba9876543210";
 #[test]
 fn a_retired_codex_row_starts_one_new_execution_that_takes_its_input_once_and_binds_pg() {
     let fx = Fixture::admitted("retired-restart");
-    let mut retired = crate::db::dispatched_sessions::hosted_execution::tests::record(
+    let mut retired = crate::db::dispatched_sessions::hosted_execution::test_support::record(
         &fx.owner,
         RETIRED,
         HostedState::Retired,

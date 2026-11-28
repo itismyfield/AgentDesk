@@ -5,14 +5,11 @@ use sqlx::PgPool;
 
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::services::tui_o::repost::identity::{
-    IDENTITY_VERSION, PieceKey, SPLIT_VERSION, payload_sha256,
-};
+use crate::services::tui_o::repost::identity::{IDENTITY_VERSION, PieceKey};
 use crate::services::tui_o::repost::io::RepostHttp;
 use crate::services::tui_o::repost::io::probe::evidence::RunScope;
-use crate::services::tui_o::repost::o_piece_attempts::AttemptResult;
 use crate::services::tui_o::repost::o_piece_delivery::{
-    self, AdmitOutcome, AdmittedBy, NewDelivery, Receipt, ReceiptMethod, ReceiptOutcome,
+    self, AdmitOutcome, NewDelivery, Receipt, ReceiptMethod, ReceiptOutcome,
 };
 use crate::services::tui_o::repost::projection::ReceiptOverlay;
 use crate::services::tui_o::repost::runner::{ChannelTurn, Runner, TurnWriter};
@@ -44,31 +41,20 @@ const RECEIPTED: Shared = Shared {
 /// Another home's admission of `native` and, when asked, its recorded receipt.
 async fn shared(pool: &PgPool, native: &str, shared: Shared, message_id: u64) -> PieceKey {
     let key = PieceKey::new(unit(native), 0).unwrap();
-    let new = NewDelivery {
-        key: key.clone(),
-        payload: shared.payload.into(),
-        payload_sha256: payload_sha256(shared.payload),
-        identity_version: shared.identity_version,
-        split_version: SPLIT_VERSION,
-        original_anchor: 40,
-        sender_id: BOT,
-        admitted_by: AdmittedBy::Uncertain,
-        origin_serial: 7,
-        origin_node: "node-b".into(),
-        original: AttemptResult::Uncertain,
-        prior_retries: 0,
-        failure: None,
-    };
+    let new = NewDelivery::uncertain_for_test(
+        key.clone(),
+        shared.payload.into(),
+        shared.identity_version,
+        40,
+        BOT,
+        7,
+        "node-b".into(),
+    );
     let admitted = o_piece_delivery::admit(pool, &new).await.unwrap();
     assert!(matches!(admitted, AdmitOutcome::Admitted(_)));
     if shared.receipt {
-        let receipt = Receipt {
-            key: key.clone(),
-            message_id,
-            author_id: BOT,
-            slot: Some(1),
-            method: ReceiptMethod::Marker,
-        };
+        let receipt =
+            Receipt::for_test(key.clone(), message_id, BOT, Some(1), ReceiptMethod::Marker);
         let recorded = o_piece_delivery::record_receipt(pool, &receipt).await;
         assert!(matches!(recorded.unwrap(), ReceiptOutcome::Recorded { .. }));
     }

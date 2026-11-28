@@ -217,8 +217,10 @@ mod store;
 mod sweep;
 mod tombstone;
 
+#[cfg(test)]
+use deferred_claim::LiveInflightProbe;
 pub(in crate::services::discord) use deferred_claim::{
-    LiveInflightProbe, ensure_marker_for_own_synthetic_turn, record_for_deferred_claim,
+    ensure_marker_for_own_synthetic_turn, record_for_deferred_claim,
 };
 #[cfg(test)]
 use drain::{
@@ -242,7 +244,9 @@ pub(in crate::services::discord) use store::{
 };
 #[cfg(test)]
 use store::{root, tombstone_root};
-pub(in crate::services::discord) use sweep::{sweep_expired, sweep_expired_with_applier};
+pub(in crate::services::discord) use sweep::sweep_expired;
+#[cfg(test)]
+pub(in crate::services::discord) use sweep::sweep_expired_with_applier;
 pub(in crate::services::discord) use tombstone::{
     cover_from_commit_tombstone, post_abort_commit_tombstone, record_for_abort,
 };

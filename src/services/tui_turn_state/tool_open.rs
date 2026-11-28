@@ -8,7 +8,7 @@ const MAX_PROGRESS_TAIL_BYTES: u64 = 16 * 1024 * 1024;
 
 /// The current turn's root tool calls as far as the transcript tail shows them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ToolCalls {
+pub enum ToolCalls {
     /// A call has no result yet.
     Open,
     /// Every call since the turn boundary has its result.
@@ -19,7 +19,7 @@ pub(crate) enum ToolCalls {
 
 /// Unix nanos of the newest stamped conversation record, also when that record is longer than
 /// the standard tail window.
-pub(crate) fn latest_provider_record_unix_nanos_widening(
+pub fn latest_provider_record_unix_nanos_widening(
     provider: &ProviderKind,
     path: &Path,
 ) -> Option<i64> {
@@ -31,7 +31,7 @@ pub(crate) fn latest_provider_record_unix_nanos_widening(
 }
 
 /// Whether the current turn has a root tool call still waiting for its result.
-pub(crate) fn provider_tool_calls(provider: &ProviderKind, path: &Path) -> ToolCalls {
+pub fn provider_tool_calls(provider: &ProviderKind, path: &Path) -> ToolCalls {
     let step = match provider {
         ProviderKind::Claude => claude_step,
         ProviderKind::Codex => codex_step,

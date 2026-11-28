@@ -2,11 +2,11 @@
 
 use super::*;
 use crate::db::dispatched_sessions::hosted_execution::HostedState;
-use crate::db::dispatched_sessions::hosted_execution::tests::{owner, record, wire};
+use crate::db::dispatched_sessions::hosted_execution::test_support::{owner, record, wire};
 use crate::services::discord::host_defer_gate::tests::{Case, postgres};
 use crate::services::discord::host_key_derivation::tests::seed_row;
 use crate::services::discord::host_teardown_gate::test_support::{Stored, channel_key, shared_on};
-use crate::services::provider_teardown::tests::test_support::FakeTmux;
+use crate::services::provider_teardown::test_support::FakeTmux;
 
 fn wrapper_binding() -> crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
     crate::services::tui_prompt_dedupe::TuiRuntimeBinding {

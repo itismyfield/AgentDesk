@@ -77,7 +77,7 @@ fn codex_o_replays_restored_parked_input_without_legacy_body() {
     let _state_lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     dedupe::reset_state_for_tests();
     tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
-        let _tmux = crate::services::provider_teardown::tests::test_support::FakeTmux::install(TMUX);
+        let _tmux = crate::services::provider_teardown::test_support::FakeTmux::install(TMUX);
         let generation = tc::session_temp_path(TMUX, "generation");
         std::fs::create_dir_all(std::path::Path::new(&generation).parent().unwrap()).unwrap();
         std::fs::write(generation, b"1").unwrap();

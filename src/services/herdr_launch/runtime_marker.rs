@@ -22,7 +22,7 @@ pub(super) fn clear_fresh(
 }
 
 /// `Ok(true)` when the retired execution's runtime hint was removed.
-pub(crate) async fn clear_retired(record: &HostedExecution) -> Result<bool, String> {
+pub async fn clear_retired(record: &HostedExecution) -> Result<bool, String> {
     if record.state != HostedState::Retired {
         return Err("runtime marker cleanup requires a retired execution".into());
     }

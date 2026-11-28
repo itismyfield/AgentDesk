@@ -472,7 +472,7 @@ fn inspect_host(data: &Value, end: i64, start: i64, build: &str, census: &str) -
         "tui_turns":turns,"o_ack":ack,"denominator_available":turns.is_some() && ack.is_some(),"sites":sites})
 }
 
-pub(crate) fn evaluate(
+pub fn evaluate(
     expected: [&str; 2],
     observations: &[Value],
     now: i64,

@@ -207,13 +207,12 @@ impl ReplayStart {
 
 pub(crate) use crate::services::cluster::intake_turn::IntakeExecution;
 
-impl IntakeExecution {
-    pub(crate) fn deferred(channel: poise::serenity_prelude::ChannelId) -> Self {
-        if super::checkpoint_waits_for_admission(channel) {
-            Self::Deferred
-        } else {
-            Self::Executed
-        }
+/// `Deferred` while the channel's checkpoint still waits for admission, else `Executed`.
+pub(crate) fn deferred_execution(channel: poise::serenity_prelude::ChannelId) -> IntakeExecution {
+    if super::checkpoint_waits_for_admission(channel) {
+        IntakeExecution::Deferred
+    } else {
+        IntakeExecution::Executed
     }
 }
 

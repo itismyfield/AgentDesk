@@ -74,7 +74,7 @@ pub(crate) fn current() -> (InputFallback, Option<&'static str>) {
     )
 }
 
-pub(crate) fn status_json() -> serde_json::Value {
+pub fn status_json() -> serde_json::Value {
     let (fallback, warning) = current();
     match fallback {
         InputFallback::Off => serde_json::json!({"state": "off", "warning": warning}),

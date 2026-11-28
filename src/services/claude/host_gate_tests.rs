@@ -1,7 +1,7 @@
 #![cfg(unix)]
 
 use super::super::*;
-use crate::services::provider_teardown::tests::test_support::{FakeTmux, cleared, refusals};
+use crate::services::provider_teardown::test_support::{FakeTmux, cleared, refusals};
 use crate::services::session_host::test_support::{InjectedLivenessGuard, InjectedPresenceGuard};
 use crate::services::session_host::{HostLiveness, HostPresence, HostSessionRef};
 

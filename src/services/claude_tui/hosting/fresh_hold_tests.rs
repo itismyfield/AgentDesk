@@ -158,7 +158,7 @@ fn p2_actual_warm_session_died_then_recreate_fresh_reuses_token() {
             frame,
             sender.clone(),
             Some(token.clone()),
-            &crate::services::claude_tui::hosting::FollowupHost::legacy_tmux(session),
+            &crate::services::claude_tui::hosting::FollowupHost::legacy_tmux_for_test(session),
             None,
         )
     });

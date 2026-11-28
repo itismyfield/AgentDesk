@@ -46,12 +46,12 @@ impl SourceFileIdentity {
             use std::os::unix::fs::MetadataExt;
             file.metadata()
                 .map(|metadata| Self::Unix {
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     dev: crate::services::tui_o::shadow::capture::renumber::dev(
                         metadata.dev(),
                         metadata.ino(),
                     ),
-                    #[cfg(not(test))]
+                    #[cfg(not(any(test, feature = "test-support")))]
                     dev: metadata.dev(),
                     ino: metadata.ino(),
                 })

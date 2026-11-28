@@ -9,16 +9,16 @@ use super::observe::CANONICAL_CONFIG;
 use crate::domain::file_sync::fsync_parent_dir;
 
 #[path = "managed_config/maintenance.rs"]
-pub(crate) mod maintenance;
+pub mod maintenance;
 #[path = "managed_config/path.rs"]
-pub(crate) mod path;
+pub mod path;
 #[path = "managed_config/publication.rs"]
-pub(crate) mod publication;
+pub mod publication;
 
-pub(crate) use path::ManagedHome;
+pub use path::ManagedHome;
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum EnsureResult {
+pub enum EnsureResult {
     Unchanged,
     Prepared { backup: Option<PathBuf> },
     Recovered,
@@ -26,7 +26,7 @@ pub(crate) enum EnsureResult {
 
 /// What a read-only look at a managed home found; it takes no lock and writes nothing.
 #[derive(Debug)]
-pub(crate) enum Inspection {
+pub enum Inspection {
     Canonical { committed: Option<SystemTime> },
     Missing,
     Different,
@@ -159,11 +159,11 @@ impl Drop for HomeLock {
 }
 
 impl ManagedHome {
-    pub(crate) fn ensure(&self) -> io::Result<EnsureResult> {
+    pub fn ensure(&self) -> io::Result<EnsureResult> {
         self.ensure_with(|_| Ok(()))
     }
 
-    pub(crate) fn inspect(&self) -> Inspection {
+    pub fn inspect(&self) -> Inspection {
         let config = self.path.join("config.toml");
         let record = match publication::state(&config) {
             Ok(record) => record,

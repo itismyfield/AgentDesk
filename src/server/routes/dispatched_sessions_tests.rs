@@ -431,7 +431,7 @@ async fn reprove_codex_rollout_cases(tmux_probe: &std::path::Path) {
 #[tokio::test(flavor = "current_thread")]
 async fn kill_tmux_route_checks_the_host_before_any_probe_or_write_pg() {
     use crate::db::dispatched_sessions::hosted_execution::HostedState;
-    use crate::db::dispatched_sessions::hosted_execution::tests::{
+    use crate::db::dispatched_sessions::hosted_execution::test_support::{
         TOKEN, future_schema, owner, record, wire,
     };
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
@@ -690,7 +690,7 @@ async fn seed_host_row(
     dispatch: &str,
 ) -> String {
     use crate::db::dispatched_sessions::hosted_execution::HostedState::*;
-    use crate::db::dispatched_sessions::hosted_execution::tests::*;
+    use crate::db::dispatched_sessions::hosted_execution::test_support::*;
     let owner = owner(ch);
     let raw = match host {
         "pending" => Some(wire(&record(&owner, "n1", Pending))),
@@ -1673,9 +1673,15 @@ async fn routine_teardown_of_a_thread_running_another_session_disconnects_nothin
                                    $3::jsonb)";
                 let thread = thread.to_string();
                 let own = matches!(moved, Moved::OwnRow).then(|| {
-                    use crate::db::dispatched_sessions::hosted_execution::{HostedState, tests};
-                    let bound = tests::record(&tests::owner(&thread), "n1", HostedState::Bound);
-                    tests::wire(&bound).to_string()
+                    use crate::db::dispatched_sessions::hosted_execution::{
+                        HostedState, test_support,
+                    };
+                    let bound = test_support::record(
+                        &test_support::owner(&thread),
+                        "n1",
+                        HostedState::Bound,
+                    );
+                    test_support::wire(&bound).to_string()
                 });
                 let args = [Some(key.as_str()), Some(thread.as_str()), own.as_deref()];
                 exec(&pool, sql, &args).await;
@@ -1802,7 +1808,7 @@ async fn force_kill_of_a_channelless_row_leaves_a_runtime_holding_its_name_pg() 
 #[tokio::test(flavor = "current_thread")]
 async fn selector_clears_keep_configured_and_hosted_rows_pg() {
     use crate::db::dispatched_sessions::hosted_execution::HostedState;
-    use crate::db::dispatched_sessions::hosted_execution::tests::{owner, record, wire};
+    use crate::db::dispatched_sessions::hosted_execution::test_support::{owner, record, wire};
     let pg_db = TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;
     let (configured, sid) = ("1479671301387069100", "stale-p9b1-selector");

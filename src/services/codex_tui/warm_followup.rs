@@ -1,10 +1,10 @@
 use crate::services::discord::codex_absence::replacement::Replacement;
 #[cfg(unix)]
-mod submit;
+pub mod submit;
 #[cfg(unix)]
 use submit::settle_submit;
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) use submit::{settle_submit_for_test, test_support::install_clear_end};
+pub use submit::{settle_submit_for_test, test_support::install_clear_end};
 
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -24,7 +24,7 @@ use super::session::{CodexTuiRolloutMarker, CodexTuiSessionSelection};
 const WARM_FOLLOWUP_ENV: &str = "AGENTDESK_CODEX_TUI_WARM_FOLLOWUP";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CodexWarmFallbackReason {
+pub enum CodexWarmFallbackReason {
     RuntimeKindMismatch,
     RolloutBindingMismatch,
     LaunchOptionsChanged,
@@ -57,7 +57,7 @@ impl CodexWarmFallbackReason {
     }
 }
 
-pub(crate) enum CodexWarmFollowupOutcome {
+pub enum CodexWarmFollowupOutcome {
     Terminal(Result<(), String>),
     Fallback(CodexWarmFallbackReason),
     FallbackAfterPaneKill(CodexWarmFallbackReason, Option<Replacement>),
@@ -102,7 +102,7 @@ fn decide_warm_eligibility(signals: WarmEligibilitySignals) -> WarmEligibilityDe
     WarmEligibilityDecision::Eligible
 }
 
-pub(crate) fn codex_tui_warm_followup_enabled() -> bool {
+pub fn codex_tui_warm_followup_enabled() -> bool {
     crate::utils::env_flag(WARM_FOLLOWUP_ENV, true)
 }
 
@@ -194,13 +194,13 @@ impl LaunchOptionsSnapshot {
     }
 }
 
-pub(crate) fn codex_tui_launch_options_fingerprint(options: &CodexLaunchOptions) -> String {
+pub fn codex_tui_launch_options_fingerprint(options: &CodexLaunchOptions) -> String {
     LaunchOptionsSnapshot::of(options).fingerprint
 }
 
 /// Records the fingerprint the warm gate compares plus its per-field snapshot.
 /// The snapshot is diagnostic only, so failing to write it never fails the launch.
-pub(crate) fn write_codex_tui_launch_options_evidence(
+pub fn write_codex_tui_launch_options_evidence(
     tmux_session_name: &str,
     options: &CodexLaunchOptions,
 ) -> Result<(), String> {
@@ -669,7 +669,7 @@ fn tail_to_end(
 /// The owner's idle submit observed as this follow-up observes its own: handoff, dedupe and
 /// channel records come before that submit, then the rollout is tailed to its end on `sender`.
 #[cfg(unix)]
-pub(crate) fn owner_observer(
+pub fn owner_observer(
     (tmux, prompt, channel): (&str, &str, u64),
     (session_id, working_dir): (Option<&str>, &Path),
     sender: Sender<StreamMessage>,
@@ -1224,7 +1224,7 @@ pub(crate) fn verified_warm(request: VerifiedWarmRequest<'_>) -> Result<(), Stri
     let token = std::sync::Arc::clone(&request.token);
     let result = verified_warm_inner(request);
     if let Err(error) = &result {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         actual_boundary(&format!("held:{error}"));
         tracing::warn!(
             tmux_session_name,
@@ -1311,14 +1311,14 @@ fn verified_warm_inner(request: VerifiedWarmRequest<'_>) -> Result<(), String> {
     )
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 type ActualBoundary = Box<dyn FnMut(&str)>;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    pub(crate) static ACTUAL_BOUNDARY: std::cell::RefCell<Option<ActualBoundary>> = const { std::cell::RefCell::new(None) };
+    pub static ACTUAL_BOUNDARY: std::cell::RefCell<Option<ActualBoundary>> = const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn actual_boundary(stage: &str) {
     ACTUAL_BOUNDARY.with(|hook| {
         if let Some(hook) = hook.borrow_mut().as_mut() {

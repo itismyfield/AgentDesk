@@ -21,7 +21,7 @@ async fn decide_live<'a>(
 
 /// Decides a stale resume: the legacy retry for a legacy or ordinary turn, and for a protected
 /// one an exact retry only on committed no-effect evidence from its own live attempt.
-pub(in crate::services::discord) async fn stale_resume(
+pub async fn stale_resume(
     pool: Option<&PgPool>,
     token: &CancelToken,
     inflight: &dyn ReplayRow,
@@ -111,7 +111,7 @@ async fn classify_terminal(
 
 /// Whether a provider error may take the ordinary recovery, presentation and reset path; a
 /// protected stale resume is left to the stale-resume decision.
-pub(in crate::services::discord) async fn error_is_ordinary(
+pub async fn error_is_ordinary(
     pool: Option<&PgPool>,
     token: &CancelToken,
     inflight: &dyn ReplayRow,
@@ -127,7 +127,7 @@ pub(in crate::services::discord) async fn error_is_ordinary(
 
 /// Whether ordinary completion, failure and session effects may run: always for a legacy turn,
 /// and for a protected one once its terminal is classified ordinary.
-pub(in crate::services::discord) async fn ordinary_outcome(
+pub async fn ordinary_outcome(
     pool: Option<&PgPool>,
     token: &CancelToken,
     inflight: &dyn ReplayRow,
@@ -141,7 +141,7 @@ pub(in crate::services::discord) async fn ordinary_outcome(
 
 /// Holds a protected request at a recovery sentinel, which is never no-effect evidence; returns
 /// whether the request was held.
-pub(in crate::services::discord) async fn hold_recovery(
+pub async fn hold_recovery(
     pool: Option<&PgPool>,
     token: &CancelToken,
     inflight: &dyn ReplayRow,

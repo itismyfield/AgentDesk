@@ -4,13 +4,13 @@
 #[path = "autostart/candidate.rs"]
 pub(crate) mod candidate;
 #[path = "autostart/presence.rs"]
-pub(crate) mod presence;
+pub mod presence;
 #[path = "autostart/record.rs"]
 pub(crate) mod record;
 #[path = "autostart/selector.rs"]
 pub(crate) mod selector;
 #[path = "autostart/spawn.rs"]
-pub(crate) mod spawn;
+pub mod spawn;
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 /// What one assessment reads from this process: the execution user's HOME, its PATH, and the
 /// binaries it must never start.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct Environment {
+pub struct Environment {
     pub home: Option<PathBuf>,
     pub path: Option<OsString>,
     pub excluded: Vec<PathBuf>,
@@ -31,7 +31,7 @@ pub(crate) struct Environment {
 impl Environment {
     /// The execution user's `home` with this process's PATH; AgentDesk's own `~/.adk` copies are
     /// excluded.
-    pub(crate) fn for_home(home: Option<PathBuf>) -> Self {
+    pub fn for_home(home: Option<PathBuf>) -> Self {
         let excluded = home.iter().map(|home| home.join(".adk")).collect();
         Self {
             home,
@@ -192,6 +192,6 @@ fn remember(socket: &Path, value: &Value) {
 #[path = "autostart_tests.rs"]
 mod tests;
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 #[path = "autostart_real_tests.rs"]
-pub(crate) mod real_tests;
+pub mod real_tests;

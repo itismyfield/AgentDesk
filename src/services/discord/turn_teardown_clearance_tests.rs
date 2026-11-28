@@ -3,7 +3,7 @@ use crate::db::dispatched_session_canonical_identity::{
     CanonicalSessionIdentity, SessionIdentityKind, upsert_hook_session_with_identity_pg,
 };
 use crate::db::dispatched_sessions::HookSessionUpsert;
-use crate::db::dispatched_sessions::hosted_execution::tests::TOKEN;
+use crate::db::dispatched_sessions::hosted_execution::test_support::TOKEN;
 use crate::services::discord::inflight::seed_session_row_keyed;
 
 const CHANNEL: u64 = 1_479_671_301_387_059_700;

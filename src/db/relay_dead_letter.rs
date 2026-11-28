@@ -19,8 +19,8 @@ use sqlx::PgPool;
 
 /// Loss-vector discriminators for the `kind` column. Constants so the producer
 /// sites and tests share one spelling.
-pub(crate) const KIND_CATCH_UP_TOO_OLD: &str = "catch_up_too_old";
-pub(crate) const KIND_QUEUE_OVERFLOW: &str = "queue_overflow";
+pub const KIND_CATCH_UP_TOO_OLD: &str = "catch_up_too_old";
+pub const KIND_QUEUE_OVERFLOW: &str = "queue_overflow";
 /// #4380: a crash restart re-adopted a still-live real-user bridge turn, but the
 /// `readopted_from_inflight` relay-resume marker did not durably persist, so the
 /// recovered watcher will yield to the dead bridge and silently drop the turn's
@@ -36,15 +36,15 @@ pub(crate) const KIND_QUEUE_OVERFLOW: &str = "queue_overflow";
 /// than making a schema value platform-specific (which would break a future non-unix
 /// writer).
 #[cfg_attr(not(unix), allow(dead_code))]
-pub(crate) const KIND_READOPT_RELAY_STUCK: &str = "readopt_relay_stuck";
+pub const KIND_READOPT_RELAY_STUCK: &str = "readopt_relay_stuck";
 /// Terminal frame body that ended with no delivery owner (sink did not deliver,
 /// soft-terminal authority denied). Sole writer is `#[cfg(unix)]`.
 #[cfg_attr(not(unix), allow(dead_code))]
-pub(crate) const KIND_TERMINAL_NO_DELIVERY_OWNER: &str = "terminal_no_delivery_owner";
+pub const KIND_TERMINAL_NO_DELIVERY_OWNER: &str = "terminal_no_delivery_owner";
 /// A rebind adopted a TUI-direct row whose saved offsets were not valid for the live
 /// transcript, so the watcher restarted at EOF; the row keeps the unread range's raw bytes, or
 /// only the range and why when its bytes are gone.
-pub(crate) const KIND_ADOPT_FENCE_FORWARD: &str = "adopt_fence_forward";
+pub const KIND_ADOPT_FENCE_FORWARD: &str = "adopt_fence_forward";
 
 /// Self-maintenance horizon: rows older than this are pruned opportunistically
 /// after each successful insert.
@@ -54,7 +54,7 @@ pub(crate) const RETENTION_DAYS: i64 = 30;
 /// `author_id`/`message_id` are optional because a queue-overflow evict may
 /// carry a merged intervention with no single resolvable source message.
 #[derive(Clone, Debug)]
-pub(crate) struct RelayDeadLetterRecord {
+pub struct RelayDeadLetterRecord {
     pub kind: String,
     pub channel_id: String,
     pub author_id: Option<String>,
@@ -66,10 +66,7 @@ pub(crate) struct RelayDeadLetterRecord {
 /// INSERT one dead-letter row, returning its id. Prefer [`record_detached`] on
 /// the hot path; this variant surfaces the error for tests and callers that
 /// want the id.
-pub(crate) async fn insert(
-    pool: &PgPool,
-    record: &RelayDeadLetterRecord,
-) -> Result<i64, sqlx::Error> {
+pub async fn insert(pool: &PgPool, record: &RelayDeadLetterRecord) -> Result<i64, sqlx::Error> {
     insert_with_outcome(pool, record).await.map(|(id, _)| id)
 }
 
@@ -143,13 +140,13 @@ async fn insert_on(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TooOldRecordOutcome {
+pub enum TooOldRecordOutcome {
     Inserted,
     Existing,
 }
 
 /// A missing pool or failed commit cannot retire an unpreserved catch-up input.
-pub(crate) async fn record_too_old(
+pub async fn record_too_old(
     pool: Option<&PgPool>,
     record: RelayDeadLetterRecord,
 ) -> Option<TooOldRecordOutcome> {
@@ -203,7 +200,7 @@ pub(crate) async fn prune_expired(pool: &PgPool) -> Result<u64, sqlx::Error> {
 /// configured) is a silent no-op. Logs the channel under the relay's standard
 /// `channel_id` field (#4218 drift gate). Returns the join handle so tests can
 /// await completion deterministically; production callers drop it.
-pub(crate) fn record_detached(
+pub fn record_detached(
     pool: Option<&PgPool>,
     record: RelayDeadLetterRecord,
 ) -> Option<tokio::task::JoinHandle<()>> {
@@ -212,7 +209,7 @@ pub(crate) fn record_detached(
 
 /// [`record_detached`] that also reports whether the row landed: `on_recorded(false)`
 /// when there is no pool or the INSERT fails, `on_recorded(true)` after a successful write.
-pub(crate) fn record_detached_reporting(
+pub fn record_detached_reporting(
     pool: Option<&PgPool>,
     record: RelayDeadLetterRecord,
     on_recorded: impl FnOnce(bool) + Send + 'static,
@@ -268,7 +265,7 @@ const REDELIVERY_CLAIMED: &str = "claimed";
 
 /// One row claimed for redelivery. `id` settles it; the rest reconstruct the body.
 #[derive(Clone, Debug)]
-pub(crate) struct ClaimedDeadLetter {
+pub struct ClaimedDeadLetter {
     pub id: i64,
     pub channel_id: String,
     pub message_id: Option<String>,
@@ -287,7 +284,7 @@ pub(crate) struct ClaimedDeadLetter {
 /// `min_age_secs` leaves the normal delivery path time to settle the turn;
 /// `max_age_secs` bounds the window to one in which the consumer's
 /// already-delivered witnesses can still answer.
-pub(crate) async fn claim_pending_redeliveries(
+pub async fn claim_pending_redeliveries(
     pool: &PgPool,
     kind: &str,
     min_age_secs: i64,

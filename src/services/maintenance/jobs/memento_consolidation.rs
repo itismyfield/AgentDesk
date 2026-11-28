@@ -323,10 +323,10 @@ mod receipt_tests {
                 .unwrap()
             };
             let original = fingerprint();
-            WriterClaim::acquire(dir.path(), &original)
+            WriterClaim::acquire_for_test(dir.path(), &original)
                 .unwrap()
                 .unwrap()
-                .complete()
+                .complete_for_test()
                 .unwrap();
             let mut during_key = String::new();
             let result = with_receipt_invalidation(&runtime, || async {
@@ -335,10 +335,10 @@ mod receipt_tests {
                     original, during_key,
                     "pre-invalidation must precede dispatch"
                 );
-                WriterClaim::acquire(dir.path(), &during_key)
+                WriterClaim::acquire_for_test(dir.path(), &during_key)
                     .unwrap()
                     .unwrap()
-                    .complete()
+                    .complete_for_test()
                     .unwrap();
                 if lost_reply {
                     Err(anyhow!("fake lost reply after server mutation"))
@@ -353,7 +353,11 @@ mod receipt_tests {
                 after, during_key,
                 "post-invalidation must run even after response loss"
             );
-            assert!(WriterClaim::acquire(dir.path(), &after).unwrap().is_some());
+            assert!(
+                WriterClaim::acquire_for_test(dir.path(), &after)
+                    .unwrap()
+                    .is_some()
+            );
         }
     }
 

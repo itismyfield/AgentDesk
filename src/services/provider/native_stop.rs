@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 mod persistence_tests;
 
 #[derive(Default)]
-pub(crate) struct State {
+pub struct State {
     inner: Mutex<Inner>,
     notice: AtomicBool,
     bridges: Mutex<Vec<Weak<()>>>,
@@ -20,22 +20,22 @@ pub(crate) struct State {
 
 /// Stable evidence of one native input; no prompt text is persisted here.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct NativeUserPin {
-    pub(crate) uuid: String,
-    pub(crate) source_file: (u64, u64),
-    pub(crate) range: (u64, u64),
-    pub(crate) receipt_start: u64,
-    pub(crate) row_digest: String,
-    pub(crate) frame_digest: String,
-    pub(crate) session_id: String,
-    pub(crate) output_path: String,
-    pub(crate) tmux_session: String,
-    pub(crate) spawn_nonce: Option<String>,
-    pub(crate) direct: bool,
+pub struct NativeUserPin {
+    pub uuid: String,
+    pub source_file: (u64, u64),
+    pub range: (u64, u64),
+    pub receipt_start: u64,
+    pub row_digest: String,
+    pub frame_digest: String,
+    pub session_id: String,
+    pub output_path: String,
+    pub tmux_session: String,
+    pub spawn_nonce: Option<String>,
+    pub direct: bool,
 }
 
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PinSaveOutcome {
+pub enum PinSaveOutcome {
     Saved,
     #[default]
     Retry,
@@ -52,7 +52,7 @@ struct PinPersistence {
 
 /// The writer's receipt is observational; it grants no cancellation authority.
 #[derive(Default)]
-pub(crate) struct ReceiptSink {
+pub struct ReceiptSink {
     inner: Mutex<WriterReceipt>,
     accepted: OnceLock<NativeUserPin>,
     rejected: AtomicBool,
@@ -76,6 +76,11 @@ struct WriterReceipt {
 }
 
 impl ReceiptSink {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn receipt_for_test(&self, receipt: crate::services::claude_tui::input::UserReceipt) {
+        self.receipt(receipt)
+    }
+
     pub(crate) fn receipt(&self, receipt: crate::services::claude_tui::input::UserReceipt) {
         let mut input = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if self.accepted.get().is_some() {
@@ -91,6 +96,11 @@ impl ReceiptSink {
             input.receipt = Some(receipt);
         }
     }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn finished_for_test(&self, run: &crate::services::claude_tui::host_input::InputRun) {
+        self.finished(run)
+    }
+
     pub(crate) fn finished(&self, run: &crate::services::claude_tui::host_input::InputRun) {
         let mut input = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if input.applied || self.cached().is_some() {
@@ -113,7 +123,7 @@ impl ReceiptSink {
             .map(Ok)
             .or_else(|| self.rejected.load(Ordering::Acquire).then_some(Err(())))
     }
-    pub(crate) fn observe(&self) -> Option<Result<NativeUserPin, ()>> {
+    pub fn observe(&self) -> Option<Result<NativeUserPin, ()>> {
         if let Some(result) = self.cached() {
             self.notify(false);
             return Some(result);
@@ -150,7 +160,7 @@ impl ReceiptSink {
             }
         }
     }
-    pub(crate) fn adopt(&self, pin: NativeUserPin) {
+    pub fn adopt(&self, pin: NativeUserPin) {
         {
             let mut input = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             if self.cached().is_none() {
@@ -160,20 +170,20 @@ impl ReceiptSink {
         }
         self.notify(false);
     }
-    pub(crate) fn restore_candidate(&self, pin: NativeUserPin) {
+    pub fn restore_candidate(&self, pin: NativeUserPin) {
         if self.cached().is_none() {
             *self.restored.lock().unwrap_or_else(|e| e.into_inner()) = Some(pin);
         }
     }
     /// Restoration remains observable after the candidate becomes an accepted pin.
-    pub(crate) fn has_restored_input(&self) -> bool {
+    pub fn has_restored_input(&self) -> bool {
         self.restored
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .is_some()
     }
     /// The pin a stop may target, rechecked against the live pane now; a failed check targets none.
-    pub(crate) fn stop_pin(&self) -> Option<NativeUserPin> {
+    pub fn stop_pin(&self) -> Option<NativeUserPin> {
         let live = crate::services::claude_tui::input::revalidate_native_pin;
         match self.observe() {
             Some(Ok(pin)) => return live(&pin).then_some(pin),
@@ -195,9 +205,14 @@ impl ReceiptSink {
             .cloned()
     }
     /// A fresh writer's token, before it is published: no payload key has gone yet.
-    pub(crate) fn arm_first_key(&self) {
+    pub fn arm_first_key(&self) {
         let _ = self.gate(UNGATED, NO_KEY_YET);
     }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn writer_first_key_for_test(&self) -> bool {
+        self.writer_first_key()
+    }
+
     /// The writer's first payload key; refused once a stop took the gate before it.
     pub(crate) fn writer_first_key(&self) -> bool {
         self.gate(NO_KEY_YET, MAY_HAVE_WRITTEN)
@@ -205,7 +220,7 @@ impl ReceiptSink {
     }
     /// A stop before the writer's first key takes the gate so the writer sends none; `None` for
     /// a token no fresh writer armed, `Some(false)` once the writer may have written.
-    pub(crate) fn stop_before_key(&self) -> Option<bool> {
+    pub fn stop_before_key(&self) -> Option<bool> {
         match self.gate(NO_KEY_YET, STOPPED_BEFORE_KEY) {
             None | Some(STOPPED_BEFORE_KEY) => Some(true),
             Some(MAY_HAVE_WRITTEN) => Some(false),
@@ -218,25 +233,25 @@ impl ReceiptSink {
             .compare_exchange(from, to, Ordering::AcqRel, Ordering::Acquire)
             .err()
     }
-    pub(crate) fn stopped_before_key(&self) -> bool {
+    pub fn stopped_before_key(&self) -> bool {
         self.first_key.load(Ordering::Acquire) == STOPPED_BEFORE_KEY
     }
     /// The writer's first key went or its input applied: the pane may hold this token's input.
-    pub(crate) fn may_have_written(&self) -> bool {
+    pub fn may_have_written(&self) -> bool {
         self.first_key.load(Ordering::Acquire) == MAY_HAVE_WRITTEN
             || self.inner.lock().unwrap_or_else(|e| e.into_inner()).applied
     }
     /// A pin may still come: the writer may have written and no pin was taken or refused.
-    pub(crate) fn pin_pending(&self) -> bool {
+    pub fn pin_pending(&self) -> bool {
         self.may_have_written() && self.cached().is_none()
     }
-    pub(crate) fn on_pin(&self, observer: PinObserver) {
+    pub fn on_pin(&self, observer: PinObserver) {
         let _ = self.observer.set(observer);
         self.notify(false);
     }
     /// The direct reader has no token; its first bridge frame supplies one immediate retry.
     #[cfg(any(unix, test))]
-    pub(crate) fn retry_persistence(&self) {
+    pub fn retry_persistence(&self) {
         self.notify(true);
     }
     fn notify(&self, retry_now: bool) {
@@ -256,11 +271,11 @@ impl ReceiptSink {
         }
     }
     #[cfg(all(any(test, feature = "test-support"), unix))]
-    pub(crate) fn retains_receipt(&self) -> bool {
+    pub fn retains_receipt(&self) -> bool {
         self.inner.lock().unwrap().receipt.is_some()
     }
-    #[cfg(test)]
-    pub(crate) fn observed(&self) -> Option<Result<NativeUserPin, ()>> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn observed(&self) -> Option<Result<NativeUserPin, ()>> {
         self.cached()
     }
 }
@@ -273,7 +288,7 @@ pub(crate) struct Inner {
     idle: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
-pub(crate) struct Attempt {
+pub struct Attempt {
     key: String,
     pub(crate) delivered: OnceLock<bool>,
     started: AtomicBool,
@@ -282,11 +297,11 @@ pub(crate) struct Attempt {
 }
 
 impl State {
-    pub(crate) fn receipt_sink(&self) -> Arc<ReceiptSink> {
+    pub fn receipt_sink(&self) -> Arc<ReceiptSink> {
         self.input.clone()
     }
 
-    pub(crate) fn observe_native_input(&self) -> Option<Result<NativeUserPin, ()>> {
+    pub fn observe_native_input(&self) -> Option<Result<NativeUserPin, ()>> {
         self.input.observe()
     }
 
@@ -296,7 +311,7 @@ impl State {
     }
 
     /// Busy inputs stay with their running token until completion or drop.
-    pub(crate) fn register_busy_child(&self, attempt: &str) {
+    pub fn register_busy_child(&self, attempt: &str) {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if inner.completed {
             return;
@@ -307,13 +322,13 @@ impl State {
         }
     }
 
-    pub(crate) fn is_busy_child(&self, attempt: &str) -> bool {
+    pub fn is_busy_child(&self, attempt: &str) -> bool {
         let busy = self.busy.lock().unwrap_or_else(|e| e.into_inner());
         busy.iter().any(|kept| kept == attempt)
     }
 
     /// Every bridge holds its own lifetime guard, including overlapping recovered bridges.
-    pub(crate) fn register_bridge(&self) -> Arc<()> {
+    pub fn register_bridge(&self) -> Arc<()> {
         let guard = Arc::new(());
         let mut bridges = self
             .bridges
@@ -324,7 +339,7 @@ impl State {
         guard
     }
 
-    pub(crate) fn has_live_bridge(&self) -> bool {
+    pub fn has_live_bridge(&self) -> bool {
         let mut bridges = self
             .bridges
             .lock()
@@ -333,7 +348,7 @@ impl State {
         !bridges.is_empty()
     }
 
-    pub(crate) fn attempt(
+    pub fn attempt(
         &self,
         key: String,
         terminal: Arc<dyn Fn() -> bool + Send + Sync>,
@@ -364,7 +379,7 @@ impl State {
     }
 
     /// Main's idle recovery keeps a terminal witness through the actor's publication.
-    pub(crate) fn handoff_idle(&self, terminal: Arc<dyn Fn() -> bool + Send + Sync>) -> bool {
+    pub fn handoff_idle(&self, terminal: Arc<dyn Fn() -> bool + Send + Sync>) -> bool {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if inner.completed {
             return false;
@@ -376,7 +391,7 @@ impl State {
     }
 
     /// Recovery rechecks the absence of this token's native owner at actor publication.
-    pub(crate) fn handoff_recovery(&self, witness: Arc<dyn Fn() -> bool + Send + Sync>) -> bool {
+    pub fn handoff_recovery(&self, witness: Arc<dyn Fn() -> bool + Send + Sync>) -> bool {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if !witness() {
             return false;
@@ -387,14 +402,14 @@ impl State {
         true
     }
 
-    pub(crate) fn is_completed(&self) -> bool {
+    pub fn is_completed(&self) -> bool {
         self.inner
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .completed
     }
 
-    pub(crate) fn completed(&self) {
+    pub fn completed(&self) {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.completed = true;
         *self.busy.lock().unwrap_or_else(|e| e.into_inner()) = Vec::new();
@@ -419,22 +434,22 @@ impl State {
         Ok(inner)
     }
 
-    pub(crate) fn claim_notice(&self) -> bool {
+    pub fn claim_notice(&self) -> bool {
         !self.notice.swap(true, Ordering::AcqRel)
     }
 }
 
 impl Attempt {
-    pub(crate) fn start(&self) -> bool {
+    pub fn start(&self) -> bool {
         !self.started.swap(true, Ordering::AcqRel)
     }
 
-    pub(crate) fn complete(&self, delivered: bool) {
+    pub fn complete(&self, delivered: bool) {
         let _ = self.delivered.set(delivered);
         self.changed.notify_waiters();
     }
 
-    pub(crate) async fn wait(&self) -> bool {
+    pub async fn wait(&self) -> bool {
         loop {
             let changed = self.changed.notified();
             tokio::pin!(changed);

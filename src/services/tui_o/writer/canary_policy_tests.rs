@@ -8,8 +8,7 @@ use crate::services::tui_o::store::ledger::{LedgerEntry, PieceOutcome};
 use crate::services::tui_o::writer::actor::{run_channel, spawn_if_enabled};
 use crate::services::tui_o::writer::binding::{BindingCause, BindingTarget};
 use crate::services::tui_o::writer::deliver::ChannelWriter;
-use crate::services::tui_o::writer::tests::actor::*;
-use crate::services::tui_o::writer::tests::{Alarms, Harness, unit};
+use crate::services::tui_o::writer::test_support::*;
 use crate::services::tui_o::writer::{AlarmSink, WriterAlarm};
 use chrono::Utc;
 use sha2::{Digest, Sha256};
@@ -161,7 +160,7 @@ fn exercise_actor(alternate_owner: bool) {
         tokio::time::pause();
         let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
         let _fake_tmux =
-            crate::services::provider_teardown::tests::test_support::FakeTmux::install(CANARY_TMUX);
+            crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
         dedupe::reset_state_for_tests();
         dedupe::binding_events::set_test_root(Some(root.path()));
         let (old_context, _, _) = durable_canary_without_launch_files(root.path());

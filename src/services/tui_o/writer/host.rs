@@ -26,7 +26,7 @@ use crate::services::tui_o::store::ChannelStore;
 use crate::services::tui_o::store::ledger::Unsent;
 
 mod activation_io;
-pub(crate) mod agy_host;
+pub mod agy_host;
 mod child_retirement;
 mod first_init;
 mod fresh_input;
@@ -34,11 +34,11 @@ mod managed_start;
 mod missing;
 mod recover;
 mod transition;
-pub(crate) use super::actor::native_input::RepostTurn;
+pub use super::actor::native_input::RepostTurn;
 use super::actor::native_input::{hold, stopped, unless_stopped};
 pub use activation_io::{Custody, FencedFacts};
-pub(crate) use child_retirement::{ChildStores, keep_stoppable};
-pub(crate) use fresh_input::initial_fresh_refusal;
+pub use child_retirement::{ChildStores, keep_stoppable};
+pub use fresh_input::initial_fresh_refusal;
 use recover::{Recovered, recover, recover_boot};
 /// Only pane writers enter the native turn retirement callback.
 pub enum PaneAdoptionProvider {
@@ -241,7 +241,7 @@ impl Readiness {
     }
 
     /// Whether the channel's running writer obeys `gate`, so only that gate can retire it.
-    pub(crate) fn hosted_under(&self, channel: u64, gate: &Arc<OwnershipGate>) -> bool {
+    pub fn hosted_under(&self, channel: u64, gate: &Arc<OwnershipGate>) -> bool {
         let live = locked(&self.live);
         live.get(&channel)
             .is_some_and(|live| Arc::ptr_eq(&live.gate, gate))
@@ -320,12 +320,12 @@ impl Readiness {
         tokio::time::timeout(limit, answer).await.ok()?
     }
 
-    pub(crate) fn submission(&self, channel: u64) -> Option<actor::codex_submission::Port> {
+    pub fn submission(&self, channel: u64) -> Option<actor::codex_submission::Port> {
         locked(&self.live).get(&channel)?.submission.clone()
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn drop_submission_for_tests(&self, channel: u64) {
+    pub fn drop_submission_for_tests(&self, channel: u64) {
         if let Some(live) = locked(&self.live).get_mut(&channel) {
             live.submission = None;
         }
@@ -355,7 +355,7 @@ impl Readiness {
 
     /// Hosts `owed` for `channel` as a running actor would publish it, with no actor behind it.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn track_owed_for_test(&self, channel: u64, owed: OwedView) {
+    pub fn track_owed_for_test(&self, channel: u64, owed: OwedView) {
         let gate = Arc::new(OwnershipGate::default());
         self.track(
             channel,
@@ -390,12 +390,12 @@ static PROCESS: LazyLock<Arc<Readiness>> = LazyLock::new(|| {
     Arc::default()
 });
 
-pub(crate) fn process_readiness() -> Arc<Readiness> {
+pub fn process_readiness() -> Arc<Readiness> {
     Arc::clone(&PROCESS)
 }
 
 /// Whether this process's writer can take work for `channel`; false for any channel O does not own.
-pub(crate) fn channel_accepts(channel: u64) -> bool {
+pub fn channel_accepts(channel: u64) -> bool {
     PROCESS.accepts(channel)
 }
 
@@ -415,7 +415,7 @@ thread_local! {
 
 /// Reports `unsettled` for every channel on this thread until dropped, as a running actor would.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn force_unsettled_for_test(unsettled: Option<usize>) -> impl Drop {
+pub fn force_unsettled_for_test(unsettled: Option<usize>) -> impl Drop {
     struct Restore(Option<Option<usize>>);
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -935,7 +935,7 @@ async fn publish(
 /// channel, and each channel binds the one source it was given.
 #[cfg(any(test, feature = "test-support"))]
 #[path = "host_io_tests.rs"]
-pub(crate) mod test_io;
+pub mod test_io;
 
 #[cfg(test)]
 mod claim_tests {

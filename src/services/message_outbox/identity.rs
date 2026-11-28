@@ -1,4 +1,4 @@
-pub(crate) use crate::domain::outbound::outbox::identity::{
+pub use crate::domain::outbound::outbox::identity::{
     ACTIONABLE_OPS_ALERT_BOT, dedupe_key_for_message, delivery_bot_for_target_session,
     is_actionable_ops_alert, is_non_turn_operational_alert, normalized_reason_code,
     normalized_session_key,

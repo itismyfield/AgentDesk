@@ -2,14 +2,14 @@ use super::*;
 use crate::services::discord::codex_absence::InflightObs;
 use crate::services::tui_prompt_dedupe::clear_relaunch;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) type AdmissionObserver =
     Box<dyn FnOnce(Option<&InflightObs>, Option<&std::sync::Arc<CancelToken>>)>;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) type InitialCaptureObserver = Box<dyn FnOnce(bool)>;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     pub(super) static AFTER_INITIAL_CAPTURE: std::cell::RefCell<Option<InitialCaptureObserver>> = const { std::cell::RefCell::new(None) };
     pub(super) static ADMISSION_OBSERVER: std::cell::RefCell<Option<AdmissionObserver>> = const { std::cell::RefCell::new(None) };
@@ -85,7 +85,7 @@ pub(super) fn execute_observed(
             .as_ref()
             .is_some_and(|token| observed.matches_token(token))
     });
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     ADMISSION_OBSERVER.with_borrow_mut(|slot| {
         if let Some(observer) = slot.take() {
             observer(observation, cancel_token.as_ref());
@@ -101,7 +101,7 @@ pub(super) fn execute_observed(
                 .and_then(|observed| clear_relaunch::absent_capture(tmux_session_name, observed))
         })
         .flatten();
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     AFTER_INITIAL_CAPTURE.with_borrow_mut(|slot| {
         if let Some(effect) = slot.take() {
             effect(captured.is_some());
@@ -306,14 +306,14 @@ pub(super) fn execute_observed(
             }) {
                 return Ok(false);
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             actual_submit_tests::note_dead_temp_cleanup(tmux_session_name, "session_temp");
             crate::services::tmux_common::cleanup_session_temp_files_under_source_authority(
                 authority,
                 tmux_session_name,
                 &fence,
             )?;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             actual_submit_tests::note_dead_temp_cleanup(tmux_session_name, "codex_session_files");
             crate::services::codex_tui::session::CodexTuiSessionFiles::for_tmux_session(
                 tmux_session_name,
@@ -352,7 +352,7 @@ pub(super) fn execute_observed(
         crate::services::tui_prompt_dedupe::register_tmux_channel(tmux_session_name, channel_id);
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     actual_submit_tests::run_before_create_effect();
     if captured.is_some_and(|captured| {
         !observation.is_some_and(|observed| {

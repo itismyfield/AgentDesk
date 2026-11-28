@@ -103,7 +103,7 @@ fn run_plans(after: After, plans: &[&[TuiInputAction]]) -> (InputRun, Vec<Value>
     let registry = HerdrRegistry::with_transport(endpoint(&rig.server), transport);
     let _registry = herdr_registry::force_for_test(registry.with_reads((off_where_dialled, os)));
     let stored = stored(&rig.server, HostedState::Bound);
-    let target = InputTarget::from_hosted_target(&resolved(PANE), &stored);
+    let target = InputTarget::from_hosted_target_for_test(&resolved(PANE), &stored);
     let other = herdr(&target).clone();
     let _watch = watch_actions(other.clone(), move |action| {
         if let TuiInputAction::PasteBuffer(_) = action {

@@ -382,7 +382,7 @@ fn s2a1_rotation_rename_reset_gap_refusal_cancel_retry_and_old_fd_are_fenced() {
         (generation, 0),
     )
     .expect("proof");
-    let seal = proof.seal_prefix().expect("prefix");
+    let seal = proof.seal_prefix_for_test().expect("prefix");
     let shared = crate::services::discord::make_shared_data_for_tests();
     let coord = shared.tmux_relay_coord(channel);
     assert_eq!(
@@ -406,7 +406,7 @@ fn s2a1_rotation_rename_reset_gap_refusal_cancel_retry_and_old_fd_are_fenced() {
     ));
     assert_eq!(std::fs::read(&path).expect("unchanged"), bytes);
     assert!(
-        pin.is_current(),
+        pin.is_current_for_test(),
         "refused rotation does not mutate the source"
     );
     context.all_data_is_empty = true;
@@ -418,7 +418,7 @@ fn s2a1_rotation_rename_reset_gap_refusal_cancel_retry_and_old_fd_are_fenced() {
         *hook = Some(Box::new(move || {
             observed.set(true);
             assert!(
-                !previous.is_current(),
+                !previous.is_current_for_test(),
                 "revision changes before rename publishes"
             );
             assert_eq!(
@@ -439,7 +439,7 @@ fn s2a1_rotation_rename_reset_gap_refusal_cancel_retry_and_old_fd_are_fenced() {
         panic!("idle owned rotation must run")
     };
     assert!(reached.get());
-    assert!(!pin.is_current());
+    assert!(!pin.is_current_for_test());
     assert!(
         !seal.is_current(),
         "a retained old fd cannot certify the replacement"
@@ -463,8 +463,8 @@ fn s2a1_rotation_rename_reset_gap_refusal_cancel_retry_and_old_fd_are_fenced() {
             .is_err(),
             "cancel a refused reset retry"
         );
-        assert!(!pin.is_current());
-        assert!(current.is_current());
+        assert!(!pin.is_current_for_test());
+        assert!(current.is_current_for_test());
         realign_frontier_after_rotation(&shared, channel, session, new_size).await;
         assert!(
             sticky_is_armed(channel),
@@ -473,16 +473,16 @@ fn s2a1_rotation_rename_reset_gap_refusal_cancel_retry_and_old_fd_are_fenced() {
     });
     retry_sticky_frontier_realign(&shared, channel, session);
     assert!(sticky_is_armed(channel));
-    assert!(!pin.is_current());
+    assert!(!pin.is_current_for_test());
     drop(admission);
     retry_sticky_frontier_realign(&shared, channel, session);
     assert!(!sticky_is_armed(channel));
     assert!(coord.frontier_tuple_for_tests().0 <= new_size);
     assert_eq!(coord.frontier_tuple_for_tests().2, 1);
     assert!(!coord.frontier_tuple_for_tests().3);
-    assert!(!pin.is_current());
+    assert!(!pin.is_current_for_test());
     assert!(
-        current.is_current(),
+        current.is_current_for_test(),
         "reset cannot restore or replace the source revision"
     );
     tc::cleanup_session_temp_files(session);

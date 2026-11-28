@@ -15,7 +15,7 @@ use crate::services::tui_o::store::agy_spool::replay::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct AgyReadPermit {
+pub struct AgyReadPermit {
     pub(crate) target: AgyTarget,
     pub(crate) generation: NonZeroU64,
     incarnation: uuid::Uuid,
@@ -34,7 +34,7 @@ enum Phase {
     Retired,
 }
 
-pub(crate) struct AgyShadowHost {
+pub struct AgyShadowHost {
     root: PathBuf,
     gate: Arc<OwnershipGate>,
     permit: AgyReadPermit,
@@ -42,7 +42,7 @@ pub(crate) struct AgyShadowHost {
 }
 
 impl AgyShadowHost {
-    pub(crate) fn start(
+    pub fn start(
         root: PathBuf,
         target: AgyTarget,
         gate: Arc<OwnershipGate>,
@@ -118,7 +118,7 @@ impl AgyShadowHost {
     }
 
     /// Ready after source validation and confirmation that prior Legacy work is settled.
-    pub(crate) fn adopt(
+    pub fn adopt(
         &self,
         previous: &BTreeMap<u64, AgyFrontier>,
         prior_legacy_settled: bool,
@@ -194,7 +194,7 @@ impl AgyShadowHost {
     }
 }
 
-pub(crate) fn spool_destinations(root: &Path) -> io::Result<Vec<u64>> {
+pub fn spool_destinations(root: &Path) -> io::Result<Vec<u64>> {
     let store = checked_dir(checked_dir(root.to_owned())?.join(STORE_DIR_NAME));
     let store = match store {
         Ok(store) => store,

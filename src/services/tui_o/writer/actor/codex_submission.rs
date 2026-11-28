@@ -15,21 +15,21 @@ use crate::services::tui_prompt_dedupe::codex_verified::provenance::{
 use tokio::sync::{mpsc, oneshot};
 
 #[derive(Clone, Debug)]
-pub(crate) struct Port {
+pub struct Port {
     suspension: super::super::suspension::Suspension,
     generation: u64,
     run: Arc<()>,
     send: mpsc::Sender<Request>,
 }
 
-pub(crate) struct Receiver {
+pub struct Receiver {
     generation: u64,
     run: Arc<()>,
     receive: mpsc::Receiver<Request>,
 }
 
-pub(crate) enum Operation {
-    #[cfg(test)]
+pub enum Operation {
+    #[cfg(any(test, feature = "test-support"))]
     Prepare(SubmitFloor),
     Capture(Box<(PreparedLaunch, ExecutionProofRef)>),
     Close(Box<CodexEpisodeSpan>),
@@ -55,35 +55,72 @@ fn suspended_failure() -> CommandFailure {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct Reply {
-    generation: u64,
-    run: Arc<()>,
-    closed: Option<Closed>,
-    prepared: Option<Prepared>,
-    read_back: Option<ReadBack>,
-    deny: Option<DenyRecorded>,
+mod reply {
+    use super::*;
+
+    #[derive(Debug)]
+    pub struct Reply {
+        pub(super) generation: u64,
+        pub(super) run: Arc<()>,
+        pub(super) closed: Option<Closed>,
+        pub(super) prepared: Option<Prepared>,
+        pub(super) read_back: Option<ReadBack>,
+        pub(super) deny: Option<DenyRecorded>,
+    }
 }
 
-#[derive(Debug)]
-pub(crate) struct Prepared {
-    run: Arc<()>,
-    floor: NativeFloor,
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use reply::Reply;
+#[cfg(any(test, feature = "test-support"))]
+pub use reply::Reply;
+
+mod prepared {
+    use super::*;
+
+    #[derive(Debug)]
+    pub struct Prepared {
+        pub(super) run: Arc<()>,
+        pub(super) floor: NativeFloor,
+    }
 }
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use prepared::Prepared;
+#[cfg(any(test, feature = "test-support"))]
+pub use prepared::Prepared;
 
 impl Prepared {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn floor_for_test(&self) -> &NativeFloor {
+        self.floor()
+    }
+
     pub(crate) fn floor(&self) -> &NativeFloor {
         &self.floor
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct Closed {
-    run: Arc<()>,
-    durable: DurableClosedEpisode,
+mod closed {
+    use super::*;
+
+    #[derive(Debug)]
+    pub struct Closed {
+        pub(super) run: Arc<()>,
+        pub(super) durable: DurableClosedEpisode,
+    }
 }
 
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use closed::Closed;
+#[cfg(any(test, feature = "test-support"))]
+pub use closed::Closed;
+
 impl Closed {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn span_for_test(&self) -> &CodexEpisodeSpan {
+        self.span()
+    }
+
     pub(crate) fn span(&self) -> &CodexEpisodeSpan {
         self.durable.span()
     }
@@ -123,7 +160,7 @@ impl Port {
         self.suspension.is_empty()
     }
 
-    pub(crate) fn new(generation: u64) -> (Self, Receiver) {
+    pub fn new(generation: u64) -> (Self, Receiver) {
         let run = Arc::new(());
         let (send, receive) = mpsc::channel(4);
         let receiver = Receiver {
@@ -143,7 +180,7 @@ impl Port {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn same_run(&self, other: &Self) -> bool {
+    pub fn same_run(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.run, &other.run)
     }
 
@@ -171,6 +208,11 @@ impl Port {
             return Err(suspended_failure());
         }
         answer
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn request_for_test(&self, operation: Operation) -> Result<Reply, String> {
+        self.request(operation).await
     }
 
     pub(crate) async fn request(&self, operation: Operation) -> Result<Reply, String> {
@@ -269,7 +311,7 @@ impl Receiver {
             Err(StoreError::Rejected("foreign actor command".into()))
         } else {
             match request.operation {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 Operation::Prepare(floor) => {
                     if let SubmitFloor::NativeFloor(floor) = &floor {
                         prepared = Some((**floor).clone());
@@ -454,13 +496,23 @@ impl crate::services::tui_o::writer::host::Readiness {
 
     /// Consumers must be bounded and synchronous, without re-entering Readiness.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn with_prepared_reply<T>(
+    pub fn with_prepared_reply<T>(
         &self,
         channel: u64,
         reply: Reply,
         consume: impl FnOnce(&Prepared) -> T,
     ) -> Result<T, &'static str> {
         self.with_submission(channel, |port| Ok(consume(&port.take_prepared(reply)?)))
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_closed_reply_for_test<T>(
+        &self,
+        channel: u64,
+        reply: Reply,
+        issue: impl FnOnce(&Closed) -> T,
+    ) -> Result<T, &'static str> {
+        self.with_closed_reply(channel, reply, issue)
     }
 
     /// Consumers must be bounded and synchronous, without re-entering Readiness.
@@ -478,7 +530,7 @@ thread_local! {
     static SPAWN: std::cell::RefCell<Option<Receiver>> = const { std::cell::RefCell::new(None) };
 }
 
-pub(crate) fn spawning<T>(receiver: Receiver, spawn: impl FnOnce() -> T) -> T {
+pub fn spawning<T>(receiver: Receiver, spawn: impl FnOnce() -> T) -> T {
     struct Scope;
     impl Drop for Scope {
         fn drop(&mut self) {

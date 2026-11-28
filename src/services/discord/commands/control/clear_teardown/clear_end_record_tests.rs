@@ -8,7 +8,7 @@ use poise::serenity_prelude::ChannelId;
 
 use super::*;
 use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
-use crate::services::provider_teardown::tests::test_support::FakeTmux;
+use crate::services::provider_teardown::test_support::FakeTmux;
 use crate::services::tmux_common as tc;
 use crate::services::tui_o::store::clear_end;
 use crate::services::tui_prompt_dedupe::binding_context::{BindingContext, PreparedIncarnation};

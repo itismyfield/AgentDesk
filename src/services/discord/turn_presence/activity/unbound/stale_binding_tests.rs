@@ -3,7 +3,7 @@ use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::discord::commands::control::codex_clear_relaunch_tests::settled_owner_observation;
 use crate::services::discord::turn_presence::activity::tests::BindingRoot;
-use crate::services::platform::tmux::session_inventory::tests::{
+use crate::services::platform::tmux::session_inventory::test_support::{
     ChannelCommand, ChannelProbeTrace,
 };
 use crate::services::tui_prompt_dedupe::binding_events as p5;
@@ -592,7 +592,7 @@ async fn s1_canonical_missing_namespace_or_tuple_mismatch_keeps_hold_pg() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn s1_hosted_records_and_nonlocal_registration_are_not_recovered_pg() {
-    use crate::db::dispatched_sessions::hosted_execution::tests::{record, wire};
+    use crate::db::dispatched_sessions::hosted_execution::test_support::{record, wire};
     for (offset, case) in [
         "herdr",
         "json-null",

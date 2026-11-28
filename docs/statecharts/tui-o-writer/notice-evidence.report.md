@@ -100,3 +100,9 @@ fairness는 추가하지 않았다. 기존13 NoticeEvidence cfg의 기대 결과
 Code input: merged f7047a7cd4e42917ac278db888806e5abbe11670. A saved budget root is retried only after NotFound (writer/local_retry/notice_selection.rs:13); its Prepared audit row is distinct from an uncertain effect. The legacy source policy must run again before the first POST poll, through writer/input_notices/admission.rs. Native projection already rejects the same pre-v1 source frame.
 
 NoticeEvidenceLegacyRetryBefore.cfg expects LegacyRetryNoPost and NoPostExempt safety RED, and LegacyRetryExcluded liveness RED. NoticeEvidenceLegacyRetryAfter.cfg is GREEN. The new source exclusion permits only a known-effect-free legacy retry to leave Prepared as Excluded; uncertain/direct Prepared keeps its prior rule. All previous fifteen configs retain their expected results. The checked seventeen-config prototype is copied byte-for-byte; the source and data row evidence is in the lane report.
+
+## 턴 도중 흡수 행의 Materialize 경계
+
+`NoticeEvidence`의 기존 설정은 Materialize가 진행된 뒤의 정산을 다룬다.
+[흡수 입력 모델](absorbed-notice.report.md)이 인계 이후의 원본 캡처와 Materialize 후보 판정을
+분리해 command-only 유실 및 user/command 쌍의 중복을 재시작 재생과 함께 검증한다.

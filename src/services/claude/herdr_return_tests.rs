@@ -3,28 +3,30 @@ use std::sync::{Arc, Mutex};
 
 use super::*;
 use crate::config::{TestEnvVarGuard, TestRuntimeRootGuard};
-use crate::db::dispatched_sessions::hosted_execution::tests::{owner, record};
+use crate::db::dispatched_sessions::hosted_execution::test_support::{owner, record};
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedLookup, HostedLookupKey, HostedRecord, load_hosted_execution_pg,
 };
 use crate::services::tmux_common::{self as tc, host_marker};
 use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
-use crate::services::tui_prompt_dedupe::{herdr_listed_execution, install_herdr_execution};
+#[cfg(test)]
+use crate::services::tui_prompt_dedupe::herdr_listed_execution;
+use crate::services::tui_prompt_dedupe::install_herdr_execution;
 
 const CHANNEL: u64 = 7_504;
 const LOGICAL: &str = "AgentDesk-claude-return";
 
 /// One host's earlier Claude: running while `alive`; an `/exit` ends it unless `stays`.
 #[derive(Default)]
-pub(crate) struct Side {
-    pub(crate) alive: bool,
+pub struct Side {
+    pub alive: bool,
     unknown: bool,
     draft: bool,
     stays: bool,
     reads: usize,
-    pub(crate) exits: usize,
+    pub exits: usize,
     /// A flag the `/exit` that ends it writes, as its host sees the end.
-    pub(crate) ends: Option<PathBuf>,
+    pub ends: Option<PathBuf>,
 }
 
 struct View(Arc<Mutex<Side>>);
@@ -35,14 +37,14 @@ type StandIns = Vec<(String, Arc<Mutex<Side>>, Arc<Mutex<Side>>)>;
 static STAND_INS: Mutex<StandIns> = Mutex::new(Vec::new());
 
 /// `logical`'s Herdr and tmux Claude as every production return reads them while this lives.
-pub(crate) struct StandIn {
+pub struct StandIn {
     logical: String,
-    pub(crate) herdr: Arc<Mutex<Side>>,
-    pub(crate) tmux: Arc<Mutex<Side>>,
+    pub herdr: Arc<Mutex<Side>>,
+    pub tmux: Arc<Mutex<Side>>,
 }
 
 impl StandIn {
-    pub(crate) fn new(logical: &str) -> Self {
+    pub fn new(logical: &str) -> Self {
         let (herdr, tmux) = (Arc::<Mutex<Side>>::default(), Arc::<Mutex<Side>>::default());
         let mut stand_ins = STAND_INS.lock().unwrap_or_else(|e| e.into_inner());
         stand_ins.retain(|(key, _, _)| key != logical);
@@ -267,6 +269,7 @@ impl Drop for Fixture {
     }
 }
 
+#[cfg(test)]
 fn running() -> Ports {
     let ports = Ports::default();
     ports.herdr.lock().unwrap().alive = true;
@@ -481,7 +484,7 @@ fn b7_a_session_moved_on_from_its_launch_returns_under_the_launch_account_pg() {
 }
 
 /// Makes `profile` the configured Claude account, with its own managed home under a scratch HOME.
-pub(crate) fn claude_account(profile: &str) -> (TestEnvVarGuard, tempfile::TempDir, PathBuf) {
+pub fn claude_account(profile: &str) -> (TestEnvVarGuard, tempfile::TempDir, PathBuf) {
     let user = tempfile::tempdir().unwrap();
     let guard = TestEnvVarGuard::set_path_after_shared_test_env_lock("HOME", user.path());
     let claude = crate::services::provider::ProviderKind::Claude;

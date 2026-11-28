@@ -291,11 +291,6 @@ fn isolated_cswap_fixture(name: &str, rate_limited: bool) -> bool {
     true
 }
 
-pub(crate) fn with_locked_quota_cache<T>(run: impl FnOnce() -> T) -> T {
-    let _guard = CACHE.write().unwrap();
-    run()
-}
-
 pub(super) fn now() -> DateTime<Utc> {
     "2026-10-23T00:00:00Z".parse().unwrap()
 }

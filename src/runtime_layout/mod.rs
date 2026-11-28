@@ -1,9 +1,9 @@
-pub(crate) mod boot_id;
+pub mod boot_id;
 mod config_merge;
 mod legacy_migration;
 mod paths;
 mod skill_refresh;
-mod skill_sync;
+pub mod skill_sync;
 #[cfg(windows)]
 mod windows_links;
 
@@ -26,9 +26,8 @@ pub use paths::{
     org_schema_path, resolve_memory_path, shared_agent_knowledge_dir, shared_prompt_path,
 };
 
-/// Source checkout root at build time. In-crate readers go through this so a manifest
-/// relocation only has to change this definition.
-pub(crate) const REPO_ROOT: &str = env!("CARGO_MANIFEST_DIR");
+/// Source checkout root at build time, set by this crate's build script from its manifest location.
+pub(crate) const REPO_ROOT: &str = env!("ADK_REPO_ROOT");
 
 pub const MEMORY_LAYOUT_VERSION: u32 = 2;
 const DEFAULT_MEMORY_BACKEND: &str = "auto";
@@ -317,17 +316,14 @@ pub fn sync_managed_skills(root: &Path) -> Result<SkillSyncReport, String> {
 
 /// Copies a skill tree as the refresh path does, for the shipped-tree test in the root test host.
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn copy_skill_dir_resolving_symlinks_for_test(
-    src: &Path,
-    dest: &Path,
-) -> Result<(), String> {
+pub fn copy_skill_dir_resolving_symlinks_for_test(src: &Path, dest: &Path) -> Result<(), String> {
     skill_sync::copy_skill_dir_resolving_symlinks(src, dest)
 }
 
 /// Workspace directory names the skill distributor actually walks. Manifest
 /// workspace names are resolved against these and silently dropped otherwise,
 /// so this set - not the configured roster - decides delivery (#5720).
-pub(crate) fn distributed_workspace_names(root: &Path) -> Result<Vec<String>, String> {
+pub fn distributed_workspace_names(root: &Path) -> Result<Vec<String>, String> {
     skill_sync::discover_workspaces(root)
 }
 
@@ -368,7 +364,7 @@ fn ensure_layout_dirs(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn ensure_credential_layout(root: &Path) -> Result<(), String> {
+pub fn ensure_credential_layout(root: &Path) -> Result<(), String> {
     let canonical = credential_dir(root);
     let legacy = legacy_credential_dir(root);
 

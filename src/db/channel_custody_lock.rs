@@ -2,7 +2,7 @@
 use crate::domain::intake_identity::OwnerIdentity;
 use sqlx::{Postgres, Transaction};
 
-pub(crate) async fn lock(
+pub async fn lock(
     tx: &mut Transaction<'_, Postgres>,
     id: &OwnerIdentity,
 ) -> Result<(), sqlx::Error> {

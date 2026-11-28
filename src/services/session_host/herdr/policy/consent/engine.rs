@@ -10,7 +10,7 @@ use super::{
 };
 use std::sync::Arc;
 
-pub(crate) enum Event<'a> {
+pub enum Event<'a> {
     Hold {
         question: Box<Question>,
         now: u64,
@@ -41,10 +41,7 @@ pub(crate) enum Event<'a> {
 }
 
 /// Startup uses the same typed recovery dispatch without interpreting card or custody effects.
-pub(crate) fn recover(
-    store: &ConsentStore,
-    event: Event<'_>,
-) -> Result<Option<Transition>, String> {
+pub fn recover(store: &ConsentStore, event: Event<'_>) -> Result<Option<Transition>, String> {
     match event {
         Event::Recover(key) => Workflow(store).recover(&key),
         Event::BootRecover(key, authority) => Workflow(store).boot_recover(&key, authority),
@@ -53,12 +50,12 @@ pub(crate) fn recover(
 }
 
 #[async_trait::async_trait]
-pub(crate) trait Owner: Send {
+pub trait Owner: Send {
     async fn current(&mut self, consent: &Consent) -> Result<Current, String>;
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum SendFailure {
+pub enum SendFailure {
     Definitive(String),
     Unknown(String),
 }
@@ -73,13 +70,13 @@ impl SendFailure {
 }
 
 #[async_trait::async_trait]
-pub(crate) trait Cards: Send {
+pub trait Cards: Send {
     async fn send(&mut self, card: &card::Card) -> Result<u64, SendFailure>;
     async fn replace(&mut self, message: u64, card: &card::Card) -> Result<(), SendFailure>;
     async fn disable(&mut self, message: u64) -> Result<(), SendFailure>;
 }
 
-pub(crate) struct Engine<'a, S: CustodySink> {
+pub struct Engine<'a, S: CustodySink> {
     pub store: &'a ConsentStore,
     pub boot: &'a BootState,
     pub local_node: String,
@@ -126,7 +123,7 @@ impl<S: CustodySink> Engine<'_, S> {
         }
     }
 
-    pub(crate) async fn handle(
+    pub async fn handle(
         &mut self,
         event: Event<'_>,
         prepared: Option<Prepared>,

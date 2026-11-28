@@ -5,13 +5,13 @@ use sqlx::Row;
 use std::{fmt, sync::Arc};
 
 #[derive(Clone, Copy)]
-pub(crate) struct OutboxAttachment<'a> {
+pub struct OutboxAttachment<'a> {
     pub filename: &'a str,
     pub content_type: &'a str,
     pub data: &'a [u8],
 }
 
-pub(crate) struct StoredOutboxAttachment {
+pub struct StoredOutboxAttachment {
     pub filename: String,
     pub content_type: String,
     pub data: Vec<u8>,
@@ -37,7 +37,7 @@ impl fmt::Debug for StoredOutboxAttachment {
     }
 }
 
-pub(crate) fn decode_claimed_attachment(
+pub fn decode_claimed_attachment(
     row: &sqlx::postgres::PgRow,
 ) -> Result<Option<Arc<StoredOutboxAttachment>>, &'static str> {
     let filename: Option<String> = row

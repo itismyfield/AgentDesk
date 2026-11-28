@@ -3,7 +3,7 @@ use super::*;
 static PREPARED_RUNTIME_PATH: OnceLock<OsString> = OnceLock::new();
 
 /// Read a completed PATH snapshot without starting or waiting for shell discovery.
-pub(crate) fn prepared_runtime_path() -> Option<&'static OsStr> {
+pub fn prepared_runtime_path() -> Option<&'static OsStr> {
     if crate::config::test_instance::requested() {
         return crate::config::test_instance::environment::runtime_path()
             .ok()
@@ -37,7 +37,7 @@ pub(super) fn runtime_path_entries() -> Vec<PathBuf> {
 }
 
 /// Build a `Command` for `program` that runs with the merged runtime PATH.
-pub(crate) fn runtime_command(program: impl AsRef<OsStr>) -> std::io::Result<Command> {
+pub fn runtime_command(program: impl AsRef<OsStr>) -> std::io::Result<Command> {
     let path = merged_runtime_path().map(OsString::from);
     if crate::config::test_instance::requested() && path.is_none() {
         return Err(std::io::Error::new(
@@ -50,7 +50,7 @@ pub(crate) fn runtime_command(program: impl AsRef<OsStr>) -> std::io::Result<Com
 
 /// Build a `Command` for `program` with `path` as its PATH. A bare name must resolve to an
 /// absolute path first: std forks instead of posix_spawn when PATH changes for a bare name.
-pub(crate) fn command_with_path(program: &OsStr, path: Option<&OsStr>) -> std::io::Result<Command> {
+pub fn command_with_path(program: &OsStr, path: Option<&OsStr>) -> std::io::Result<Command> {
     let mut command = Command::new(spawn_program(program, path)?);
     if let Some(path) = path {
         command.env("PATH", path);

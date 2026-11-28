@@ -4,7 +4,7 @@ use sqlx::PgPool;
 
 /// A receipt's lifecycle; a spelling this build does not know is kept and blocks a rerun.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Disposition {
+pub enum Disposition {
     RegisteredNotStarted,
     StartedUnclassified,
     StartupFailedNoEffect,
@@ -27,27 +27,30 @@ impl From<String> for Disposition {
 }
 
 impl Disposition {
-    pub(crate) fn blocks_rerun(&self) -> bool {
+    pub fn blocks_rerun(&self) -> bool {
         !matches!(self, Self::RegisteredNotStarted | Self::ClassifiedNormal)
     }
 }
 
 /// One receipt as stored: its full source set, current attempt and preserved request.
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
-pub(crate) struct ReceiptSnapshot {
-    pub(crate) id: i64,
-    pub(crate) sources: Vec<String>,
+pub struct ReceiptSnapshot {
+    pub id: i64,
+    pub sources: Vec<String>,
     #[sqlx(try_from = "String")]
-    pub(crate) disposition: Disposition,
-    pub(crate) episode_nonce: Option<String>,
-    pub(crate) request_key: Option<String>,
+    pub disposition: Disposition,
+    pub episode_nonce: Option<String>,
+    pub request_key: Option<String>,
     pub(crate) request_hash: Option<String>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub original_text: String,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) original_text: String,
     pub(crate) preserved: Option<serde_json::Value>,
 }
 
 /// Every receipt of `provider` in `channel` that names any of `sources`, or that `key` names.
-pub(crate) async fn receipts_for_request(
+pub async fn receipts_for_request(
     pool: &PgPool,
     provider: &str,
     channel: &str,
