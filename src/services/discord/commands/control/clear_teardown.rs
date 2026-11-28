@@ -69,6 +69,8 @@ pub(super) async fn end_session(
     clear_epoch: &crate::services::herdr_launch::clear_epoch::ClearGuard,
     report: &mut ClearReport,
 ) {
+    #[cfg(unix)]
+    forbid_idle_resume(shared, provider, channel_id, report);
     let host = crate::services::discord::admin_host_guard::host_decision_of;
     let herdr = host(shared, provider, channel_id.get()).await.is_herdr();
     #[cfg(unix)]
@@ -140,6 +142,25 @@ pub(super) async fn end_session(
         }
     }
     drop(transition);
+}
+
+/// Ends any thread an idle end kept on the channel, whether or not this clear can resolve its
+/// session key or read its execution; a cancel that does not land leaves the reset unclaimed.
+#[cfg(unix)]
+fn forbid_idle_resume(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    report: &mut ClearReport,
+) {
+    use crate::services::codex::herdr_turn::restart_intent::idle_resume::forbid_channel;
+    let channel = channel_id.get().to_string();
+    if let Err(error) = forbid_channel(provider.as_str(), &shared.token_hash, &channel) {
+        report.fail("idle_resume", &error);
+        report.execution = Some(super::clear_report::ExecutionCleanup::Pending(
+            "idle resume kept".into(),
+        ));
+    }
 }
 
 /// Terminates the channel's live Herdr execution; false when none is known to run, so the
