@@ -250,8 +250,7 @@ where
         Some(deadline) if Instant::now() < deadline => deadline,
         Some(_) => return Err(PgWorkError::Deadline),
         None => {
-            return block_on_pg_result(pool, future_factory, |error| error)
-                .map_err(PgWorkError::Other);
+            return block_on_pg_result(pool, future_factory, PgWorkError::Other);
         }
     };
     block_on_pg_until(pool, deadline, future_factory, |error| error)
