@@ -479,7 +479,7 @@ pub(in crate::services::discord) mod capsule_observation {
         pub has_startup_snapshot: bool,
         pub startup_snapshot: Option<serde_json::Value>,
         pub restored_response_seed: String,
-        pub(in crate::services::discord::tmux::tmux_watcher) authority: WatcherSourceAuthority,
+        pub(in crate::services::discord) authority: WatcherSourceAuthority,
         pub opened_source: crate::services::cluster::stream_relay::SourceFileIdentity,
         pub cancel_address: usize,
         pub has_restored_seed: bool,

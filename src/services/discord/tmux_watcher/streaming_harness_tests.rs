@@ -289,7 +289,7 @@ pub(in crate::services::discord) struct Harness {
     pub(in crate::services::discord) channel: ChannelId,
     pub(in crate::services::discord) tmux: String,
     pub(in crate::services::discord) path: String,
-    http: Arc<serenity::Http>,
+    pub(in crate::services::discord) http: Arc<serenity::Http>,
     discord: Arc<Mutex<Discord>>,
     watcher: Option<Controls>,
 }
