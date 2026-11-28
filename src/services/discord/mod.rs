@@ -194,6 +194,14 @@ mod tmux_watcher_registry;
 #[cfg(test)]
 mod tmux_watcher_registry_restore_tests;
 #[cfg(test)]
+mod dl_turn_bridge_tests;
+#[cfg(all(test, unix))]
+mod dl_turn_bridge_unix_tests;
+#[cfg(test)]
+mod dl_turn_presence_tests;
+#[cfg(all(test, unix))]
+mod dl_turn_presence_unix_tests;
+#[cfg(test)]
 mod krx_claude_tests;
 #[cfg(all(test, unix))]
 mod krx_claude_unix_tests;
