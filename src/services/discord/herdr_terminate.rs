@@ -250,59 +250,19 @@ pub(super) async fn retire_confirmed(
     }
 }
 
-#[cfg(test)]
-use crate::services::dispatched_sessions::herdr_probe_tests::SettlementWindowProbe;
-#[cfg(test)]
-pub(crate) use crate::services::dispatched_sessions::herdr_probe_tests::{
-    probe_before_released, probe_before_selection,
+#[cfg(any(test, feature = "test-support"))]
+#[path = "herdr_terminate/terminate_hook_tests.rs"]
+mod terminate_hook_tests;
+#[cfg(any(test, feature = "test-support"))]
+use terminate_hook_tests::{
+    AFTER_CAPTURE, AFTER_CLOSE, AFTER_FENCE, AFTER_SETTLEMENT, BEFORE_POSTLUDE, SETTLEMENT_WINDOW,
+    run_probe,
 };
-#[cfg(test)]
-type ProbeSlot = std::cell::RefCell<Option<SettlementWindowProbe>>;
-#[cfg(test)]
-thread_local! {
-    static SETTLEMENT_WINDOW: ProbeSlot = const { std::cell::RefCell::new(None) };
-    static AFTER_SETTLEMENT: ProbeSlot = const { std::cell::RefCell::new(None) };
-    static AFTER_CAPTURE: ProbeSlot = const { std::cell::RefCell::new(None) };
-    static AFTER_FENCE: ProbeSlot = const { std::cell::RefCell::new(None) };
-    static AFTER_CLOSE: ProbeSlot = const { std::cell::RefCell::new(None) };
-    static BEFORE_POSTLUDE: ProbeSlot = const { std::cell::RefCell::new(None) };
-}
-/// Runs once between the hold release and the captured-turn settlement on this thread.
-#[cfg(test)]
-pub(crate) fn probe_settlement_window(probe: SettlementWindowProbe) {
-    SETTLEMENT_WINDOW.with(|slot| *slot.borrow_mut() = Some(probe));
-}
-/// Runs once after the captured-turn settlement, while the exclusion is still held.
-#[cfg(test)]
-pub(crate) fn probe_after_settlement(probe: SettlementWindowProbe) {
-    AFTER_SETTLEMENT.with(|slot| *slot.borrow_mut() = Some(probe));
-}
-/// Runs once after the turn is captured and before the transition is taken.
-#[cfg(test)]
-pub(crate) fn probe_after_capture(probe: SettlementWindowProbe) {
-    AFTER_CAPTURE.with(|slot| *slot.borrow_mut() = Some(probe));
-}
-/// Runs once right after the termination fence is taken, before any close.
-#[cfg(test)]
-pub(crate) fn probe_after_fence(probe: SettlementWindowProbe) {
-    AFTER_FENCE.with(|slot| *slot.borrow_mut() = Some(probe));
-}
-/// Runs once after the close returned, or after the pane read as already ended.
-#[cfg(test)]
-pub(crate) fn probe_after_close(probe: SettlementWindowProbe) {
-    AFTER_CLOSE.with(|slot| *slot.borrow_mut() = Some(probe));
-}
-/// Runs once when a scoped run hands its exclusion to an HTTP postlude, before the postlude.
-#[cfg(test)]
-pub(crate) fn probe_before_postlude(probe: SettlementWindowProbe) {
-    BEFORE_POSTLUDE.with(|slot| *slot.borrow_mut() = Some(probe));
-}
-#[cfg(test)]
-async fn run_probe(slot: &'static std::thread::LocalKey<ProbeSlot>) {
-    if let Some(probe) = slot.with(|slot| slot.borrow_mut().take()) {
-        probe().await;
-    }
-}
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use terminate_hook_tests::{
+    probe_after_capture, probe_after_close, probe_after_fence, probe_after_settlement,
+    probe_before_postlude, probe_settlement_window,
+};
 
 /// `exclusion` (transition guard and fence) comes back only once the turn settled and is dropped
 /// on any other answer, so input arriving once the hold is gone waits in the queue.
@@ -318,10 +278,10 @@ async fn settle_and_release<E>(
             "retired but hold release incomplete".into(),
         ));
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     run_probe(&SETTLEMENT_WINDOW).await;
     let result = settle_captured(shared, provider, turn).await;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     run_probe(&AFTER_SETTLEMENT).await;
     match result {
         TerminationResult::Retired => Ok(exclusion),
@@ -484,7 +444,7 @@ async fn terminate_scoped(
     if never_started.is_some() && turn.is_some() {
         return Err(Refused("turn active".into()));
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     run_probe(&AFTER_CAPTURE).await;
     let Ok(transition) = shared.session_transition_locks.acquire(channel).await else {
         return Err(Refused("transition busy".into()));
@@ -552,7 +512,7 @@ async fn terminate_scoped(
         Arc::new(fence)
     };
     let unsent = UnsentClose((!retired).then(|| fence.clone()));
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     run_probe(&AFTER_FENCE).await;
     if load(pool, &request.session_key).await.as_ref() != Ok(&row)
         || !http_force::dispatch_holds(pool, &row, expected.as_ref()).await
@@ -598,7 +558,7 @@ async fn terminate_scoped(
         if !ended && record.state != HostedState::Retired {
             close_fenced(&target, &fence).await?;
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         run_probe(&AFTER_CLOSE).await;
         read_end(target, record.clone()).await?;
         if record.state != HostedState::Retired {
@@ -678,7 +638,10 @@ pub(crate) async fn close_unrecorded(
     close_fenced(&target, &fence).await?;
     read_end(target, orphan.clone()).await
 }
-async fn load(pool: &PgPool, key: &str) -> Result<HostedObservation, TerminationResult> {
+pub(in crate::services::discord) async fn load(
+    pool: &PgPool,
+    key: &str,
+) -> Result<HostedObservation, TerminationResult> {
     match hosted_execution::load_hosted_execution_pg(pool, HostedLookupKey::SessionKey(key)).await {
         HostedLookup::Found(row) => Ok(row),
         HostedLookup::Missing => Err(TerminationResult::Refused("missing row".into())),
@@ -783,7 +746,7 @@ impl Logged {
 }
 
 /// Queue access for settlement-window tests that live outside the discord module.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_queue {
     use super::{Arc, ChannelId, ProviderKind, SharedData};
     use serenity::model::id::{MessageId, UserId};
@@ -839,7 +802,7 @@ pub(crate) mod test_queue {
 }
 
 /// An active turn for settlement tests that live outside the discord module.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_turn {
     use super::super::inflight::{InflightTurnState, RelayOwnerKind, save_inflight_state};
     use super::super::turn_finalizer::CompletionAdmissionPlan;
@@ -949,13 +912,9 @@ pub(crate) mod test_turn {
     }
 }
 
-#[cfg(test)]
-#[path = "herdr_terminate_route_tests.rs"]
+#[cfg(any(test, feature = "test-support"))]
+#[path = "herdr_terminate/route_fixture_tests.rs"]
 pub(crate) mod route_tests;
-
-#[cfg(test)]
-#[path = "herdr_terminate_exit_tests.rs"]
-mod exit_tests;
 
 #[cfg(test)]
 #[path = "herdr_terminate_tests.rs"]

@@ -15,13 +15,13 @@ use axum::http::StatusCode;
 use futures::FutureExt;
 use serde_json::{Value, json};
 
-use super::super::{
+use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::services::discord::health::HealthRegistry;
+use crate::services::discord::herdr_terminate::http_force::terminate_for_http;
+use crate::services::discord::herdr_terminate::{
     OperatorTerminate, TerminationResult, probe_after_capture, probe_after_close,
     probe_after_fence, probe_before_postlude, test_queue, test_turn,
 };
-use super::terminate_for_http;
-use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::krx_session_host_test_host::herdr_termination_rig as herdr;
 use crate::services::discord::{ChannelId, SharedData, inflight, runtime_store};
 use crate::services::provider::ProviderKind;
@@ -38,7 +38,7 @@ const JSON: (&str, &str) = ("content-type", "application/json");
 #[derive(Debug, PartialEq)]
 struct NoopPostlude;
 
-impl super::Released for NoopPostlude {
+impl crate::services::discord::herdr_terminate::http_force::Released for NoopPostlude {
     fn released(self) -> futures::future::BoxFuture<'static, Self> {
         async move { self }.boxed()
     }
@@ -99,7 +99,7 @@ impl Node {
         let db = TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
         let mut shared =
-            super::super::super::host_teardown_gate::test_support::shared_on(&pool).await;
+            crate::services::discord::host_teardown_gate::test_support::shared_on(&pool).await;
         let registry = Arc::new(HealthRegistry::new());
         Arc::get_mut(&mut shared).unwrap().health_registry = (&registry).into();
         registry.register("claude".into(), shared.clone()).await;
@@ -183,7 +183,7 @@ impl Node {
 
     /// Queues user message `id` behind whatever the channel holds.
     async fn enqueue(shared: &Arc<SharedData>, id: u64, text: &str) {
-        let persistence = super::super::super::queue_persistence_context(
+        let persistence = crate::services::discord::queue_persistence_context(
             shared,
             &ProviderKind::Claude,
             channel(),
@@ -290,7 +290,7 @@ fn intervention(id: u64, text: &str) -> Intervention {
         author_id: UserId::new(7),
         author_is_bot: false,
         message_id: MessageId::new(id),
-        queued_generation: super::super::super::runtime_store::process_generation(),
+        queued_generation: crate::services::discord::runtime_store::process_generation(),
         source_message_ids: vec![MessageId::new(id)],
         source_message_queued_generations: Vec::new(),
         source_text_segments: Vec::new(),
@@ -452,12 +452,12 @@ fn force_postlude_runs_before_transition_release_pg() {
         probe_before_postlude(Box::new(move || {
             Box::pin(async move {
                 let lease =
-                    super::super::super::session_transition::SessionTransitionLease::try_acquire(
+                    crate::services::discord::session_transition::SessionTransitionLease::try_acquire(
                         shared.as_ref(),
                         channel(),
                     );
                 assert!(lease.is_err(), "the channel transition is still held");
-                let other = super::super::super::make_shared_data_for_tests();
+                let other = crate::services::discord::make_shared_data_for_tests();
                 assert!(
                     other
                         .session_transition_locks
@@ -1053,7 +1053,7 @@ fn e07_root_replaced_force_race_pg() {
         let probe_flag = flag.clone();
         probe_before_postlude(Box::new(move || {
             Box::pin(async move {
-                let lease = super::super::super::session_transition::SessionTransitionLease::try_acquire(
+                let lease = crate::services::discord::session_transition::SessionTransitionLease::try_acquire(
                     shared.as_ref(),
                     channel(),
                 );
@@ -1072,7 +1072,7 @@ fn e07_root_replaced_force_race_pg() {
 // the dispatch, row and input queued after the clear left as the clear left them.
 #[test]
 fn e07_root_replaced_retired_is_not_http_success_pg() {
-    use super::super::super::commands::control::clear_channel_session_state;
+    use crate::services::discord::commands::control::clear_channel_session_state;
     let path = format!(
         "{}::e07_root_replaced_retired_is_not_http_success_pg",
         module_path!()
@@ -1094,11 +1094,11 @@ fn e07_root_replaced_retired_is_not_http_success_pg() {
         let db = TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
         let (shared, registry) =
-            super::super::super::host_teardown_gate::test_support::runtime(&pool).await;
+            crate::services::discord::host_teardown_gate::test_support::runtime(&pool).await;
         let provider = ProviderKind::Claude;
-        super::super::super::host_defer_gate::tests::map_channel(&shared, channel(), "e07-clear")
+        crate::services::discord::host_defer_gate::tests::map_channel(&shared, channel(), "e07-clear")
             .await;
-        let key = super::super::super::adk_session::build_adk_session_key;
+        let key = crate::services::discord::adk_session::build_adk_session_key;
         let key = key(&shared, channel(), &provider, None).await.unwrap();
         let switches = rig.bind(&pool, &shared.token_hash, &key, herdr::HostedState::Bound).await;
         let root = crate::config::runtime_root().unwrap().display().to_string();
@@ -1157,7 +1157,9 @@ fn e07_selection_change_refuses_before_close_pg() {
         let node = Node::bind(&rig, herdr::HostedState::Bound, Some(DISPATCH)).await;
         node.start(51, "turn-a", Some(DISPATCH)).await;
         let flag = ran();
-        super::super::probe_before_selection(e08::successor_takes_over(&node, flag.clone()));
+        crate::services::dispatched_sessions::herdr_probe_tests::probe_before_selection(
+            e08::successor_takes_over(&node, flag.clone()),
+        );
         let untouched = node.effects(&rig).await;
         let (status, reply) = node.cancel().await;
         assert!(flag.load(Ordering::SeqCst));

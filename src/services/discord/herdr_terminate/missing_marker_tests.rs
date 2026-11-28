@@ -1,8 +1,15 @@
 //! Production reader recovery over real Herdr and PostgreSQL.
-use super::*;
+use crate::db::dispatched_sessions::hosted_execution::HostedState;
 use crate::krx_session_host_tests::herdr_terminate_real_tests as real;
+use crate::services::discord::ChannelId;
+use crate::services::discord::herdr_terminate::root_replaced::{
+    AFTER_FINAL_PROOF, CAS_ATTEMPTS, result_for_test,
+};
+use crate::services::discord::herdr_terminate::test_queue;
 use crate::services::discord::recovery_engine::herdr_reader;
+use crate::services::provider::{CancelToken, ProviderKind};
 use real::missing_marker_rig::{CHANNEL, Case, TOKEN, child};
+use std::sync::Arc;
 impl Case {
     pub(crate) fn pass(&self) {
         let _enter = self.rt.enter();
@@ -10,7 +17,7 @@ impl Case {
         herdr_reader::reconnect_restarted_herdr_with_shared(&self.shared, &ProviderKind::Claude);
         eprintln!(
             "MM_RECOVERY {:?} counts={:?}",
-            super::result_for_test(&before),
+            result_for_test(&before),
             herdr_reader::reconnect_counts()
         );
     }
@@ -36,12 +43,10 @@ fn mm_orphan_retires_with_another_live_provider_pg() {
     let other_record = case.rt.block_on(real::stored(&case.pool, &other.key));
     case.ended();
     case.lose_marker();
-    case.rt.block_on(
-        crate::services::discord::herdr_terminate::test_queue::queue_original(
-            &case.shared,
-            ChannelId::new(CHANNEL),
-        ),
-    );
+    case.rt.block_on(test_queue::queue_original(
+        &case.shared,
+        ChannelId::new(CHANNEL),
+    ));
     let before = case.record();
     let panes = case.real.panes();
     case.pass();
@@ -55,13 +60,11 @@ fn mm_orphan_retires_with_another_live_provider_pg() {
     assert!(real::alive(&other.provider));
     assert_eq!(case.real.panes(), panes);
     assert_eq!(
-        case.rt.block_on(
-            crate::services::discord::herdr_terminate::test_queue::queued_texts(
-                &case.shared,
-                ChannelId::new(CHANNEL)
-            )
-        ),
-        vec![crate::services::discord::herdr_terminate::test_queue::ORIGINAL]
+        case.rt.block_on(test_queue::queued_texts(
+            &case.shared,
+            ChannelId::new(CHANNEL)
+        )),
+        vec![test_queue::ORIGINAL]
     );
     assert!(!crate::services::claude::herdr_turn::input_held(&case.execution.nonce).unwrap());
 }
@@ -346,7 +349,7 @@ fn mm_final_new_dispatch_keeps_pg() {
     AFTER_FINAL_PROOF.with(|slot| {
         *slot.borrow_mut() = Some(Box::new(move || {
             Box::pin(async move {
-                super::super::test_queue::queue_original(&shared, ChannelId::new(CHANNEL)).await;
+                test_queue::queue_original(&shared, ChannelId::new(CHANNEL)).await;
                 let selection = shared
                     .mailbox(ChannelId::new(CHANNEL))
                     .take_next_soft(crate::services::discord::queue_persistence_context(

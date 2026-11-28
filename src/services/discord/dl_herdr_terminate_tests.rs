@@ -1,1 +1,11 @@
-//! DL `herdr_terminate` 시험 가운데 ROOT 항목을 쓰는 것을 ROOT binary에서 돌리는 host. `#[path]` 선언만 둔다.
+#[cfg(unix)]
+#[path = "herdr_terminate/http_force_tests.rs"]
+mod http_force_tests;
+
+#[cfg(unix)]
+#[path = "herdr_terminate_exit_tests.rs"]
+mod exit_tests;
+
+#[cfg(unix)]
+#[path = "herdr_terminate_route_tests.rs"]
+mod route_tests;

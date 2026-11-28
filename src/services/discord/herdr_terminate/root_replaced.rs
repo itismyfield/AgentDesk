@@ -90,14 +90,18 @@ static CACHE: std::sync::LazyLock<std::sync::Mutex<BTreeMap<i64, Cached>>> =
 #[cfg(test)]
 thread_local! {
     static CACHE: std::cell::RefCell<BTreeMap<i64, Cached>> = const { std::cell::RefCell::new(BTreeMap::new()) };
-    pub(crate) static BEFORE_CAS: ProbeSlot = const { std::cell::RefCell::new(None) };
-    pub(crate) static AFTER_FINAL_PROOF: ProbeSlot = const { std::cell::RefCell::new(None) };
-    pub(crate) static CAS_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static BEFORE_CAS: terminate_hook_tests::ProbeSlot = const { std::cell::RefCell::new(None) };
     pub(crate) static CURRENT_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(crate) static TRANSITIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    pub(crate) static AFTER_CAS: ProbeSlot = const { std::cell::RefCell::new(None) };
+    pub(crate) static AFTER_CAS: terminate_hook_tests::ProbeSlot = const { std::cell::RefCell::new(None) };
     pub(crate) static CLEANUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
+#[cfg(any(test, feature = "test-support"))]
+#[path = "root_replaced_hook_tests.rs"]
+mod root_replaced_hook_tests;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use root_replaced_hook_tests::{AFTER_FINAL_PROOF, CAS_ATTEMPTS};
+
 fn cache<R>(use_it: impl FnOnce(&mut BTreeMap<i64, Cached>) -> R) -> R {
     #[cfg(test)]
     {
@@ -217,7 +221,7 @@ fn report(row: &HostedObservation, result: Recovery) -> Recovery {
     });
     result
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn result_for_test(row: &HostedObservation) -> Option<Recovery> {
     cache(|entries| {
         entries
@@ -521,7 +525,7 @@ async fn recover_inner(
         })
         .await
         .map_err(|e| e.to_string())??;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         run_probe(&AFTER_FINAL_PROOF).await;
         current(pool, row).await?;
         quiet(shared, &provider, channel, &record.owner.logical_key).await
@@ -532,7 +536,7 @@ async fn recover_inner(
         return held(e);
     }
     // Once CAS is attempted, its result may be uncertain: the nonce never reopens.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     CAS_ATTEMPTS.with(|count| count.set(count.get() + 1));
     if let Err(e) = retire_confirmed(pool, row, record).await {
         return held(format!("{e:?}"));
@@ -588,7 +592,3 @@ async fn cleanup(
     };
     report(row, result)
 }
-
-#[cfg(all(test, target_os = "linux"))]
-#[path = "missing_marker_tests.rs"]
-mod missing_marker_tests;

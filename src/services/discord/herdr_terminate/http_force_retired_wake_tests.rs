@@ -114,7 +114,8 @@ async fn claude_retire_withholds_same_nonce_admission_pg() {
         };
         dedupe::install_herdr_execution(&logical, listed);
         dedupe::admit_herdr_execution(&logical, listed);
-        let retired = super::super::super::retire_confirmed(&pool, &row, &bound).await;
+        let retired =
+            crate::services::discord::herdr_terminate::retire_confirmed(&pool, &row, &bound).await;
         assert_eq!(retired, Ok(()), "{listed}");
         let kept = dedupe::herdr_claim_admission(&logical, true).is_ok();
         assert_eq!(kept, admitted, "listed {listed}");

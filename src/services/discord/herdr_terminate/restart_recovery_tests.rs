@@ -1,7 +1,16 @@
-use super::*;
 use crate::config::TestRuntimeRootGuard;
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::db::dispatched_sessions::hosted_execution::{HostedRecord, HostedState};
+use crate::services::discord::SharedData;
+use crate::services::discord::herdr_terminate::restart_recovery::{
+    expected_for_restart, recover_ended,
+};
+use crate::services::discord::herdr_terminate::{
+    OperatorTerminate, RetiredExclusion, TerminationResult, load, probe_after_fence,
+};
 use crate::services::discord::krx_session_host_test_host::herdr_termination_rig as herdr;
+use sqlx::PgPool;
+use std::sync::Arc;
 
 const CHANNEL: u64 = 8_128_303;
 
@@ -166,7 +175,7 @@ fn restart_recovery_rechecks_dispatch_under_fence_pg() {
         let (db, pool, shared, key, _switches) = seeded(&rig, HostedState::Bound).await;
         rig.restore_shell();
         let (changed_pool, changed_key) = (pool.clone(), key.clone());
-        super::super::probe_after_fence(Box::new(move || Box::pin(async move {
+        probe_after_fence(Box::new(move || Box::pin(async move {
             let changed = sqlx::query("UPDATE sessions SET active_dispatch_id = 'moved-dispatch' WHERE session_key = $1")
                 .bind(changed_key).execute(&changed_pool).await.unwrap();
             assert_eq!(changed.rows_affected(), 1);

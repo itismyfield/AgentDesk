@@ -803,11 +803,12 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
 /// `handle_terminal` to panic so the live actor loop (single-threaded test
 /// runtime → same thread as the spawned actor task) exercises the real
 /// `catch_unwind` containment path.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod test_panic_hook {
     use std::cell::Cell;
 
     thread_local! {
+        #[cfg(test)]
         static ARMED: Cell<bool> = const { Cell::new(false) };
         // #3866: a SEPARATE one-shot fired from INSIDE `do_finalize` (after the
         // caller flipped the entry Pending->Finalizing), so a test can prove the
@@ -820,6 +821,7 @@ mod test_panic_hook {
     /// Arm the next (and only the next) `handle_terminal` to panic at the TOP,
     /// before `resolve_ledger_key` / the phase flip — exercises only the actor
     /// loop's outer guard (no ledger mutation runs).
+    #[cfg(test)]
     pub(super) fn arm_once() {
         ARMED.with(|a| a.set(true));
     }
@@ -833,6 +835,7 @@ mod test_panic_hook {
     }
 
     /// Consume the one-shot arm and panic if set.
+    #[cfg(test)]
     pub(super) fn maybe_panic() {
         if ARMED.with(|a| a.replace(false)) {
             panic!("injected finalize side-effect panic (#3866 test)");
@@ -849,7 +852,7 @@ mod test_panic_hook {
 
 /// Arms this thread's next `do_finalize` to panic, so a caller outside the finalizer can drive a
 /// terminal that is acknowledged `AlreadyFinalized` with its token still held.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(in crate::services::discord) fn arm_finalize_panic_once_for_test() {
     test_panic_hook::arm_in_finalize_once();
 }

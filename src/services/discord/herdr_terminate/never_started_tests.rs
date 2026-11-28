@@ -14,13 +14,16 @@ use crate::services::tui_prompt_dedupe::{binding_context, binding_events as even
 use crate::services::turn_orchestrator::{
     PendingQueueItem, RetryWaitCause, assert_original_and_ticket_kept, v2_queue,
 };
-use crate::test_support::wait::{WAIT_CAP, join_within, recv_within};
+use adk_test_support::test_support::wait::{WAIT_CAP, join_within, recv_within};
 use futures::FutureExt;
 use herdr::HostedState::{Pending, Retired};
 use poise::serenity_prelude::ChannelId;
+use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 
-use super::super::{NeverStartedTerminate, TerminationResult, terminate_never_started, test_turn};
+use crate::services::discord::herdr_terminate::{
+    NeverStartedTerminate, TerminationResult, terminate_never_started, test_turn,
+};
 
 const SESSION: &str = "4d8f6f0e-6a53-4f0b-9c55-1d2f3a4b5c6d";
 

@@ -11,8 +11,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::herdr_terminate::route_tests::{
-    JSON, LOOPBACK, app, body, capture, closed_pool, current_thread, in_child, post, refusal,
-    switch, unreachable_pool,
+    JSON, LOOPBACK, body, capture, closed_pool, current_thread, in_child, post, refusal, switch,
+    unreachable_pool,
 };
 use crate::services::discord::herdr_terminate::{
     OperatorTerminate, TerminationResult, terminate_registered_herdr,
@@ -23,6 +23,22 @@ use crate::services::termination_audit::host_terminate::herdr_terminate::{
 
 const REMOTE: &str = "100.64.0.5:1234";
 const TOKEN: &str = "t0k";
+
+/// The API router with its auth middleware, `token` as the server's configured token.
+pub(crate) fn app(
+    token: Option<&str>,
+    registry: Option<Arc<HealthRegistry>>,
+    pool: Option<sqlx::PgPool>,
+) -> Router {
+    let mut engine_config = crate::config::Config::default();
+    engine_config.policies.hot_reload = false;
+    let engine = crate::engine::PolicyEngine::new(&engine_config).unwrap();
+    let tx = crate::eventbus::new_broadcast();
+    let buffer = crate::eventbus::spawn_batch_flusher(tx.clone());
+    let mut config = crate::config::Config::default();
+    config.server.auth_token = token.map(str::to_string);
+    crate::server::routes::api_router_with_pg(engine, config, tx, buffer, registry, pool)
+}
 
 fn config(token: Option<&str>) -> crate::config::Config {
     let mut config = crate::config::Config::default();

@@ -133,7 +133,7 @@ pub(in crate::services::discord) async fn recover_ended(
         }
     };
     let unsent = UnsentClose((!retired).then(|| fence.clone()));
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     run_probe(&AFTER_FENCE).await;
     if load(pool, &request.session_key).await.as_ref() != Ok(&row)
         || !http_force::dispatch_holds(pool, &row, Some(&expected)).await
@@ -172,7 +172,3 @@ pub(in crate::services::discord) async fn recover_ended(
         channel,
     )))
 }
-
-#[cfg(all(test, unix))]
-#[path = "restart_recovery_tests.rs"]
-mod tests;

@@ -805,6 +805,9 @@ fn response_is_json(response: &Response) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(all(test, unix))]
+pub(crate) use herdr_terminate::tests::app as herdr_terminate_test_app;
+
 #[cfg(test)]
 pub(crate) use queue_api::forwarding_tests::{
     app_with as cancel_route_test_app, post as cancel_route_test_post,

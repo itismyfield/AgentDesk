@@ -1,1 +1,3 @@
-//! DL `herdr_terminate` 시험 중 `all(test, unix)` 사슬인 것을 ROOT binary에서 돌리는 host. `#[path]` 선언만 둔다.
+#[cfg(unix)]
+#[path = "herdr_terminate/restart_recovery_tests.rs"]
+mod restart_recovery_tests;

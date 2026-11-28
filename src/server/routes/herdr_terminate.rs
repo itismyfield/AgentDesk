@@ -116,4 +116,4 @@ fn status_of(result: &str) -> StatusCode {
 
 #[cfg(test)]
 #[path = "herdr_terminate_tests.rs"]
-mod tests;
+pub(super) mod tests;

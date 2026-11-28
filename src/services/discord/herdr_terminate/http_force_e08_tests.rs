@@ -3,9 +3,11 @@
 
 use axum::Json;
 
-use super::super::super::super::session_transition::SessionTransitionLease;
-use super::super::super::{SettlementWindowProbe, probe_before_released, probe_before_selection};
 use super::*;
+use crate::services::discord::session_transition::SessionTransitionLease;
+use crate::services::dispatched_sessions::herdr_probe_tests::{
+    SettlementWindowProbe, probe_before_released, probe_before_selection,
+};
 
 const AGENT: &str = "e08-agent";
 const RUN: &str = "e08-run";
@@ -587,7 +589,7 @@ fn e08_force_kill_non_target_equivalence_pg() {
         node.start(51, "turn-a", Some(DISPATCH)).await;
         let untouched = node.killed(&rig).await;
         let state = node.state(herdr::NODE);
-        let direct = crate::server::routes::dispatched_sessions::force_kill_session_impl_with_reason;
+        let direct = crate::services::dispatched_sessions::force_kill_session_impl_with_reason;
         let (status, Json(reply)) = direct(&state, &node.key, true, "e08 cli").await;
         assert_eq!((status, reply.to_string()), (StatusCode::CONFLICT, json!({"error": "session host is not legacy tmux",
             "unsupported": "session_host_not_tmux", "session_key": node.key}).to_string()));

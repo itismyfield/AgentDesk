@@ -50,7 +50,7 @@ where
                 terminate_scoped(request, shared, &pool, Some(expected), false, false, None);
             match scoped.await {
                 Ok((exclusion, wake)) => {
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     super::run_probe(&super::BEFORE_POSTLUDE).await;
                     let applied = postlude(&exclusion).await;
                     drop(exclusion);
@@ -89,7 +89,3 @@ pub(super) async fn dispatch_holds(
     };
     active_dispatch_pg(pool, row.session_id()).await.as_ref() == Ok(&expected.dispatch)
 }
-
-#[cfg(test)]
-#[path = "http_force_tests.rs"]
-mod tests;

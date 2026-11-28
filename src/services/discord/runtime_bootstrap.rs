@@ -17,6 +17,10 @@ mod intake;
 #[cfg(unix)]
 mod intake_delivery_reconciler;
 mod intake_delivery_sweep;
+#[cfg(all(test, target_os = "linux"))]
+#[cfg(unix)]
+#[path = "herdr_terminate/missing_marker_tests.rs"]
+mod missing_marker_tests;
 mod o_writer_host;
 mod orphan_recovery;
 mod owner_cleanup;

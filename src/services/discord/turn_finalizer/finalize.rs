@@ -72,7 +72,7 @@ pub(super) async fn do_finalize_with_probe(
 ) -> FinalizeOutcome {
     let submit_snapshot = witness.claim_snapshot;
     let mute_settlement = event.is_mute_settlement();
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     super::test_panic_hook::maybe_panic_in_finalize();
     let Ok(expected_actor) = super::cleanup::captured_recovery_actor(submit_snapshot) else {
         return FinalizeOutcome::AlreadyFinalized;

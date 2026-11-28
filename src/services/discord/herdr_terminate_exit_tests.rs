@@ -4,8 +4,11 @@
 use std::io::Write;
 use std::time::Duration;
 
-use super::{OperatorTerminate, TerminationResult, terminate_registered_herdr, test_turn};
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::services::discord::ChannelId;
+use crate::services::discord::herdr_terminate::{
+    OperatorTerminate, TerminationResult, terminate_registered_herdr, test_turn,
+};
 use crate::services::discord::krx_session_host_test_host::herdr_termination_rig as herdr;
 
 const CHANNEL: u64 = 5_340_212;
@@ -106,7 +109,7 @@ fn child(phase: &str) {
             .await
             .unwrap();
         let (shared, registry) =
-            super::super::host_teardown_gate::test_support::runtime(&pool).await;
+            crate::services::discord::host_teardown_gate::test_support::runtime(&pool).await;
         let key = format!(
             "claude/{}/{}:AgentDesk-claude-exit",
             shared.token_hash,
@@ -116,7 +119,7 @@ fn child(phase: &str) {
             session_key: key.clone(),
             execution_nonce: herdr::EXECUTION.into(),
         };
-        let channel = super::ChannelId::new(CHANNEL);
+        let channel = ChannelId::new(CHANNEL);
         if phase == "close" {
             let switches = rig
                 .bind(&pool, &shared.token_hash, &key, herdr::HostedState::Bound)
@@ -162,7 +165,7 @@ const RESTORED_CHANNEL: u64 = 5_340_213;
 // gone: the user's clear closes nothing, retires the execution and releases its hold.
 #[test]
 fn clear_root_replaced_retires_without_close_pg() {
-    use super::super::commands::control::clear_channel_session_state;
+    use crate::services::discord::commands::control::clear_channel_session_state;
     let path = concat!(
         module_path!(),
         "::clear_root_replaced_retires_without_close_pg"
@@ -181,12 +184,12 @@ fn clear_root_replaced_retires_without_close_pg() {
         .unwrap();
     runtime.block_on(async {
         let _root = crate::config::TestRuntimeRootGuard::new();
-        let (db, pool) = super::super::host_defer_gate::tests::postgres().await;
-        let shared = super::super::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+        let (db, pool) = crate::services::discord::host_defer_gate::tests::postgres().await;
+        let shared = crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
         let provider = crate::services::provider::ProviderKind::Claude;
-        let channel = super::ChannelId::new(RESTORED_CHANNEL);
-        super::super::host_defer_gate::tests::map_channel(&shared, channel, "p11-clear").await;
-        let key = super::super::adk_session::build_adk_session_key;
+        let channel = ChannelId::new(RESTORED_CHANNEL);
+        crate::services::discord::host_defer_gate::tests::map_channel(&shared, channel, "p11-clear").await;
+        let key = crate::services::discord::adk_session::build_adk_session_key;
         let key = key(&shared, channel, &provider, None).await.unwrap();
         let bound = herdr::HostedState::Bound;
         let _switches = rig.bind(&pool, &shared.token_hash, &key, bound).await;
@@ -201,7 +204,7 @@ fn clear_root_replaced_retires_without_close_pg() {
             clear_channel_session_state(&http, &shared, &provider, channel, "/clear");
         let reply = clear.await.expect("a clear always commits").reply();
 
-        let cleared = super::super::commands::SESSION_CLEARED_RESPONSE;
+        let cleared = crate::services::discord::commands::SESSION_CLEARED_RESPONSE;
         assert_eq!(reply, format!("{cleared}\n대기 메시지 0건을 비웠어요."));
         assert!(rig.writes().is_empty(), "the restored shell is not closed");
         let retired = (herdr::HostedState::Retired, herdr::EXECUTION.to_string());
