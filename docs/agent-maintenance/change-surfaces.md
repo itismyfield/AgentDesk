@@ -2486,7 +2486,6 @@ Measured giant paths (planning metadata remains manual):
 - `src/services/codex_tui/input.rs`
 - `src/services/discord/health.rs`
 - `src/services/discord/health/snapshot.rs`
-- `src/services/discord/health/turn_deliver/inject.rs`
 - `src/services/discord/outbound/turn_output_controller.rs`
 - `src/services/discord/recovery_engine/restore_inflight.rs`
 - `src/services/discord/router/intake_dispatch.rs`
