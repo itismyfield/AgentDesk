@@ -1769,7 +1769,7 @@ mod bootstrap_tests;
 mod codex_tests;
 #[cfg(test)]
 #[path = "owner_input_herdr_tests.rs"]
-mod herdr_tests;
+pub(super) mod herdr_tests;
 #[cfg(test)]
 #[path = "owner_input_local_control_tests.rs"]
 mod local_control_tests;
