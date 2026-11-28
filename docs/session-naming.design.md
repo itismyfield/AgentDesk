@@ -35,7 +35,7 @@ main에 이미 있는 canonical identity/alias·channel ID 기반 inflight 파�
 tmux에는 compact JSON **한 개 `AGENTDESK_IDENTITY` 세션 환경 변수**를 `new-session -e AGENTDESK_IDENTITY=<json>`으로 생성과 동시에 저장한다. owner_scope 해시·채널 ID는 비밀이 아니다. 예시는 fixture이며 운영 값이 아니다. layout 선택은 이 JSON에 의존하지 않는다.
 
 ```json
-{"v":1,"owner_scope":"<sha256(runtime-root|execution-node)>","provider":"claude","token_namespace":"<existing token_hash>","channel_id":"1479671298497183835","parent_channel_id":null,"thread_id":null,"identity_kind":"discord_channel","name_kind":"channel","session_record_id":null,"logical_key":"<current primary key>","spawn_nonce":"<32hex>","display_name":"스마트홈-cc"}
+{"v":1,"owner_scope":"<sha256(runtime-root|execution-node)>","provider":"claude","token_namespace":"<existing token_hash>","channel_id":"example-id-19d-04","parent_channel_id":null,"thread_id":null,"identity_kind":"discord_channel","name_kind":"channel","session_record_id":null,"logical_key":"<current primary key>","spawn_nonce":"<32hex>","display_name":"스마트홈-cc"}
 ```
 
 DB `identity_kind`는 현 `discord_channel`/`scheduled_snapshot`을 유지한다(`db/dispatched_sessions/canonical_identity.rs:4-27`). `name_kind`는 이름 입력/metadata의 분류이며 DB enum 확장이 아니다. row ID는 기존 launch/hook 순서상 optional이고, 기존 launch admission·binding context/nonce로 최초 소유를 입증한다.
@@ -566,7 +566,7 @@ S2 거절 경계 델타: registration CAS 거절은 name-only cleanup과 분리�
 | `dashboard/src/components/session-panel/SessionPanelModel.ts:41`, `:47-49` | name 우선. name 없으면 `Session ${key.slice(0,8)}`로 축약, full에는 key. | 실제 name/label 제공; React 문자열 그대로 표시. emoji supplementary char 포함 byte/UTF-16 절단 fixture 검토. |
 | `dashboard/src/components/session-panel/SessionInfoCard.tsx:33` | 전체 세션 키 문자열 표시. | escape는 React 기본 적용. 한글 문자열 UI fixture 검증. |
 | `dashboard/src/components/cluster/ClusterNodesPanel.tsx:81,84-86,96` | name/key 표시, 중지 호출에는 전체 session_key 그대로 사용. | S9에서 legacy→신규 primary 승격 뒤 중지를 호출해 **새 이름 세션이 없음**을 단언. 단순 key 전달 동일성은 성공 기준이 아님. |
-| `src/server/routes/docs/inventory/endpoints/part_01.rs:357`, `part_05.rs:458,465`, `part_06.rs:131` | API 예제의 AgentDesk-* 이름. | 새 예제와 legacy 호환 예제 구분; 생성 문서 경로로 반영. |
+| `docs/data/api-endpoints.json` | API 예제의 AgentDesk-* 이름. | 새 예제와 legacy 호환 예제 구분; 생성 문서 경로로 반영. |
 
 API·UI는 코드 조사만 수행했다. 실제 빌드/운영 API 접근을 했다고 주장하지 않는다. 부모의 격리 fixture 렌더와 함께 증거 수준을 구분해야 한다.
 
@@ -744,20 +744,20 @@ $5|𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀�
 $6|𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀-1570308839910412348
 $7|𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀-pppppppppppppppppppppppppppppppp-11111111111111111111-aaaaaaaaaaaa-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-22222222222222222222
 stderr=
-$ tmux -L i8119-probe -f /dev/null set-option -t '$0' @agentdesk_identity '{"v": 1, "provider": "claude", "channel_id": "1479671298497183835", "thread_id": null}'
+$ tmux -L i8119-probe -f /dev/null set-option -t '$0' @agentdesk_identity '{"v": 1, "provider": "claude", "channel_id": "example-id-19d-04", "thread_id": null}'
 rc=0
 stdout=
 stderr=
 $ tmux -L i8119-probe -f /dev/null show-options -qv -t '$0' @agentdesk_identity
 rc=0
-stdout={"v": 1, "provider": "claude", "channel_id": "1479671298497183835", "thread_id": null}
+stdout={"v": 1, "provider": "claude", "channel_id": "example-id-19d-04", "thread_id": null}
 stderr=
 $ tmux -L i8119-probe -f /dev/null list-sessions -F '#{session_id}|#{session_name}|#{session_name}|#{@agentdesk_identity}'
 rc=0
 stdout=$2|AgentDesk-claude-가가가가가가가가가가가가가가|AgentDesk-claude-가가가가가가가가가가가가가가|
 $3|가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가|가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가|
 $4|가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가-1570308839910412348|가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가-1570308839910412348|
-$0|스마트홈-cc|스마트홈-cc|{"v": 1, "provider": "claude", "channel_id": "1479671298497183835", "thread_id": null}
+$0|스마트홈-cc|스마트홈-cc|{"v": 1, "provider": "claude", "channel_id": "example-id-19d-04", "thread_id": null}
 $1|스마트홈-cc-1570308839910412348|스마트홈-cc-1570308839910412348|
 $5|𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀|𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀|
 $6|𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀-1570308839910412348|𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀-1570308839910412348|
