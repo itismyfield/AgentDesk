@@ -385,7 +385,8 @@ async fn tick5min_reserves_idle_settlement_during_slow_g_pg() {
             tick();
             assert_eq!(ctx.eval::<i32, _>("gQueries").unwrap(), 2);
             assert_eq!(ctx.eval::<i32, _>("killPosts").unwrap(), 1);
-            assert_eq!(ctx.eval::<i32, _>("warnings.length").unwrap(), 1);
+            let warnings = ctx.eval::<Vec<String>, _>("warnings").unwrap();
+            assert_eq!(warnings.len(), 1, "warnings={warnings:?}");
         });
     });
     let checked = await_within(checks, Duration::from_secs(20)).await;
