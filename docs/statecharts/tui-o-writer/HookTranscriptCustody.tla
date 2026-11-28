@@ -1,17 +1,17 @@
 ------------------------ MODULE HookTranscriptCustody ------------------------
 \* One keyed ticket of execution N1 held as a boot input after a restart, and the channel
 \* gate that waits on it. Rules: "S2" is the code at bd0c385be2, "D2" the second design,
-\* "D3" the third design, "S3a" the first stage of the fourth design, "Full" both stages.
-\* Mut switches one guard of S3a or Full off.
+\* "D3" the third design, "S3a4" the first stage as the fourth design wrote it, "S3a" that
+\* stage as the fifth design writes it, "Full" both stages. Mut switches one guard off.
 EXTENDS Naturals
-CONSTANTS Rules, Mut, Scens, Devs, Files, N1s, Starts, Switches, Approvals
+CONSTANTS Rules, Mut, Scens, Devs, Files, N1s, Starts, Switches, Approvals, Others
 
 VARIABLES scen, dev, file, n1, n2, rowN, suffixPrompt, fileCloser, witCloser, witFinal,
           barrier, outcome, sealed, completion, cleared, clearedBy, endRec, cutKnown,
-          approved, writer, switched, rowOwner, succRemoved, t2, boot, writes, attrOk
+          approved, writer, switched, rowOwner, succRemoved, t2, boot, writes, attrOk, otherBad
 vars == <<scen, dev, file, n1, n2, rowN, suffixPrompt, fileCloser, witCloser, witFinal,
           barrier, outcome, sealed, completion, cleared, clearedBy, endRec, cutKnown,
-          approved, writer, switched, rowOwner, succRemoved, t2, boot, writes, attrOk>>
+          approved, writer, switched, rowOwner, succRemoved, t2, boot, writes, attrOk, otherBad>>
 
 \* What N1 left in durable state before the restart:
 \*   complete       membership and newline-terminated closer
@@ -23,17 +23,23 @@ vars == <<scen, dev, file, n1, n2, rowN, suffixPrompt, fileCloser, witCloser, wi
 \*   outcomeLegacy  the same result stored without a seal
 AllScens == {"complete", "closerLate", "rawCloser", "killed", "barrierStored",
              "outcomeSaved", "outcomeLegacy"}
-\* The transcript now: ok, late (absent for a while), gone, or changed (other inode or prefix).
+\* The transcript now: ok, late (absent for a while), gone (absent for good), or changed (other
+\* inode or prefix). A reader sees late and gone alike: the path does not stat.
 AllFiles == {"ok", "late", "gone", "changed"}
 \* fresh: N1 is the owner's current execution. superseded: a successor already runs and no
 \* end record of N1 exists (state left by a binary without end records).
-ASSUME /\ Rules \in {"S2", "D2", "D3", "S3a", "Full"}
+ASSUME /\ Rules \in {"S2", "D2", "D3", "S3a4", "S3a", "Full"}
        /\ Scens \subseteq AllScens /\ Files \subseteq AllFiles
        /\ Devs \subseteq {"same", "changed"} /\ N1s \subseteq {"alive", "dead"}
        /\ Starts \subseteq {"fresh", "superseded"}
-       /\ Switches \subseteq BOOLEAN /\ Approvals \subseteq BOOLEAN
+       /\ Switches \subseteq BOOLEAN /\ Approvals \subseteq BOOLEAN /\ Others \subseteq BOOLEAN
 
-EndRules == {"D3", "S3a", "Full"}
+EndRules == {"D3", "S3a4", "S3a", "Full"}
+S3aRules == {"S3a4", "S3a"}
+\* The path does not stat; nothing tells a short absence from a lasting one.
+Unstattable == file \in {"late", "gone"}
+\* From the fifth design the finalizer scans N1's source up to the kept length itself.
+ScanByDriver == Rules \in {"S3a", "Full"} /\ Mut # "ScanInWriter"
 Saved == scen \in {"outcomeSaved", "outcomeLegacy"}
 StoredBarrier == scen = "barrierStored"
 NewlineCloser == fileCloser /\ scen # "rawCloser"
@@ -62,6 +68,8 @@ Init == /\ scen \in Scens /\ dev \in Devs /\ file \in Files
         \* A device lineage the writer already committed from a hook.
         /\ \E a \in Approvals : approved = (dev = "same" \/ a)
         /\ writer = "alive"
+        \* Another source cursor of the channel whose reopen fails.
+        /\ otherBad \in Others
         /\ switched \in Switches
         /\ rowOwner = IF rowN = "n2" THEN "n2" ELSE "n1"
         /\ succRemoved = FALSE /\ t2 = "open"
@@ -80,23 +88,24 @@ N1Closes == /\ Open /\ n1 = "alive" /\ ~fileCloser /\ ~barrier
             /\ UNCHANGED <<scen, dev, file, n1, n2, rowN, suffixPrompt, witCloser, witFinal,
                            barrier, outcome, sealed, completion, cleared, clearedBy, endRec,
                            cutKnown, approved, writer, switched, rowOwner, succRemoved, t2,
-                           boot, writes, attrOk>>
+                           boot, writes, attrOk, otherBad>>
 N1Dies == /\ n1 = "alive" /\ n1' = "dead"
           /\ UNCHANGED <<scen, dev, file, n2, rowN, suffixPrompt, fileCloser, witCloser,
                          witFinal, barrier, outcome, sealed, completion, cleared, clearedBy,
                          endRec, cutKnown, approved, writer, switched, rowOwner, succRemoved,
-                         t2, boot, writes, attrOk>>
+                         t2, boot, writes, attrOk, otherBad>>
 FileAppears == /\ file = "late" /\ file' = "ok"
                /\ UNCHANGED <<scen, dev, n1, n2, rowN, suffixPrompt, fileCloser, witCloser,
                               witFinal, barrier, outcome, sealed, completion, cleared,
                               clearedBy, endRec, cutKnown, approved, writer, switched,
-                              rowOwner, succRemoved, t2, boot, writes, attrOk>>
-\* A reader whose source names another inode or prefix halts its writer for good.
-WriterHalt == /\ writer = "alive" /\ file = "changed" /\ writer' = "halted"
+                              rowOwner, succRemoved, t2, boot, writes, attrOk, otherBad>>
+\* A reader whose source names another inode or prefix halts the channel writer for good,
+\* whether that source is this ticket's or another cursor's.
+WriterHalt == /\ writer = "alive" /\ (file = "changed" \/ otherBad) /\ writer' = "halted"
               /\ UNCHANGED <<scen, dev, file, n1, n2, rowN, suffixPrompt, fileCloser,
                              witCloser, witFinal, barrier, outcome, sealed, completion,
                              cleared, clearedBy, endRec, cutKnown, approved, switched,
-                             rowOwner, succRemoved, t2, boot, writes, attrOk>>
+                             rowOwner, succRemoved, t2, boot, writes, attrOk, otherBad>>
 \* A successor starts only on an ended execution, and resumes a transcript it can read.
 \* From D3 the launch keeps N1's end, with its length when the file is in place.
 LaunchRecords == Rules \in EndRules /\ Mut # "NoLaunchRecord"
@@ -106,7 +115,7 @@ N2Launch == /\ Running /\ n2 = "absent" /\ n1 = "dead" /\ file # "late"
             /\ cutKnown' = IF endRec THEN cutKnown ELSE (LaunchRecords /\ file = "ok")
             /\ UNCHANGED <<scen, dev, file, n1, suffixPrompt, fileCloser, witCloser, witFinal,
                            barrier, outcome, sealed, completion, cleared, clearedBy, approved,
-                           writer, switched, rowOwner, succRemoved, t2, boot, writes, attrOk>>
+                           writer, switched, rowOwner, succRemoved, t2, boot, writes, attrOk, otherBad>>
 \* A successor's prompt hook commits the device lineage (the S2 refresh).
 N2Prompt == /\ Running /\ n2 \in {"running", "idle"} /\ ~suffixPrompt
             /\ suffixPrompt' = TRUE /\ n2' = "running"
@@ -114,18 +123,18 @@ N2Prompt == /\ Running /\ n2 \in {"running", "idle"} /\ ~suffixPrompt
             /\ UNCHANGED <<scen, dev, file, n1, rowN, fileCloser, witCloser, witFinal,
                            barrier, outcome, sealed, completion, cleared, clearedBy, endRec,
                            cutKnown, writer, switched, rowOwner, succRemoved, t2, boot,
-                           writes, attrOk>>
+                           writes, attrOk, otherBad>>
 N2TakesRow == /\ Running /\ suffixPrompt /\ rowOwner = "n1"
               /\ rowOwner' = "n2"
               /\ UNCHANGED <<scen, dev, file, n1, n2, rowN, suffixPrompt, fileCloser, witCloser,
                              witFinal, barrier, outcome, sealed, completion, cleared, clearedBy,
                              endRec, cutKnown, approved, writer, switched, succRemoved, t2,
-                             boot, writes, attrOk>>
+                             boot, writes, attrOk, otherBad>>
 N2Idle == /\ Running /\ n2 = "running" /\ n2' = "idle"
           /\ UNCHANGED <<scen, dev, file, n1, rowN, suffixPrompt, fileCloser, witCloser,
                          witFinal, barrier, outcome, sealed, completion, cleared, clearedBy,
                          endRec, cutKnown, approved, writer, switched, rowOwner, succRemoved,
-                         t2, boot, writes, attrOk>>
+                         t2, boot, writes, attrOk, otherBad>>
 
 \* ---- N1's analysed range ----
 \* N1 as the current execution, or N1's range up to the length kept with its end.
@@ -140,7 +149,16 @@ WriterCapture == /\ Open /\ file = "ok" /\ writer = "alive" /\ CaptureAllowed
                  /\ UNCHANGED <<scen, dev, file, n1, n2, rowN, suffixPrompt, fileCloser,
                                 barrier, outcome, sealed, completion, cleared, clearedBy,
                                 endRec, cutKnown, approved, writer, switched, rowOwner,
-                                succRemoved, t2, boot, writes, attrOk>>
+                                succRemoved, t2, boot, writes, attrOk, otherBad>>
+
+\* The finalizer's scan of N1's source up to the kept length, one source at a time.
+EndScan == /\ ScanByDriver /\ Mut # "NoEndCut" /\ Open /\ file = "ok" /\ endRec /\ cutKnown
+           /\ approved /\ (witCloser # NewlineCloser \/ ~witFinal)
+           /\ witCloser' = NewlineCloser /\ witFinal' = TRUE
+           /\ UNCHANGED <<scen, dev, file, n1, n2, rowN, suffixPrompt, fileCloser,
+                          barrier, outcome, sealed, completion, cleared, clearedBy,
+                          endRec, cutKnown, approved, writer, switched, rowOwner,
+                          succRemoved, t2, boot, writes, attrOk, otherBad>>
 
 \* ---- N1's end ----
 \* E4: the host reads N1's own target as ended. From S3a it waits while the file is absent.
@@ -152,7 +170,7 @@ ProveEnd == /\ Rules \in EndRules /\ Mut # "NoBootProver" /\ Running /\ ~endRec
             /\ UNCHANGED <<scen, dev, file, n1, n2, rowN, suffixPrompt, fileCloser, witCloser,
                            witFinal, barrier, outcome, sealed, completion, cleared, clearedBy,
                            approved, writer, switched, rowOwner, succRemoved, t2, boot,
-                           writes, attrOk>>
+                           writes, attrOk, otherBad>>
 \* S3b: a successor admitted by the host proves N1 ended; its length stays unknown.
 ProveSuperseded == /\ Rules = "Full" /\ Mut # "NoSupersededProof" /\ Running /\ ~endRec
                    /\ rowN = "n2" /\ n1 = "dead"
@@ -160,7 +178,7 @@ ProveSuperseded == /\ Rules = "Full" /\ Mut # "NoSupersededProof" /\ Running /\ 
                    /\ UNCHANGED <<scen, dev, file, n1, n2, rowN, suffixPrompt, fileCloser,
                                   witCloser, witFinal, barrier, outcome, sealed, completion,
                                   cleared, clearedBy, approved, writer, switched, rowOwner,
-                                  succRemoved, t2, boot, writes, attrOk>>
+                                  succRemoved, t2, boot, writes, attrOk, otherBad>>
 \* S3b: N1's end and the stored prefix commitment approve the renumbered file.
 EndRefresh == /\ Rules = "Full" /\ Mut # "NoEndRefresh" /\ Running /\ endRec /\ ~approved
               /\ file = "ok"
@@ -168,7 +186,7 @@ EndRefresh == /\ Rules = "Full" /\ Mut # "NoEndRefresh" /\ Running /\ endRec /\ 
               /\ UNCHANGED <<scen, dev, file, n1, n2, rowN, suffixPrompt, fileCloser, witCloser,
                              witFinal, barrier, outcome, sealed, completion, cleared, clearedBy,
                              endRec, cutKnown, writer, switched, rowOwner, succRemoved, t2,
-                             boot, writes, attrOk>>
+                             boot, writes, attrOk, otherBad>>
 \* The end record names the source N1 wrote last; S3b applies N1's end to every source N1 wrote.
 EndApplies == endRec /\ (~switched \/ (Rules = "Full" /\ Mut # "LatestSourceOnly"))
 EndGate == EndApplies \/ Mut = "NoEndProof"
@@ -176,14 +194,15 @@ EndGate == EndApplies \/ Mut = "NoEndProof"
 \* ---- results ----
 \* The S2 path: N1's ticket read off the whole current file of the same device.
 CurrentPath == dev = "same" /\ file = "ok" /\ NewlineCloser /\ writer = "alive"
-BoundedPath == witCloser /\ file = "ok" /\ writer = "alive"
+BoundedPath == witCloser /\ file = "ok"
+               /\ (writer = "alive" \/ (ScanByDriver /\ endRec /\ cutKnown))
                /\ (approved \/ Mut = "NoApproval")
 CanAttribute ==
     CASE Rules = "S2" -> CurrentPath
       [] Rules \in {"D2", "D3"} ->
            \/ BoundedPath
            \/ Mut = "NoPrefixCheck" /\ witCloser /\ file = "changed"
-      [] Rules = "S3a" -> CurrentPath \/ (BoundedPath /\ endRec /\ cutKnown)
+      [] Rules \in S3aRules -> CurrentPath \/ (BoundedPath /\ endRec /\ cutKnown)
       [] OTHER ->
            \/ BoundedPath /\ (cutKnown \/ ~endRec)
            \* Without a known length, N1's ticket is read off the whole approved prefix.
@@ -197,7 +216,7 @@ Settle == /\ Open /\ ~barrier /\ CanAttribute
           /\ attrOk' = (file = "ok" /\ (dev = "same" \/ approved))
           /\ UNCHANGED <<scen, dev, file, n1, n2, rowN, suffixPrompt, fileCloser, witCloser,
                          witFinal, barrier, cleared, clearedBy, endRec, cutKnown, approved,
-                         writer, switched, rowOwner, succRemoved, t2, boot>>
+                         writer, switched, rowOwner, succRemoved, t2, boot, otherBad>>
 \* The existing raw EOF proof: the hosted record still names N1.
 RawEOFLive == /\ Open /\ ~barrier /\ scen = "rawCloser" /\ n1 = "dead" /\ rowN = "n1"
               /\ writer = "alive" /\ file = "ok" /\ dev = "same"
@@ -206,24 +225,25 @@ RawEOFLive == /\ Open /\ ~barrier /\ scen = "rawCloser" /\ n1 = "dead" /\ rowN =
               /\ UNCHANGED <<scen, dev, file, n1, n2, rowN, suffixPrompt, fileCloser,
                              witCloser, witFinal, barrier, cleared, clearedBy, endRec,
                              cutKnown, approved, writer, switched, rowOwner, succRemoved, t2,
-                             boot>>
+                             boot, otherBad>>
 \* S3a: the raw closer up to the length kept with N1's end, whatever host record runs now.
-HistRawEOF == /\ Rules \in {"S3a", "Full"} /\ Mut # "NoHistRaw" /\ Open /\ ~barrier
+HistRawEOF == /\ Rules \in {"S3a4", "S3a", "Full"} /\ Mut # "NoHistRaw" /\ Open /\ ~barrier
               /\ scen = "rawCloser" /\ EndApplies /\ cutKnown /\ approved /\ file = "ok"
+              /\ (writer = "alive" \/ ScanByDriver)
               /\ outcome' = "Executed" /\ sealed' = TRUE /\ completion' = "pending"
               /\ writes' = writes + 1 /\ attrOk' = TRUE
               /\ UNCHANGED <<scen, dev, file, n1, n2, rowN, suffixPrompt, fileCloser,
                              witCloser, witFinal, barrier, cleared, clearedBy, endRec,
                              cutKnown, approved, writer, switched, rowOwner, succRemoved, t2,
-                             boot>>
+                             boot, otherBad>>
 \* S2 folds a successor's prompt into N1's analysis and stores a barrier for it; S3a keeps it.
-FormBarrier == /\ Rules \in {"S2", "S3a"} /\ Open /\ ~barrier /\ dev = "same" /\ file = "ok"
+FormBarrier == /\ Rules \in {"S2", "S3a4", "S3a"} /\ Open /\ ~barrier /\ dev = "same" /\ file = "ok"
                /\ writer = "alive" /\ suffixPrompt /\ ~fileCloser
                /\ barrier' = TRUE
                /\ UNCHANGED <<scen, dev, file, n1, n2, rowN, suffixPrompt, fileCloser,
                               witCloser, witFinal, outcome, sealed, completion, cleared,
                               clearedBy, endRec, cutKnown, approved, writer, switched, rowOwner,
-                              succRemoved, t2, boot, writes, attrOk>>
+                              succRemoved, t2, boot, writes, attrOk, otherBad>>
 
 \* The exact row CAS: only N1's own row goes.
 ClearRow(by) == /\ cleared' = TRUE /\ clearedBy' = by
@@ -233,28 +253,33 @@ OwnIdleAbstain == /\ Open /\ barrier /\ n1 = "alive" /\ rowN = "n1" /\ file = "o
                   /\ outcome' = "Empty" /\ ClearRow("n1idle")
                   /\ UNCHANGED <<scen, dev, file, n1, n2, rowN, suffixPrompt, fileCloser,
                                  witCloser, witFinal, barrier, sealed, completion, endRec,
-                                 cutKnown, approved, writer, switched, t2, boot, writes, attrOk>>
+                                 cutKnown, approved, writer, switched, t2, boot, writes, attrOk, otherBad>>
 \* S2 and S3a: any current idle drives boot abstain once the exact stat of the same device holds.
 N2IdleAbstain == /\ Open /\ barrier /\ n2 = "idle"
-                 /\ \/ Rules \in {"S2", "S3a"} /\ file = "ok"
+                 /\ \/ Rules \in {"S2", "S3a4", "S3a"} /\ file = "ok"
                        /\ (dev = "same" \/ Mut = "S3aCrossIdle")
                     \/ Mut = "IdleBorrow"
                  /\ outcome' = "Empty" /\ ClearRow("n2idle")
                  /\ UNCHANGED <<scen, dev, file, n1, n2, rowN, suffixPrompt, fileCloser,
                                 witCloser, witFinal, barrier, sealed, completion, endRec,
-                                cutKnown, approved, writer, switched, t2, boot, writes, attrOk>>
+                                cutKnown, approved, writer, switched, t2, boot, writes, attrOk, otherBad>>
 \* N1's end stands in for the idle N1 can no longer reach.
 EndAbstain == /\ Rules \in EndRules /\ Open /\ barrier /\ EndGate /\ DriverAlive
               /\ outcome' = "Empty" /\ ClearRow("n1end")
               /\ UNCHANGED <<scen, dev, file, n1, n2, rowN, suffixPrompt, fileCloser,
                              witCloser, witFinal, barrier, sealed, completion, endRec, cutKnown,
-                             approved, writer, switched, t2, boot, writes, attrOk>>
+                             approved, writer, switched, t2, boot, writes, attrOk, otherBad>>
+\* A transcript whose original content is gone. D3 trusts a gone path; the fourth design's S3a
+\* reads any path that does not stat as gone; from the fifth design only another inode or prefix.
+Terminal == CASE Rules = "D3" -> file \in {"gone", "changed"}
+              [] Rules = "S3a4" -> file # "ok"
+              [] OTHER -> file = "changed" \/ (Mut = "EnoentTerminal" /\ Unstattable)
 \* Evidence inside N1's range. D3 counts newline-terminated records only.
 InRangeEvidence == IF Rules = "D3" THEN witCloser ELSE (witCloser \/ scen = "rawCloser")
 Final == witFinal \/ Mut = "NoFinalCapture" \/ (Mut = "NoEndCut" /\ rowN = "n2")
 ReleaseEnded ==
     /\ Rules \in EndRules /\ Open /\ ~barrier /\ EndGate /\ DriverAlive
-    /\ \/ file \in {"gone", "changed"}
+    /\ \/ Terminal
        \/ file = "ok" /\ Final /\ (Rules = "D3" \/ cutKnown \/ Mut = "NoFinalCapture")
           /\ (~InRangeEvidence \/ Mut = "DropEvidence")
        \/ Rules = "Full" /\ file = "ok" /\ ~cutKnown /\ (dev = "same" \/ approved)
@@ -263,7 +288,7 @@ ReleaseEnded ==
     /\ t2' = IF Mut = "AnyTarget" THEN "released" ELSE t2
     /\ UNCHANGED <<scen, dev, file, n1, n2, rowN, suffixPrompt, fileCloser, witCloser,
                    witFinal, barrier, sealed, completion, endRec, cutKnown, approved, writer,
-                   switched, boot, attrOk>>
+                   switched, boot, attrOk, otherBad>>
 
 \* ---- completion of a stored result ----
 ReadCompletion == /\ Running /\ DriverAlive /\ outcome = "Executed" /\ completion = "pending"
@@ -272,13 +297,16 @@ ReadCompletion == /\ Running /\ DriverAlive /\ outcome = "Executed" /\ completio
                   /\ UNCHANGED <<scen, dev, file, n1, n2, rowN, suffixPrompt, fileCloser,
                                  witCloser, witFinal, barrier, outcome, sealed, cleared,
                                  clearedBy, endRec, cutKnown, approved, writer, switched,
-                                 rowOwner, succRemoved, t2, boot, writes, attrOk>>
+                                 rowOwner, succRemoved, t2, boot, writes, attrOk, otherBad>>
 SkipAllowed ==
     CASE Rules = "S2" -> file # "ok"
       [] Rules = "D2" -> FALSE
+      [] Rules \in {"D3", "S3a4"} ->
+                  \/ Terminal
+                  \/ ~sealed /\ dev = "changed" /\ file = "ok"
+      \* An unsealed result across a device change waits, as the exact stat check does in S2.
       [] OTHER -> /\ Mut # "PendingForever"
-                  /\ \/ file \in {"gone", "changed"}
-                     \/ ~sealed /\ dev = "changed" /\ file = "ok"
+                  /\ \/ Terminal
                      \/ Mut = "SkipTransient" /\ file = "late"
 SkipCompletion == /\ Running /\ DriverAlive /\ outcome = "Executed"
                   /\ completion = "pending" /\ SkipAllowed
@@ -286,16 +314,16 @@ SkipCompletion == /\ Running /\ DriverAlive /\ outcome = "Executed"
                   /\ UNCHANGED <<scen, dev, file, n1, n2, rowN, suffixPrompt, fileCloser,
                                  witCloser, witFinal, barrier, outcome, sealed, cleared,
                                  clearedBy, endRec, cutKnown, approved, writer, switched,
-                                 rowOwner, succRemoved, t2, boot, writes, attrOk>>
+                                 rowOwner, succRemoved, t2, boot, writes, attrOk, otherBad>>
 Cleanup == /\ Running /\ DriverAlive /\ outcome = "Executed" /\ ~cleared
            /\ completion \in {"recorded", "skipped"} \/ Mut = "VoidCompletion"
            /\ ClearRow("outcome")
            /\ UNCHANGED <<scen, dev, file, n1, n2, rowN, suffixPrompt, fileCloser, witCloser,
                           witFinal, barrier, outcome, sealed, completion, endRec, cutKnown,
-                          approved, writer, switched, t2, boot, writes, attrOk>>
+                          approved, writer, switched, t2, boot, writes, attrOk, otherBad>>
 
 Next == N1Closes \/ N1Dies \/ FileAppears \/ WriterHalt \/ N2Launch \/ N2Prompt
-        \/ N2TakesRow \/ N2Idle \/ WriterCapture \/ ProveEnd \/ ProveSuperseded \/ EndRefresh
+        \/ N2TakesRow \/ N2Idle \/ WriterCapture \/ EndScan \/ ProveEnd \/ ProveSuperseded \/ EndRefresh
         \/ Settle \/ RawEOFLive \/ HistRawEOF \/ FormBarrier \/ OwnIdleAbstain
         \/ N2IdleAbstain \/ EndAbstain \/ ReleaseEnded \/ ReadCompletion \/ SkipCompletion
         \/ Cleanup
@@ -303,7 +331,7 @@ Next == N1Closes \/ N1Dies \/ FileAppears \/ WriterHalt \/ N2Launch \/ N2Prompt
 \* A successor's launch, its prompt and N1's death are never assumed.
 Spec == Init /\ [][Next]_vars
         /\ WF_vars(N1Closes) /\ WF_vars(FileAppears) /\ WF_vars(WriterHalt) /\ WF_vars(N2Idle)
-        /\ WF_vars(WriterCapture) /\ WF_vars(ProveEnd) /\ WF_vars(ProveSuperseded)
+        /\ WF_vars(WriterCapture) /\ WF_vars(EndScan) /\ WF_vars(ProveEnd) /\ WF_vars(ProveSuperseded)
         /\ WF_vars(EndRefresh) /\ WF_vars(Settle) /\ WF_vars(RawEOFLive)
         /\ WF_vars(HistRawEOF) /\ WF_vars(FormBarrier) /\ WF_vars(OwnIdleAbstain)
         /\ WF_vars(N2IdleAbstain) /\ WF_vars(EndAbstain) /\ WF_vars(ReleaseEnded)
@@ -330,6 +358,10 @@ CompletionBeforeCleanup == (cleared /\ outcome = "Executed") => completion \in {
 \* unsealed result across a device change. The model takes the classification as given.
 SkipOnlyWhenTerminal ==
     completion = "skipped" => (file \in {"gone", "changed"} \/ (~sealed /\ dev = "changed"))
+\* Nothing is given up while the original content may still come back: a completion skip or a
+\* release of a closed turn needs another inode or prefix at the path.
+NoSilentLoss == (completion = "skipped" \/ (outcome = "Unverified" /\ fileCloser))
+                => file = "changed"
 SuccessorUntouched == ~succRemoved
 \* A ticket of another target stays open (one abstract other ticket).
 ExactTarget == t2 = "open"

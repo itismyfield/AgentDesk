@@ -9,6 +9,7 @@ function waiting(v) {
   if (v.suffixPrompt) notes.push("N2 입력 있음");
   if (v.switched) notes.push("앞 source의 ticket");
   if (!v.approved) notes.push("파일 승인 없음");
+  if (v.otherBad) notes.push("다른 source 복구 실패");
   if (v.writer !== "alive") notes.push("writer 멈춤");
   const note = notes.length ? ` (${notes.join(", ")})` : "";
   if (v.endRec) {
@@ -32,7 +33,8 @@ export function state(v) {
     return "채널 열림: 후속 N2의 idle로 정리";
   }
   if (v.outcome === "Executed") {
-    return v.completion === "pending" ? "결과 저장됨, 본문 읽기 대기" : "본문 처리 끝, 정리 대기";
+    const file = v.file === "ok" ? "" : ` (${{ late: "파일 잠시 없음", gone: "파일 없음", changed: "파일 바뀜" }[v.file]})`;
+    return (v.completion === "pending" ? "결과 저장됨, 본문 읽기 대기" : "본문 처리 끝, 정리 대기") + file;
   }
   return waiting(v);
 }
@@ -46,10 +48,11 @@ const labels = {
   N2TakesRow: "N2 턴이 채널 행을 차지함",
   N2Idle: "N2가 idle이 됨",
   WriterCapture: "writer가 N1 범위를 읽음",
+  EndScan: "finalizer가 종료 길이까지 N1 source를 읽음",
   ProveEnd: "host가 N1 종료를 확인해 기록함",
   ProveSuperseded: "후속 실행의 시작이 N1 종료를 증명함",
   EndRefresh: "종료 기록과 저장 prefix로 파일을 승인함",
-  WriterHalt: "source가 바뀌어 writer가 멈춤",
+  WriterHalt: "source 하나의 복구가 실패해 writer가 멈춤",
   RawEOFLive: "현재 N1의 개행 없는 closer로 결과를 기록함",
   HistRawEOF: "종료 길이 안의 개행 없는 closer로 결과를 기록함",
   Settle: "N1 결과를 원본 ticket에 기록함",
