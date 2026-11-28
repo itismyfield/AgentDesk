@@ -1,243 +1,48 @@
 ---
-title: "One O channel with a per-channel execution node, issue 8486 (revision 2)"
+title: "One O channel with a per-channel execution node, issue 8486 (revision 3)"
 ---
 stateDiagram-v2
   state "Legend" as legend {
     lg0: Unmanaged
-    lg1: Path to the ServesOnExpected bug
-    lg2: Repeats forever, so ServesOnExpected breaks
+    lg1: Breaks FirstInputOnHome in some cases
+    lg2: Path to the FirstInputOnHome or ServesOnExpected bug
+    lg3: Repeats forever, so ServesOnExpected breaks
   }
   class lg0 tan
-  class lg1 bugPath
-  class lg2 repeats
+  class lg1 mayBreak
+  class lg2 bugPath
+  class lg3 repeats
   s0: No owner row, the gateway serves (no node set)
-  s1: No owner row, the gateway serves (no node set, 1 file edit so far)
-  s2: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far)
-  s3: No owner row, the gateway serves (no node set), an input waits at the gateway
-  s4: No owner row, the gateway serves (no node set), turn runs on the gateway
-  s5: No owner row, the gateway serves (no node set, the hub's file says otherwise, 2 file edits so far)
-  s6: No owner row, the gateway serves (no node set, 1 file edit so far), an input waits at the gateway
-  s7: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far), an input waits at the gateway
-  s8: No owner row, the gateway serves (set to the designated node, 1 file edit so far)
-  s9: No owner row, the gateway serves (no node set, 2 file edits so far)
-  s10: No owner row, the gateway serves (no node set, 1 file edit so far), turn runs on the gateway
-  s11: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far), turn runs on the gateway
-  s12: No owner row, the gateway serves (no node set), an input waits at the gateway, turn runs on the gateway
-  s13: No owner row, the gateway serves (no node set), idle session on the gateway
-  s14: No owner row, the gateway serves (no node set, the hub's file says otherwise, 2 file edits so far), an input waits at the gateway
-  s15: No owner row, the gateway serves (set to the designated node, 2 file edits so far)
-  s16: No owner row, the gateway serves (set to the designated node, 1 file edit so far), an input waits at the gateway
-  s17: No owner row, the gateway serves (no node set, 2 file edits so far), an input waits at the gateway
-  s18: No owner row, the gateway serves (set to the designated node, the hub's file says otherwise, 2 file edits so far)
-  s19: No owner row, the gateway serves (no node set, the hub's file says otherwise, 2 file edits so far), turn runs on the gateway
-  s20: No owner row, the gateway serves (no node set, 1 file edit so far), an input waits at the gateway, turn runs on the gateway
-  s21: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far), an input waits at the gateway, turn runs on the gateway
-  s22: No owner row, the gateway serves (set to the designated node, 1 file edit so far), turn runs on the gateway
-  s23: No owner row, the gateway serves (no node set, 2 file edits so far), turn runs on the gateway
-  s24: No owner row, the gateway serves (no node set, 1 file edit so far), idle session on the gateway
-  s25: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far), idle session on the gateway
-  s26: No owner row, the gateway serves (no node set), an input waits at the gateway, idle session on the gateway
-  s27: No owner row, the gateway serves (set to the designated node, 2 file edits so far), an input waits at the gateway
-  s28: No owner row, the gateway serves (set to the designated node, the hub's file says otherwise, 2 file edits so far), an input waits at the gateway
-  s29: No owner row, the gateway serves (no node set, the hub's file says otherwise, 2 file edits so far), an input waits at the gateway, turn runs on the gateway
-  s30: No owner row, the gateway serves (set to the designated node, 2 file edits so far), turn runs on the gateway
-  s31: No owner row, the gateway serves (set to the designated node, 1 file edit so far), an input waits at the gateway, turn runs on the gateway
-  s32: No owner row, the gateway serves (no node set, 2 file edits so far), an input waits at the gateway, turn runs on the gateway
-  s33: No owner row, the gateway serves (set to the designated node, the hub's file says otherwise, 2 file edits so far), turn runs on the gateway
-  s34: No owner row, the gateway serves (no node set, the hub's file says otherwise, 2 file edits so far), idle session on the gateway
-  s35: No owner row, the gateway serves (no node set, 1 file edit so far), an input waits at the gateway, idle session on the gateway
-  s36: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far), an input waits at the gateway, idle session on the gateway
-  s37: No owner row, the gateway serves (set to the designated node, 1 file edit so far), idle session on the gateway
-  s38: No owner row, the gateway serves (no node set, 2 file edits so far), idle session on the gateway
-  s39: No owner row, the gateway serves (set to the designated node, 2 file edits so far), an input waits at the gateway, turn runs on the gateway
-  s40: No owner row, the gateway serves (set to the designated node, the hub's file says otherwise, 2 file edits so far), an input waits at the gateway, turn runs on the gateway
-  s41: No owner row, the gateway serves (no node set, the hub's file says otherwise, 2 file edits so far), an input waits at the gateway, idle session on the gateway
-  s42: No owner row, the gateway serves (set to the designated node, 2 file edits so far), idle session on the gateway
-  s43: No owner row, the gateway serves (set to the designated node, 1 file edit so far), an input waits at the gateway, idle session on the gateway
-  s44: No owner row, the gateway serves (no node set, 2 file edits so far), an input waits at the gateway, idle session on the gateway
-  s45: No owner row, the gateway serves (set to the designated node, the hub's file says otherwise, 2 file edits so far), idle session on the gateway
-  s46: No owner row, the gateway serves (set to the designated node, 2 file edits so far), an input waits at the gateway, idle session on the gateway
-  s47: No owner row, the gateway serves (set to the designated node, the hub's file says otherwise, 2 file edits so far), an input waits at the gateway, idle session on the gateway
+  s1: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far)
+  s2: No owner row, the gateway serves (set to the designated node, 1 file edit so far)
+  s3: No owner row, the gateway serves (set to the designated node, 1 file edit so far), an input waits at the gateway
+  s4: No owner row, the gateway serves (set to the designated node, 1 file edit so far), turn runs on the gateway [an input ran on the wrong node]
+  s5: No owner row, the gateway serves (set to the designated node, 1 file edit so far), idle session on the gateway [an input ran on the wrong node]
+  s6: No owner row, the gateway serves (set to the designated node, 1 file edit so far), an input waits at the gateway, idle session on the gateway [an input ran on the wrong node]
   [*] --> s0
   s0 --> s1: an operator edits one node's config file
-  s0 --> s2: an operator edits one node's config file
-  s0 --> s3: you send a message
-  s1 --> s5: an operator edits one node's config file
-  s1 --> s6: you send a message
-  s1 --> s9: an operator edits one node's config file
-  s2 --> s5: an operator edits one node's config file
-  s2 --> s7: you send a message
-  s2 --> s8: the hub copies its setting to the database
-  s2 --> s9: an operator edits one node's config file
+  s1 --> s2: the hub copies its setting to the database
+  s2 --> s3: you send a message
   s3 --> s4: the gateway starts the turn itself
-  s3 --> s6: an operator edits one node's config file
-  s3 --> s7: an operator edits one node's config file
-  s4 --> s10: an operator edits one node's config file
-  s4 --> s11: an operator edits one node's config file
-  s4 --> s12: you send a message
-  s4 --> s13: the answer reaches Discord
-  s5 --> s14: you send a message
-  s5 --> s15: the hub copies its setting to the database
-  s6 --> s10: the gateway starts the turn itself
-  s6 --> s14: an operator edits one node's config file
-  s6 --> s17: an operator edits one node's config file
-  s7 --> s11: the gateway starts the turn itself
-  s7 --> s14: an operator edits one node's config file
-  s7 --> s16: the hub copies its setting to the database
-  s7 --> s17: an operator edits one node's config file
-  s8 --> s15: an operator edits one node's config file
-  s8 --> s16: you send a message
-  s8 --> s18: an operator edits one node's config file
-  s9 --> s17: you send a message
-  s10 --> s19: an operator edits one node's config file
-  s10 --> s20: you send a message
-  s10 --> s23: an operator edits one node's config file
-  s10 --> s24: the answer reaches Discord
-  s11 --> s19: an operator edits one node's config file
-  s11 --> s21: you send a message
-  s11 --> s22: the hub copies its setting to the database
-  s11 --> s23: an operator edits one node's config file
-  s11 --> s25: the answer reaches Discord
-  s12 --> s20: an operator edits one node's config file
-  s12 --> s21: an operator edits one node's config file
-  s12 --> s26: the answer reaches Discord
-  s13 --> s24: an operator edits one node's config file
-  s13 --> s25: an operator edits one node's config file
-  s13 --> s26: you send a message
-  s14 --> s19: the gateway starts the turn itself
-  s14 --> s27: the hub copies its setting to the database
-  s15 --> s27: you send a message
-  s16 --> s22: the gateway starts the turn itself
-  s16 --> s27: an operator edits one node's config file
-  s16 --> s28: an operator edits one node's config file
-  s17 --> s23: the gateway starts the turn itself
-  s18 --> s9: the hub copies its setting to the database
-  s18 --> s28: you send a message
-  s19 --> s29: you send a message
-  s19 --> s30: the hub copies its setting to the database
-  s19 --> s34: the answer reaches Discord
-  s20 --> s29: an operator edits one node's config file
-  s20 --> s32: an operator edits one node's config file
-  s20 --> s35: the answer reaches Discord
-  s21 --> s29: an operator edits one node's config file
-  s21 --> s31: the hub copies its setting to the database
-  s21 --> s32: an operator edits one node's config file
-  s21 --> s36: the answer reaches Discord
-  s22 --> s30: an operator edits one node's config file
-  s22 --> s31: you send a message
-  s22 --> s33: an operator edits one node's config file
-  s22 --> s37: the answer reaches Discord
-  s23 --> s32: you send a message
-  s23 --> s38: the answer reaches Discord
-  s24 --> s34: an operator edits one node's config file
-  s24 --> s35: you send a message
-  s24 --> s38: an operator edits one node's config file
-  s25 --> s34: an operator edits one node's config file
-  s25 --> s36: you send a message
-  s25 --> s37: the hub copies its setting to the database
-  s25 --> s38: an operator edits one node's config file
-  s26 --> s4: the gateway starts the turn itself
-  s26 --> s35: an operator edits one node's config file
-  s26 --> s36: an operator edits one node's config file
-  s27 --> s30: the gateway starts the turn itself
-  s28 --> s17: the hub copies its setting to the database
-  s28 --> s33: the gateway starts the turn itself
-  s29 --> s39: the hub copies its setting to the database
-  s29 --> s41: the answer reaches Discord
-  s30 --> s39: you send a message
-  s30 --> s42: the answer reaches Discord
-  s31 --> s39: an operator edits one node's config file
-  s31 --> s40: an operator edits one node's config file
-  s31 --> s43: the answer reaches Discord
-  s32 --> s44: the answer reaches Discord
-  s33 --> s23: the hub copies its setting to the database
-  s33 --> s40: you send a message
-  s33 --> s45: the answer reaches Discord
-  s34 --> s41: you send a message
-  s34 --> s42: the hub copies its setting to the database
-  s35 --> s10: the gateway starts the turn itself
-  s35 --> s41: an operator edits one node's config file
-  s35 --> s44: an operator edits one node's config file
-  s36 --> s11: the gateway starts the turn itself
-  s36 --> s41: an operator edits one node's config file
-  s36 --> s43: the hub copies its setting to the database
-  s36 --> s44: an operator edits one node's config file
-  s37 --> s42: an operator edits one node's config file
-  s37 --> s43: you send a message
-  s37 --> s45: an operator edits one node's config file
-  s38 --> s44: you send a message
-  s39 --> s46: the answer reaches Discord
-  s40 --> s32: the hub copies its setting to the database
-  s40 --> s47: the answer reaches Discord
-  s41 --> s19: the gateway starts the turn itself
-  s41 --> s46: the hub copies its setting to the database
-  s42 --> s46: you send a message
-  s43 --> s22: the gateway starts the turn itself
-  s43 --> s46: an operator edits one node's config file
-  s43 --> s47: an operator edits one node's config file
-  s44 --> s23: the gateway starts the turn itself
-  s45 --> s38: the hub copies its setting to the database
-  s45 --> s47: you send a message
-  s46 --> s30: the gateway starts the turn itself
-  s47 --> s33: the gateway starts the turn itself
-  s47 --> s44: the hub copies its setting to the database
+  s4 --> s5: the answer reaches Discord
+  s5 --> s6: you send a message
+  s6 --> s4: the gateway starts the turn itself
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
   class s0 tan
   class s0 bugPath
   class s1 tan
+  class s1 bugPath
   class s2 tan
+  class s2 bugPath
   class s3 tan
   class s3 bugPath
   class s4 tan
+  class s4 mayBreak
+  class s4 bugPath
+  class s4 repeats
   class s5 tan
+  class s5 bugPath
+  class s5 repeats
   class s6 tan
   class s6 bugPath
-  class s7 tan
-  class s8 tan
-  class s9 tan
-  class s10 tan
-  class s11 tan
-  class s12 tan
-  class s13 tan
-  class s14 tan
-  class s14 bugPath
-  class s15 tan
-  class s16 tan
-  class s17 tan
-  class s18 tan
-  class s19 tan
-  class s20 tan
-  class s21 tan
-  class s22 tan
-  class s23 tan
-  class s24 tan
-  class s25 tan
-  class s26 tan
-  class s27 tan
-  class s27 bugPath
-  class s28 tan
-  class s29 tan
-  class s30 tan
-  class s30 bugPath
-  class s30 repeats
-  class s31 tan
-  class s32 tan
-  class s33 tan
-  class s34 tan
-  class s35 tan
-  class s36 tan
-  class s37 tan
-  class s38 tan
-  class s39 tan
-  class s39 bugPath
-  class s40 tan
-  class s41 tan
-  class s42 tan
-  class s42 bugPath
-  class s42 repeats
-  class s43 tan
-  class s44 tan
-  class s45 tan
-  class s46 tan
-  class s46 bugPath
-  class s46 repeats
-  class s47 tan
+  class s6 repeats

@@ -1,0 +1,34 @@
+---
+title: "One O channel with a per-channel execution node, issue 8486 (revision 3)"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Unmanaged
+    lg1: Breaks FirstInputOnHome
+    lg2: Path to the FirstInputOnHome bug
+  }
+  class lg0 tan
+  class lg1 breaks
+  class lg2 bugPath
+  s0: No owner row, the gateway serves (no node set)
+  s1: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far)
+  s2: No owner row, the gateway serves (set to the designated node, 1 file edit so far)
+  s3: No owner row, the gateway serves (set to the designated node, 1 file edit so far), an input waits at the gateway
+  s4: No owner row, the gateway serves (set to the designated node, 1 file edit so far), turn runs on the gateway [an input ran on the wrong node]
+  [*] --> s0
+  s0 --> s1: an operator edits one node's config file
+  s1 --> s2: the hub copies its setting to the database
+  s2 --> s3: you send a message
+  s3 --> s4: the gateway starts the turn itself
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 tan
+  class s0 bugPath
+  class s1 tan
+  class s1 bugPath
+  class s2 tan
+  class s2 bugPath
+  class s3 tan
+  class s3 bugPath
+  class s4 tan
+  class s4 breaks
+  class s4 bugPath

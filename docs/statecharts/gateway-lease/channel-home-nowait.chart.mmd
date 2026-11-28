@@ -1,5 +1,5 @@
 ---
-title: "One O channel with a per-channel execution node, issue 8486 (revision 2)"
+title: "One O channel with a per-channel execution node, issue 8486 (revision 3)"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -22,11 +22,11 @@ stateDiagram-v2
   s5: No owner row, the gateway serves (set to the designated node, the hub's file says otherwise, 2 file edits so far), an input is kept for the designated node
   s6: Home is the designated node (set to the designated node, the hub's file says otherwise, 2 file edits so far), an input is handed to the designated node
   s7: Home is the designated node (set to the designated node, the hub's file says otherwise, 2 file edits so far), turn runs on the designated node
-  s8: Home is the designated node (no node set, 2 file edits so far), turn runs on the designated node
-  s9: Home is the designated node (no node set, 2 file edits so far), an input waits at the gateway, turn runs on the designated node
-  s10: Home is the designated node (no node set, 2 file edits so far), an input is kept for the gateway, turn runs on the designated node
-  s11: Home is the designated node (no node set, 2 file edits so far), an input is kept for the gateway, old home asked to end, turn runs on the designated node
-  s12: Home is the designated node (no node set, 2 file edits so far), an input is kept for the gateway, old home ended [busy turn cut]
+  s8: Home is the designated node (set to the gateway, 2 file edits so far), turn runs on the designated node
+  s9: Home is the designated node (set to the gateway, 2 file edits so far), an input waits at the gateway, turn runs on the designated node
+  s10: Home is the designated node (set to the gateway, 2 file edits so far), an input is kept for the gateway, turn runs on the designated node
+  s11: Home is the designated node (set to the gateway, 2 file edits so far), an input is kept for the gateway, old home asked to end, turn runs on the designated node
+  s12: Home is the designated node (set to the gateway, 2 file edits so far), an input is kept for the gateway, old home ended, the designated node cleared its session, 1 notice waiting in the outbox [busy turn cut]
   [*] --> s0
   s0 --> s1: an operator edits one node's config file
   s1 --> s2: the hub copies its setting to the database

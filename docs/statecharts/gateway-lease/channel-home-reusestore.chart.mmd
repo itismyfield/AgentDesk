@@ -1,19 +1,21 @@
 ---
-title: "One O channel with a per-channel execution node, issue 8486 (revision 2)"
+title: "One O channel with a per-channel execution node, issue 8486 (revision 3)"
 ---
 stateDiagram-v2
   state "Legend" as legend {
     lg0: Unmanaged
-    lg1: Gateway
-    lg2: Moving
-    lg3: Breaks CurrentStore
-    lg4: Path to the CurrentStore bug
+    lg1: Designated
+    lg2: Gateway
+    lg3: Moving
+    lg4: Breaks CurrentStore
+    lg5: Path to the CurrentStore bug
   }
   class lg0 tan
-  class lg1 blue
-  class lg2 pink
-  class lg3 breaks
-  class lg4 bugPath
+  class lg1 teal
+  class lg2 blue
+  class lg3 pink
+  class lg4 breaks
+  class lg5 bugPath
   s0: No owner row, the gateway serves (no node set)
   s1: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far)
   s2: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far), an input waits at the gateway
@@ -23,12 +25,15 @@ stateDiagram-v2
   s6: No owner row, the gateway serves (set to the designated node, the hub's file says otherwise, 2 file edits so far), idle session on the gateway
   s7: No owner row, the gateway serves (set to the designated node, the hub's file says otherwise, 2 file edits so far), an input waits at the gateway, idle session on the gateway
   s8: Home is the gateway (set to the designated node, the hub's file says otherwise, 2 file edits so far), an input is kept for the designated node, idle session on the gateway
-  s9: Home is the gateway (no node set, 2 file edits so far), an input is kept for the designated node, idle session on the gateway
-  s10: Home is the gateway (no node set, 2 file edits so far), an input is kept for the designated node, old home asked to end, idle session on the gateway
-  s11: Home is the gateway (no node set, 2 file edits so far), an input is kept for the gateway, old home asked to end, idle session on the gateway
-  s12: Home is the gateway (no node set, 2 file edits so far), an input is kept for the gateway, old home ended
-  s13: Home is the gateway (no node set, 2 file edits so far), an input is handed to the gateway
-  s14: Home is the gateway (no node set, 2 file edits so far), turn runs on the gateway [writes from an old store]
+  s9: Home is the gateway (set to the designated node, the hub's file says otherwise, 2 file edits so far), an input is kept for the designated node, old home asked to end, idle session on the gateway
+  s10: Home is the gateway (set to the designated node, the hub's file says otherwise, 2 file edits so far), an input is kept for the designated node, old home ended, the gateway cleared its session
+  s11: Home is the designated node (set to the designated node, the hub's file says otherwise, 2 file edits so far), an input is handed to the designated node
+  s12: Home is the designated node (set to the gateway, 2 file edits so far), an input is handed to the designated node
+  s13: Home is the designated node (set to the gateway, 2 file edits so far), an input is kept for the gateway
+  s14: Home is the designated node (set to the gateway, 2 file edits so far), an input is kept for the gateway, old home asked to end
+  s15: Home is the designated node (set to the gateway, 2 file edits so far), an input is kept for the gateway, old home ended
+  s16: Home is the gateway (set to the gateway, 2 file edits so far), an input is handed to the gateway
+  s17: Home is the gateway (set to the gateway, 2 file edits so far), turn runs on the gateway [writes from an old store]
   [*] --> s0
   s0 --> s1: an operator edits one node's config file
   s1 --> s2: you send a message
@@ -39,12 +44,15 @@ stateDiagram-v2
   s6 --> s7: you send a message
   s7 --> s8: the gateway puts the input into shared custody
   s8 --> s8: a node reads the owner row again
-  s8 --> s9: the hub copies its setting to the database
-  s9 --> s10: the old home is asked to end its session
-  s10 --> s11: the gateway's tick picks the target again
-  s11 --> s12: the old home answers the request
-  s12 --> s13: the owner row moves to the new home
-  s13 --> s14: the home starts the turn
+  s8 --> s9: the old home is asked to end its session
+  s9 --> s10: the old home answers the request
+  s10 --> s11: the owner row moves to the new home
+  s11 --> s12: the hub copies its setting to the database
+  s12 --> s13: the gateway's tick picks the target again
+  s13 --> s14: the old home is asked to end its session
+  s14 --> s15: the old home answers the request
+  s15 --> s16: the owner row moves to the new home
+  s16 --> s17: the home starts the turn
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   class s0 tan
   class s0 bugPath
@@ -64,16 +72,22 @@ stateDiagram-v2
   class s7 bugPath
   class s8 blue
   class s8 bugPath
-  class s9 blue
+  class s9 pink
   class s9 bugPath
   class s10 pink
   class s10 bugPath
-  class s11 pink
+  class s11 teal
   class s11 bugPath
-  class s12 pink
+  class s12 teal
   class s12 bugPath
-  class s13 blue
+  class s13 teal
   class s13 bugPath
-  class s14 blue
-  class s14 breaks
+  class s14 pink
   class s14 bugPath
+  class s15 pink
+  class s15 bugPath
+  class s16 blue
+  class s16 bugPath
+  class s17 blue
+  class s17 breaks
+  class s17 bugPath
