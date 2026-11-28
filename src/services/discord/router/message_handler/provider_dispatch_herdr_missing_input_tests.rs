@@ -367,7 +367,7 @@ fn a_busy_registration_failure_keeps_live_input_and_submits_once_on_idle_pg() {
         // Keep the original inode so the same pinned source can become Idle.
         std::fs::rename(parked, &started.path).unwrap();
         append_terminal(&started, "registration-working");
-        fx.rig.answer("pane.read", screen_at(screen));
+        fx.rig.answer("pane.read", screen_at(&screen));
         assert!(crate::services::claude_tui::readiness::observe(fx.logical(), Some(&started.path)).is_some());
         let state = super::source_input_settled(&intake, &original, &heads).await;
         assert_eq!(state["items"], json!([]));
