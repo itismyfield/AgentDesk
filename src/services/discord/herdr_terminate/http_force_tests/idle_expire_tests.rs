@@ -643,6 +643,32 @@ fn a_clear_over_a_launch_start_forgets_the_kept_codex_thread_pg() {
     cleared_after_idle(name, Clear::OverLaunchStart);
 }
 
+// A clear over a launch start whose writes do not land still leaves the next message to a fresh
+// session: the kept thread is ended by the channel, not by those writes.
+#[test]
+fn a_clear_over_a_launch_start_whose_writes_fail_starts_fresh_pg() {
+    let name = "idle_expire_tests::a_clear_over_a_launch_start_whose_writes_fail_starts_fresh_pg";
+    let Some((rig, runtime)) = rig_child(name) else {
+        return;
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    runtime.block_on(async {
+        let (node, native) = idle_codex(&rig).await;
+        adopt(&node).await;
+        assert_eq!(node.idle_kill().await["tmux_killed"], true);
+        for refuse in [
+            "CREATE FUNCTION refuse_clear_boundary() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'clear boundary refused'; END $$",
+            "CREATE TRIGGER refuse_clear_boundary BEFORE INSERT OR UPDATE ON channel_session_clear_boundaries FOR EACH ROW EXECUTE FUNCTION refuse_clear_boundary()",
+        ] {
+            sqlx::query(refuse).execute(&node.pool).await.unwrap();
+        }
+        let reply = run_clear(&node, Clear::OverLaunchStart).await;
+        assert!(reply.contains("완료하지 못했어요"), "{reply}");
+        assert_fresh(&node, &native, &reply).await;
+        node.finish().await;
+    });
+}
+
 // A clear past a held transition says the conversation was reset only with the kept thread ended.
 #[test]
 fn a_held_clear_forgets_the_kept_codex_thread_pg() {
