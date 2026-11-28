@@ -386,4 +386,13 @@ pub(in crate::services::discord) fn policy_intent(
 /// child-process stop named by `STOP_AT`.
 #[cfg(any(test, feature = "test-support"))]
 #[path = "before_start_stop_hook_tests.rs"]
-pub(in crate::services::discord) mod test_hooks;
+mod before_start_stop_hook_tests;
+#[cfg(any(test, feature = "test-support"))]
+pub(in crate::services::discord) mod test_hooks {
+    pub(in crate::services::discord) use super::before_start_stop_hook_tests::STOP_AT;
+    pub(super) use super::before_start_stop_hook_tests::{boundary, submitting};
+    #[cfg(unix)]
+    pub(in crate::services::discord) use super::before_start_stop_hook_tests::{
+        observe, submitted,
+    };
+}

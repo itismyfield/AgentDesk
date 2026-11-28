@@ -760,10 +760,8 @@ pub(in crate::services::discord::turn_bridge) mod cold_error;
 mod herdr_settlement {
     use crate::db::dispatched_sessions::hosted_execution::HostedOwner;
     use crate::services::discord::formatting::ReplaceLongMessageOutcome;
-    use crate::services::discord::gateway::TurnGateway;
     use crate::services::discord::gateway::{GatewayFuture, TurnGateway};
     use crate::services::discord::inflight::InflightTurnState;
-    use crate::services::discord::queue_io::mailbox_recovery_kickoff;
     use crate::services::discord::turn_bridge::{BridgeCompletionSignal, TurnBridgeContext};
     use crate::services::discord::{self, Intervention};
     use crate::services::provider::cancel_token_claude_interrupt::{
@@ -771,7 +769,6 @@ mod herdr_settlement {
     };
     use crate::services::provider::{CancelToken, ProviderKind};
     use crate::services::tui_prompt_dedupe::binding_events as events;
-    use crate::services::turn_orchestrator::Intervention;
     use poise::serenity_prelude::{ChannelId, MessageId, UserId};
     use std::os::unix::fs::MetadataExt;
     use std::sync::{Arc, Mutex};

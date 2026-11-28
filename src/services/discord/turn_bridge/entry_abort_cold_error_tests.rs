@@ -488,7 +488,7 @@ async fn cold_error_without_proof_remains_held() {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Successor {
     /// A successor's row replaced the durable row after the bridge passed its mailbox check.
-    Row,
+    DurableRow,
     /// A successor's actor took the mailbox, with its own row, before the bridge started.
     Actor,
 }
@@ -501,7 +501,10 @@ async fn cold_error_does_not_clear_successor() {
     let _env = crate::config::set_agentdesk_root_for_test(root.path());
     let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let _codex = codex_cli();
-    for (n, successor) in [Successor::Row, Successor::Actor].into_iter().enumerate() {
+    for (n, successor) in [Successor::DurableRow, Successor::Actor]
+        .into_iter()
+        .enumerate()
+    {
         let turn = cold(ProviderKind::Codex, 5_340_663_000 + n as u64).await;
         let (result, launches) = turn.execute(turn.owner.clone()).await;
         assert_eq!(
@@ -544,7 +547,7 @@ async fn cold_error_does_not_clear_successor() {
         let (signal, _) = turn.bridge(error).await;
         test_hooks::observe(None);
         let expected = match successor {
-            Successor::Row => &["before_receipt"][..],
+            Successor::DurableRow => &["before_receipt"][..],
             Successor::Actor => &[][..],
         };
         assert_eq!(*steps.borrow(), expected, "{successor:?}");
@@ -563,7 +566,7 @@ async fn cold_error_does_not_clear_successor() {
         );
         // A refused close leaves the turn unresolved; a bridge refused at entry aborts there.
         let (holder, exit) = match successor {
-            Successor::Row => (&turn.cancel, BridgeCompletionSignal::Unresolved),
+            Successor::DurableRow => (&turn.cancel, BridgeCompletionSignal::Unresolved),
             Successor::Actor => (&next, BridgeCompletionSignal::EntryAborted),
         };
         // The holder keeps the mailbox uncancelled and the active count is untouched.

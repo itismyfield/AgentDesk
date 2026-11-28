@@ -111,7 +111,14 @@ impl SharedData {
 /// Lets a test stand a recording Discord REST client in for the runtime caches on its thread.
 #[cfg(any(test, feature = "test-support"))]
 #[path = "shared_state_rest_hook_tests.rs"]
-pub(in crate::services::discord) mod test_rest;
+mod shared_state_rest_hook_tests;
+#[cfg(any(test, feature = "test-support"))]
+pub(in crate::services::discord) mod test_rest {
+    pub(super) use super::shared_state_rest_hook_tests::current;
+    pub(in crate::services::discord) use super::shared_state_rest_hook_tests::{
+        Guard, install, recording_mock,
+    };
+}
 
 /// #3038 cluster C — queued-placeholder handoff state: the `📬 메시지 대기 중`
 /// card mapping, its queue-exit clear sidecar mirror, and the per-channel

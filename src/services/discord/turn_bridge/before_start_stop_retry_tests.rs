@@ -1,5 +1,5 @@
 use super::*;
-use crate::services::discord::gateway::GatewayFuture;
+use crate::services::discord::gateway::{GatewayFuture, TurnGateway};
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::future::Future;

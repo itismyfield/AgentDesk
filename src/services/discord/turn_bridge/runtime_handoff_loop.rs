@@ -118,7 +118,12 @@ fn gateway_session_ready(shared: &SharedData) -> bool {
 /// Lets a test report a live gateway session on its thread.
 #[cfg(all(any(test, feature = "test-support"), unix))]
 #[path = "runtime_handoff_loop/gateway_ready_hook_tests.rs"]
-pub(in crate::services::discord) mod test_gateway;
+mod gateway_ready_hook_tests;
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(in crate::services::discord) mod test_gateway {
+    pub(in crate::services::discord) use super::gateway_ready_hook_tests::connect;
+    pub(super) use super::gateway_ready_hook_tests::connected;
+}
 use guarded_save::{
     guarded_runtime_atomic_stamp, guarded_runtime_handoff_save,
     tmux_ready_state_dirty_after_guarded_save,

@@ -12,9 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64};
 use std::sync::mpsc;
 use std::sync::{Arc, atomic::Ordering};
 
-use crate::services::discord::turn_bridge::resume_pin_tests::{
-    BRIDGE_CAPTURE_PROBE, WRONG_CAPTURE_CHANNEL,
-};
+pub(in crate::services::discord) use crate::services::discord::turn_bridge::resume_pin_tests::probes::*;
 
 fn handle() -> TmuxWatcherHandle {
     TmuxWatcherHandle {
