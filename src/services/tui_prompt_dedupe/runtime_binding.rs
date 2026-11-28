@@ -20,7 +20,7 @@ pub use codex_policy::{
 };
 mod codex_hook;
 #[cfg(unix)]
-pub(crate) use binding_access::evict_previous_tmux_mirror_under_source_authority;
+pub use binding_access::evict_previous_tmux_mirror_under_source_authority;
 pub use binding_access::register_provider_session;
 use binding_access::same_runtime_source;
 pub use binding_access::{

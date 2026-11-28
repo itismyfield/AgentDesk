@@ -196,7 +196,8 @@ pub fn runtime_bindings_for_kind(
 }
 
 #[cfg(unix)]
-pub(crate) fn evict_previous_tmux_mirror_under_source_authority(
+/// Removes a matched legacy mirror after its caller has confirmed a Herdr host.
+pub fn evict_previous_tmux_mirror_under_source_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     expected: &TuiRuntimeBinding,
 ) -> bool {
