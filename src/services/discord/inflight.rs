@@ -28,7 +28,9 @@ pub(in crate::services::discord) use host_recovery_guard::{
     KeyedTeardown, clear_channel_session, keyed_is_legacy_tmux, keyed_teardown, teardown_for_lookup,
 };
 #[cfg(unix)]
-pub(in crate::services::discord) use host_recovery_guard::{marker_witness, with_inflight_row};
+pub(in crate::services::discord) use host_recovery_guard::{
+    marker_witness, mirror_host_for_lookup, with_inflight_row,
+};
 #[cfg(test)]
 mod invariant_test_capture;
 mod model;

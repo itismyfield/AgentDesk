@@ -196,15 +196,44 @@ pub(in crate::services::discord) async fn keyed_is_legacy_tmux(
     .1
 }
 
-fn resolve_lookup(
+#[cfg(unix)]
+pub(in crate::services::discord) fn mirror_host_for_lookup(
+    lookup: &HostedLookup,
+    provider: &ProviderKind,
+    channel_id: u64,
+    session_key: &str,
+    tmux_name: &str,
+) -> Option<HostKind> {
+    let (mut evidence, _) =
+        keyed_evidence(lookup, provider, channel_id, Some(session_key), tmux_name);
+    if matches!(lookup, HostedLookup::Missing) {
+        // Mirror eviction can act on a name before a session row has been written.
+        evidence.session_record = HostWitness::LegacyRow;
+    }
+    let input = SessionTargetInput::SessionKey(session_key.to_string());
+    match resolve_session_target(input, &KeyedEvidence(evidence)).host {
+        TargetHost::Known {
+            kind: HostKind::Tmux,
+            ..
+        } => Some(HostKind::Tmux),
+        TargetHost::Known {
+            kind: HostKind::Herdr,
+            ..
+        }
+        | TargetHost::Unknown(crate::services::session_host::UnknownHost::MissingTarget(
+            HostKind::Herdr,
+        )) => Some(HostKind::Herdr),
+        _ => None,
+    }
+}
+
+fn keyed_evidence(
     lookup: &HostedLookup,
     provider: &ProviderKind,
     channel_id: u64,
     session_key: Option<&str>,
     tmux_name: &str,
-    observed: Option<HostLiveness>,
-    caller: &str,
-) -> (KeyedTeardown, bool) {
+) -> (SessionTargetEvidence, bool) {
     let mut evidence = SessionTargetEvidence {
         session_key: session_key.map(str::to_string),
         session_name: Some(tmux_name.to_string()),
@@ -236,6 +265,20 @@ fn resolve_lookup(
         Ok(_) => {}
         Err(error) => evidence.inflight_locator = HostWitness::ReadFailed(error),
     }
+    (evidence, has_tmux_target)
+}
+
+fn resolve_lookup(
+    lookup: &HostedLookup,
+    provider: &ProviderKind,
+    channel_id: u64,
+    session_key: Option<&str>,
+    tmux_name: &str,
+    observed: Option<HostLiveness>,
+    caller: &str,
+) -> (KeyedTeardown, bool) {
+    let (evidence, has_tmux_target) =
+        keyed_evidence(lookup, provider, channel_id, session_key, tmux_name);
     let tmux_or_absent = |witness: &HostWitness| match witness {
         HostWitness::Absent => true,
         HostWitness::Known { kind, .. } => *kind == HostKind::Tmux,

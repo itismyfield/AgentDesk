@@ -235,38 +235,95 @@ fn keyed(
     )
 }
 
-/// Sync [`sweep_session_deferred`] for the rehydration pass on the blocking pool;
-/// a lookup that cannot run or finish in time keeps the mirror.
+#[cfg(unix)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum MirrorHost {
+    Tmux,
+    Herdr,
+    Deferred,
+}
+
+#[cfg(unix)]
+impl MirrorHost {
+    pub(super) fn is_tmux(self) -> bool {
+        self == Self::Tmux
+    }
+
+    pub(super) fn is_herdr(self) -> bool {
+        self == Self::Herdr
+    }
+}
+
+/// Read the keyed guard's host evidence on the blocking pool before probing a pane.
 #[cfg(unix)]
 pub(super) fn mirror_evict_admitted(
     shared: &SharedData,
     provider: &ProviderKind,
     tmux_name: &str,
-) -> bool {
+    channel_hint: Option<u64>,
+) -> MirrorHost {
+    use crate::services::session_host::HostKind;
+    use std::collections::HashSet;
+    use std::sync::{LazyLock, Mutex};
+
+    static WARNED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
+
     // Test runtimes built without a pool predate the guard; production requires PostgreSQL.
     #[cfg(test)]
     if shared.pg_pool.is_none() {
-        return true;
+        return MirrorHost::Tmux;
     }
-    let Ok(handle) = tokio::runtime::Handle::try_current() else {
-        tracing::warn!(tmux_name, "no runtime for the host check; mirror kept");
-        return false;
-    };
-    // The pass sees every provider's panes; the pane's own record, not the pass, picks the row key.
-    let recorded = crate::services::provider::session_source::tmux_session_provider(tmux_name);
-    let provider = recorded.unwrap_or_else(|| provider.clone());
-    let channel = crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(tmux_name);
-    let (channel, caller) = (channel.unwrap_or(0), "idle_mirror_evict");
     let gate = async {
-        let hashes = provider_hashes(shared, &provider).await;
-        let lookup = identity_lookup(shared, &hashes, None, &provider, channel, tmux_name).await;
-        kept(shared, lookup, &provider, channel, None, tmux_name, caller)
+        use crate::services::agent_protocol::RuntimeHandoffKind;
+        use crate::services::{tmux_common, tui_prompt_dedupe as dedupe};
+
+        // Use local identity evidence here: a tmux environment read is itself a probe.
+        let recorded =
+            crate::services::provider::parse_provider_and_channel_from_tmux_name(tmux_name)
+                .map(|(provider, _)| provider);
+        let kind = dedupe::runtime_binding_for_tmux_session(tmux_name)
+            .map(|binding| binding.runtime_kind)
+            .or_else(|| tmux_common::resolve_tmux_runtime_kind_marker(tmux_name));
+        let provider = recorded.as_ref().unwrap_or(match kind {
+            Some(RuntimeHandoffKind::ClaudeTui) => &ProviderKind::Claude,
+            Some(RuntimeHandoffKind::CodexTui) => &ProviderKind::Codex,
+            _ => provider,
+        });
+        let channel = dedupe::owner_channel_for_tmux_session(tmux_name)
+            .or(channel_hint)
+            .unwrap_or(0);
+        let hashes = provider_hashes(shared, provider).await;
+        let lookup = identity_lookup(shared, &hashes, None, provider, channel, tmux_name).await;
+        let key = super::adk_session::build_namespaced_session_key(
+            &shared.token_hash,
+            provider,
+            tmux_name,
+        );
+        super::inflight::mirror_host_for_lookup(&lookup, provider, channel, &key, tmux_name)
     };
-    match handle.block_on(tokio::time::timeout(MIRROR_LOOKUP_BUDGET, gate)) {
-        Ok(held) => !held,
-        Err(_) => {
-            tracing::warn!(tmux_name, "host check timed out; mirror kept");
-            false
+    let result = match tokio::runtime::Handle::try_current() {
+        Ok(handle) => match handle
+            .block_on(async { tokio::time::timeout(MIRROR_LOOKUP_BUDGET, gate).await })
+        {
+            Ok(Some(HostKind::Tmux)) => Ok(MirrorHost::Tmux),
+            Ok(Some(HostKind::Herdr)) => Ok(MirrorHost::Herdr),
+            Ok(_) => Err("host check inconclusive; mirror kept"),
+            Err(_) => Err("host check timed out; mirror kept"),
+        },
+        Err(_) => Err("no runtime for the host check; mirror kept"),
+    };
+    let mut warned = WARNED.lock().unwrap_or_else(|error| error.into_inner());
+    match result {
+        Ok(host) => {
+            warned.remove(tmux_name);
+            host
+        }
+        Err(message) => {
+            if warned.insert(tmux_name.to_owned()) {
+                drop(warned);
+                tracing::warn!(tmux_name, "{message}");
+            }
+            MirrorHost::Deferred
         }
     }
 }

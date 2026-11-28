@@ -73,7 +73,7 @@ pub(super) fn claude_tui_session_is_dead_orphaned(
         || crate::services::tmux_diagnostics::tmux_session_pane_liveness(tmux_session_name),
         DEAD_ORPHANED_PANE_PROBE_SAMPLES,
         Some(DEAD_ORPHANED_PANE_PROBE_DELAY),
-    ) && host_admits(shared, &ProviderKind::Claude, tmux_session_name)
+    )
 }
 
 /// #3105 (codex P2): pure, testable core of the dead/orphaned pane decision (the
@@ -132,10 +132,21 @@ pub(super) fn pane_is_confirmed_dead_orphaned(
 /// session that is gone from this host), which is exactly why the previous
 /// in-`list` dead-pane branch could not reach it.
 #[cfg(unix)]
-pub(super) fn evict_dead_orphaned_claude_tui_mirrors(shared: &Arc<SharedData>) {
+pub(super) fn evict_dead_orphaned_claude_tui_mirrors(
+    shared: &Arc<SharedData>,
+) -> HashMap<String, bool> {
+    let mut tmux_admitted = HashMap::new();
     for (tmux_session_name, _binding) in
         crate::services::tui_prompt_dedupe::runtime_bindings_for_kind(RuntimeHandoffKind::ClaudeTui)
     {
+        let host = host_admits(shared, &ProviderKind::Claude, &tmux_session_name, None);
+        tmux_admitted.insert(tmux_session_name.clone(), host.is_tmux());
+        if host.is_herdr() {
+            evict_herdr_mirror(shared, &tmux_session_name);
+        }
+        if !host.is_tmux() {
+            continue;
+        }
         if !claude_tui_session_is_dead_orphaned(shared, &tmux_session_name) {
             continue;
         }
@@ -171,6 +182,7 @@ pub(super) fn evict_dead_orphaned_claude_tui_mirrors(shared: &Arc<SharedData>) {
             );
         }
     }
+    tmux_admitted
 }
 
 #[cfg(unix)]
@@ -186,7 +198,7 @@ fn codex_tui_session_is_dead_orphaned(shared: &Arc<SharedData>, tmux_session_nam
         || crate::services::tmux_diagnostics::tmux_session_pane_liveness(tmux_session_name),
         DEAD_ORPHANED_PANE_PROBE_SAMPLES,
         Some(DEAD_ORPHANED_PANE_PROBE_DELAY),
-    ) && host_admits(shared, &ProviderKind::Codex, tmux_session_name)
+    )
 }
 
 #[cfg(all(unix, test))]
@@ -215,10 +227,19 @@ fn codex_pass_pane_is_live(tmux_session_name: &str) -> bool {
 }
 
 #[cfg(unix)]
-fn evict_dead_orphaned_codex_tui_mirrors(shared: &Arc<SharedData>) {
+fn evict_dead_orphaned_codex_tui_mirrors(shared: &Arc<SharedData>) -> HashMap<String, bool> {
+    let mut tmux_admitted = HashMap::new();
     for (tmux_session_name, _binding) in
         crate::services::tui_prompt_dedupe::runtime_bindings_for_kind(RuntimeHandoffKind::CodexTui)
     {
+        let host = host_admits(shared, &ProviderKind::Codex, &tmux_session_name, None);
+        tmux_admitted.insert(tmux_session_name.clone(), host.is_tmux());
+        if host.is_herdr() {
+            evict_herdr_mirror(shared, &tmux_session_name);
+        }
+        if !host.is_tmux() {
+            continue;
+        }
         if !codex_tui_session_is_dead_orphaned(shared, &tmux_session_name) {
             continue;
         }
@@ -245,6 +266,20 @@ fn evict_dead_orphaned_codex_tui_mirrors(shared: &Arc<SharedData>) {
             );
         }
     }
+    tmux_admitted
+}
+
+#[cfg(unix)]
+fn evict_herdr_mirror(shared: &SharedData, tmux_session_name: &str) {
+    shared
+        .tmux_watchers
+        .clear_restored_owner_for_tmux_session(tmux_session_name);
+    if crate::services::tui_prompt_dedupe::evict_dead_tmux_mirror(tmux_session_name) {
+        tracing::debug!(
+            tmux_session_name,
+            "evicted stale tmux mirror for Herdr session"
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -254,12 +289,16 @@ pub(super) fn rehydrate_existing_claude_tui_bindings(shared: &Arc<SharedData>) {
     // #3105 (codex P1 sub-case B): tombstone stale mirrors for dead/orphaned
     // sessions BEFORE anything else, so the per-poll drift/skip WARN spam stops
     // even when the session is not present in `list_session_names()` at all.
-    evict_dead_orphaned_claude_tui_mirrors(shared);
+    let tmux_admitted = evict_dead_orphaned_claude_tui_mirrors(shared);
 
     match claude_session_names() {
         Ok(sessions) => {
             for tmux_session_name in sessions {
-                let _ = rehydrate_claude_tui_pane(shared, &tmux_session_name);
+                let _ = rehydrate_claude_tui_pane_with_hosts(
+                    shared,
+                    &tmux_session_name,
+                    &tmux_admitted,
+                );
             }
             crate::services::claude_tui::hook_server::mark_boot_discovery_complete();
         }
@@ -275,14 +314,23 @@ pub(super) fn rehydrate_existing_claude_tui_bindings(shared: &Arc<SharedData>) {
 }
 
 /// One pane of the rehydrate pass; a durable Pending is restored before the binding judgment.
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 fn rehydrate_claude_tui_pane(
     shared: &Arc<SharedData>,
     tmux_session_name: &str,
 ) -> Option<tokio::task::JoinHandle<()>> {
+    rehydrate_claude_tui_pane_with_hosts(shared, tmux_session_name, &HashMap::new())
+}
+
+#[cfg(unix)]
+fn rehydrate_claude_tui_pane_with_hosts(
+    shared: &Arc<SharedData>,
+    tmux_session_name: &str,
+    tmux_admitted: &HashMap<String, bool>,
+) -> Option<tokio::task::JoinHandle<()>> {
     let before =
         crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session_name);
-    rehydrate_claude_tui_pane_inner(shared, tmux_session_name);
+    rehydrate_claude_tui_pane_inner(shared, tmux_session_name, tmux_admitted);
     if crate::engine::ops::turn_ops::health_registry().is_some() {
         return None;
     }
@@ -498,13 +546,16 @@ pub(in crate::services::discord) static OBSERVER_PUBLICATION_FOR_TESTS: std::syn
 > = std::sync::LazyLock::new(Default::default);
 
 #[cfg(unix)]
-fn rehydrate_claude_tui_pane_inner(shared: &Arc<SharedData>, tmux_session_name: &str) {
+fn rehydrate_claude_tui_pane_inner(
+    shared: &Arc<SharedData>,
+    tmux_session_name: &str,
+    tmux_admitted: &HashMap<String, bool>,
+) {
     // #3018: dedupe lookup here is a diagnostic/mirror rehydration hint only
     // (subordinate to the freshly resolved channel below), never a routing
     // authority — the authoritative resolver is owner_channel_for_tmux_session.
     let existing_channel =
         crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(tmux_session_name);
-    let (fresh_binding, launch_context) = claude_launch_observation(tmux_session_name);
     // #3105: prefer the settings-derived (authoritative) channel; only fall
     // back to the dedupe mirror's last-seen channel for the dedupe binding
     // refresh below. The mirror's value must NOT be promoted into the
@@ -514,10 +565,22 @@ fn rehydrate_claude_tui_pane_inner(shared: &Arc<SharedData>, tmux_session_name: 
         Some(channel_id) if !names_another_host(tmux_session_name) => channel_id,
         _ => return,
     };
+    if !tmux_admitted
+        .get(tmux_session_name)
+        .copied()
+        .unwrap_or_else(|| {
+            host_admits(
+                shared,
+                &ProviderKind::Claude,
+                tmux_session_name,
+                Some(channel_id),
+            )
+            .is_tmux()
+        })
+    {
+        return;
+    }
     if !claude_pane_live(tmux_session_name) {
-        if !host_admits(shared, &ProviderKind::Claude, tmux_session_name) {
-            return;
-        }
         // #3105: the restored owner binding is only valid for a LIVE session;
         // drop it once the pane is gone so a dead session can never resolve.
         shared
@@ -549,6 +612,7 @@ fn rehydrate_claude_tui_pane_inner(shared: &Arc<SharedData>, tmux_session_name: 
         }
         return;
     }
+    let (fresh_binding, launch_context) = claude_launch_observation(tmux_session_name);
     // #3105: self-heal the authoritative tmux-session→channel registry for a
     // LIVE Claude TUI session that has no live watcher handle (e.g. the slot
     // was evicted by a compact/restart/rebind and never re-claimed because
@@ -664,7 +728,7 @@ fn rehydrate_claude_tui_pane_inner(shared: &Arc<SharedData>, tmux_session_name: 
 /// One Codex discovery pass: Herdr reconnect, then owner repair and binding of live tmux panes.
 #[cfg(unix)]
 pub(super) fn rehydrate_existing_codex_tui_bindings(shared: &Arc<SharedData>) {
-    evict_dead_orphaned_codex_tui_mirrors(shared);
+    let tmux_admitted = evict_dead_orphaned_codex_tui_mirrors(shared);
     // Codex Herdr rows, read whether or not tmux answers; off Herdr this reads nothing.
     super::super::recovery_engine::herdr_reader::reconnect_restarted_herdr_with_shared(
         shared,
@@ -677,6 +741,16 @@ pub(super) fn rehydrate_existing_codex_tui_bindings(shared: &Arc<SharedData>) {
             return;
         }
     };
+    sessions.retain(|name| {
+        tmux_session_is_codex_tui(name)
+            && tmux_admitted.get(name).copied().unwrap_or_else(|| {
+                let channel = resolve_rehydrated_tmux_channel_id(&ProviderKind::Codex, name)
+                    .or_else(|| {
+                        crate::services::tui_prompt_dedupe::codex_verified_discovered_channel(name)
+                    });
+                host_admits(shared, &ProviderKind::Codex, name, channel).is_tmux()
+            })
+    });
     sessions.sort_by(|left, right| {
         codex_tui_launch_modified_since(right)
             .cmp(&codex_tui_launch_modified_since(left))
@@ -706,9 +780,6 @@ pub(super) fn rehydrate_existing_codex_tui_bindings(shared: &Arc<SharedData>) {
         };
 
         if !codex_pass_pane_is_live(&tmux_session_name) {
-            if !host_admits(shared, &ProviderKind::Codex, &tmux_session_name) {
-                continue;
-            }
             shared
                 .tmux_watchers
                 .clear_restored_owner_for_tmux_session(&tmux_session_name);
@@ -1485,7 +1556,8 @@ mod tests {
                                 }
                             }
                             if listed && *kind == RuntimeHandoffKind::CodexTui {
-                                crate::services::tmux_common::write_tmux_runtime_kind_marker(&name, *kind);
+                                crate::services::tmux_common::write_tmux_runtime_kind_marker(&name, *kind)
+                                    .unwrap();
                             }
                             dedupe::register_tmux_runtime_binding(&name, binding(*kind));
                             dedupe::register_tmux_channel(&name, channel);
