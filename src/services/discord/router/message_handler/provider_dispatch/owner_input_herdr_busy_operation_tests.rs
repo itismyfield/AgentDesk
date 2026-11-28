@@ -2,7 +2,40 @@
 use super::*;
 use crate::db::dispatched_sessions::hosted_execution::HostedObservation;
 use crate::services::claude_tui::host_input::busy::observed;
+use crate::services::discord::inflight::InflightTurnState;
 use crate::services::turn_host::HerdrTurnPlan;
+
+pub(in super::super::super) fn live_source(
+    provider: ProviderKind,
+    host: &TurnHost,
+    session: &str,
+    row: &InflightTurnState,
+) -> Option<(String, Option<String>)> {
+    super::super::busy_source::live_source(provider, host, session, row)
+}
+
+pub(in super::super::super) struct ObservedRegistration {
+    pub(in super::super::super) phase: target::Phase,
+    pub(in super::super::super) transcript: PathBuf,
+    pub(in super::super::super) attempt: Value,
+}
+
+impl ObservedRegistration {
+    pub(in super::super::super) fn observed(
+        mailbox: ChannelMailboxHandle,
+        kind: (&str, InputOrigin, bool),
+        at: (&TurnHost, &str, Option<(&str, Option<&str>)>),
+        original: &PendingQueueItem,
+        until_done: Option<UntilDone>,
+    ) -> Result<Self, String> {
+        let registration = Registration::observed(mailbox, kind, at, original, until_done)?;
+        Ok(Self {
+            phase: registration.phase,
+            transcript: registration.transcript,
+            attempt: registration.attempt,
+        })
+    }
+}
 
 /// A managed caller already observed this Bound pane busy; its actual front handoff must use the
 /// common operation once and settle at Enter while the native transcript remains busy.
