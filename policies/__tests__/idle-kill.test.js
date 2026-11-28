@@ -33,7 +33,7 @@ test("idle-kill tick selects legacy tmux beyond older hosted and marker-only Her
   const hosted = Array.from({ length: 18 }, (_, index) => ({
     ...idleRow("herdr-" + index), hosted_execution: { location: { host: "herdr" } }
   }));
-  const markers = Array.from({ length: 52 }, (_, index) => idleRow("marker-" + index));
+  const markers = Array.from({ length: 70 }, (_, index) => idleRow("marker-" + index));
   const rows = orderedRows([...markers, ...hosted, legacy]);
   const { policy, state } = loadPolicy("policies/timeouts.js", {
     config: { server_port: 8791 },
@@ -59,7 +59,11 @@ test("idle-kill tick selects legacy tmux beyond older hosted and marker-only Her
   assert.deepEqual(state.httpPosts.map(({ url }) => url), [
     `http://127.0.0.1:8791/api/sessions/${encodeURIComponent(legacy.session_key)}/kill-tmux`
   ]);
-  assert.deepEqual(state.idleCleanupChecks.map(({ keys }) => keys.length), [64, 7]);
+  const markerKeys = markers.map(({ session_key }) => session_key);
+  assert.deepEqual(state.idleCleanupChecks.map(({ keys }) => keys), [
+    markerKeys.slice(0, 64),
+    markerKeys.slice(64).concat(legacy.session_key)
+  ]);
   assert.ok(state.logs.debug.some((line) => line.includes("herdr_idle_cleanup_requires_core")));
 });
 

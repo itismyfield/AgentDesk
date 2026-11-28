@@ -79,6 +79,7 @@ module.exports = function attachIdleKill(timeouts, helpers) {
         "WHERE status = 'idle' " +
         "AND provider IN ('claude', 'codex', 'qwen') " +
         "AND active_dispatch_id IS NULL " +
+        "AND s.hosted_execution IS NULL " +
         mainChannelSqlGuard +
         "AND latest.last_seen_at < NOW() - INTERVAL '6 hours' ";
       // Exclude unavailable owners before LIMIT so an offline node's backlog

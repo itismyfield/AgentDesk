@@ -394,6 +394,165 @@ async fn tick5min_reserves_idle_settlement_during_slow_g_pg() {
     checked.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tick5min_excludes_hosted_records_in_candidate_sql_pg() {
+    use axum::{
+        Json, Router,
+        extract::Path,
+        routing::{get, post},
+    };
+    use std::sync::{Arc, Mutex};
+
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::db::dispatched_sessions::hosted_execution::{
+        HostedState,
+        test_support::{TOKEN, owner, record, wire},
+    };
+    use crate::engine::{hooks::Hook, loader::load_single_policy};
+
+    const LEGACY: &str = "fixture:AgentDesk-claude-legacy";
+    let database = TestPostgresDb::create().await;
+    let pool = database.connect_and_migrate_with_max_connections(4).await;
+    let hosted = (1..=192)
+        .map(|index| {
+            let identity = owner(&(800000 + index).to_string());
+            wire(&record(
+                &identity,
+                &format!("hosted-{index}"),
+                HostedState::Bound,
+            ))
+        })
+        .collect();
+    let inserted = sqlx::query(
+        "INSERT INTO sessions (session_key, provider, status, last_heartbeat, identity_kind,
+                              discord_token_hash, channel_id, instance_id, hosted_execution)
+         SELECT 'fixture:AgentDesk-claude-hosted-' || n, 'claude', 'idle',
+                NOW() - INTERVAL '8 hours', 'discord_channel', $1,
+                (800000 + n)::text, 'test-node', execution
+         FROM jsonb_array_elements($2::jsonb) WITH ORDINALITY AS hosted(execution, n)",
+    )
+    .bind(TOKEN)
+    .bind(Value::Array(hosted))
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(inserted.rows_affected(), 192);
+    sqlx::query(
+        "INSERT INTO sessions (session_key, provider, status, last_heartbeat, identity_kind,
+                              discord_token_hash, channel_id, instance_id)
+         VALUES ($1, 'claude', 'idle', NOW() - INTERVAL '7 hours',
+                 'discord_channel', $2, '801000', 'fixture-local')",
+    )
+    .bind(LEGACY)
+    .bind(TOKEN)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let candidates = Arc::new(Mutex::new(Vec::new()));
+    let kills = Arc::new(Mutex::new(Vec::new()));
+    let captured_candidates = candidates.clone();
+    let captured_kills = kills.clone();
+    let router = Router::new()
+        .route(
+            CLUSTER,
+            get(|| async {
+                Json(json!({
+                    "cluster": {
+                        "local_instance_id": "fixture-local",
+                        "configured_forward_owner_ids": ["test-node"],
+                        "lease_ttl_secs": 60,
+                    },
+                    "nodes": [{"instance_id": "test-node", "status": "online",
+                               "last_heartbeat_at": chrono::Utc::now().to_rfc3339()}],
+                }))
+            }),
+        )
+        .route(
+            CANDIDATES,
+            post(move |Json(body): Json<Value>| {
+                let candidates = captured_candidates.clone();
+                async move {
+                    let keys = body["keys"].clone();
+                    candidates.lock().unwrap().push(keys.clone());
+                    if keys != json!([LEGACY]) {
+                        return Json(json!({"deadline_exceeded": true, "request_started": true}));
+                    }
+                    Json(json!({"decisions": {(LEGACY): {"supported": true}}}))
+                }
+            }),
+        )
+        .route(
+            "/api/sessions/{key}/kill-tmux",
+            post(move |Path(key): Path<String>| {
+                let kills = captured_kills.clone();
+                async move {
+                    kills.lock().unwrap().push(key);
+                    Json(json!({"ok": true, "skipped_provider_activity_guard": true}))
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (stop, shutdown) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown.await;
+            })
+            .await
+            .unwrap();
+    });
+    let policy_pool = pool.clone();
+    let checks = tokio::spawn(async move {
+        let runtime = Runtime::new().unwrap();
+        let context = Context::full(&runtime).unwrap();
+        let slot = new_eval_deadline_slot();
+        install_policy_interrupt_handler(&runtime, slot.clone(), None);
+        context.with(|ctx| {
+            ctx.globals().set("port", port).unwrap();
+            ctx.eval::<(), _>(
+                r#"
+                var warnings = [];
+                var agentdesk = {
+                    log: {warn: function(line) { warnings.push(line); },
+                          debug: function() {}, info: function() {}},
+                    config: {get: function(key) { return key === "server_port" ? port : 45; }},
+                    pipeline: {
+                        getConfig: function() { return {}; },
+                        kickoffState: function() { return "requested"; },
+                        nextGatedTarget: function() { return "in_progress"; }
+                    }
+                };
+            "#,
+            )
+            .unwrap();
+            super::super::db_ops::register_db_ops(&ctx, Some(policy_pool)).unwrap();
+            register_http_ops(&ctx).unwrap();
+        });
+        let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("policies/timeouts.js");
+        let policy = load_single_policy(&context, &file).unwrap();
+        context.with(|ctx| {
+            let _deadline = ArmedDeadline::new(&slot, Duration::from_secs(5));
+            policy.hooks[&Hook::OnTick5min]
+                .clone()
+                .restore(&ctx)
+                .unwrap()
+                .call::<_, ()>(())
+                .unwrap();
+            assert!(ctx.eval::<Vec<String>, _>("warnings").unwrap().is_empty());
+        });
+    });
+    let result = await_within(checks, SERVER_WAIT_CAP).await;
+    let _ = stop.send(());
+    await_within(server, SERVER_WAIT_CAP).await.unwrap();
+    await_within(pool.close(), SERVER_WAIT_CAP).await;
+    await_within(database.drop(), SERVER_WAIT_CAP).await;
+    assert_eq!(candidates.lock().unwrap().as_slice(), [json!([LEGACY])]);
+    assert_eq!(kills.lock().unwrap().as_slice(), [LEGACY]);
+    result.unwrap();
+}
+
 fn load_pg_idle_policy(ctx: &rquickjs::Ctx<'_>, pool: sqlx::PgPool) {
     ctx.eval::<(), _>(
         r#"
