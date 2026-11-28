@@ -2258,6 +2258,7 @@ src/
 │   │   │   ├── delivery_record.rs
 │   │   │   ├── image_format.rs
 │   │   │   ├── image_format_tests.rs
+│   │   │   ├── ke_wire_tests.rs
 │   │   │   ├── local_retry_io_tests.rs
 │   │   │   ├── manual_delivery.rs
 │   │   │   ├── message.rs
@@ -5666,6 +5667,7 @@ src/
 ├── config.rs
 ├── config_live_reload.rs
 ├── credential.rs
+├── engine_probe_tests.rs
 ├── error.rs
 ├── eventbus.rs
 ├── high_risk_recovery.rs
@@ -5737,6 +5739,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/config.rs` | `agentdesk.yaml` parsing, configuration defaults, and shared test env helpers. |
 | `src/config_live_reload.rs` | Hot-reloads `agentdesk.yaml` without a restart: a debounced `notify` watcher pre-validates edits and atomically swaps a process-global config snapshot, keeping the running config on failure and reporting restart-required infra changes. |
 | `src/credential.rs` | Reads runtime credential files such as Discord bot tokens from the AgentDesk root. |
+| `src/engine_probe_tests.rs` | Fresh-process tests for engine probe behavior before and after the Discord adapters are installed. |
 | `src/error.rs` | Shared HTTP and policy error type with typed codes and JSON response helpers. |
 | `src/eventbus.rs` | In-process broadcast event bus (history/replay/batching) shared by the WS server layer and background services without a service→server backflow. |
 | `src/high_risk_recovery.rs` | PG-only high-risk recovery tests for boot reconciliation and review refire paths. |

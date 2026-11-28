@@ -44,6 +44,7 @@ fn js_remove() -> serde_json::Value {
 #[tokio::test]
 async fn public_policy_remove_matches_nonzero_birth_once_and_missing_never_notifies() {
     let _root = crate::config::TestRuntimeRootGuard::new();
+    crate::services::discord::install_engine_probes();
     let (path, _) = seed();
     let observed = watch(&ProviderKind::Claude, CHANNEL).unwrap().unwrap();
     assert_eq!(js_remove()["ok"], true);
@@ -56,6 +57,7 @@ async fn public_policy_remove_matches_nonzero_birth_once_and_missing_never_notif
 #[test]
 fn mismatch_io_protected_and_other_birth_keep_notification_pending() {
     let _root = crate::config::TestRuntimeRootGuard::new();
+    crate::services::discord::install_engine_probes();
     let (path, mut row) = seed();
     let observed = watch(&ProviderKind::Claude, CHANNEL).unwrap().unwrap();
     let mut other = row.clone();

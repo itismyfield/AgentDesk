@@ -237,6 +237,7 @@ impl Drop for Fixture {
 #[tokio::test(flavor = "current_thread")]
 async fn autoqueue_actual_reset_rechecks_pin_after_legacy_verdict_pg() {
     let fixture = Fixture::new(6_845_122);
+    crate::services::discord::install_engine_probes();
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     sqlx::query("INSERT INTO agents (id, name, provider, discord_channel_cdx) VALUES ('agent-1', 'verified reset', 'codex', $1)")

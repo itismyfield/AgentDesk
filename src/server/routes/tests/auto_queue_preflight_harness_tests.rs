@@ -87,6 +87,8 @@ async fn run_preflight(
     report: &mut PreflightReport,
 ) -> Result<(), String> {
     validate_fixture_lane(fixture)?;
+    crate::services::discord::install_engine_probes();
+    crate::services::discord::outbound::install_engine_ports();
     match fixture.scenario_kind.as_str() {
         "basic_roundtrip" => run_basic_roundtrip(fixture, report).await,
         "phase_gate_paths" => run_phase_gate_paths(fixture, report).await,

@@ -5,6 +5,7 @@ use crate::services::discord::health::slot_row_host_refusal;
 
 #[tokio::test]
 async fn slot_cleanup_preserves_successor_session_after_ownership_probe_pg() {
+    crate::services::discord::install_engine_probes();
     let pg_db = TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;
     sqlx::query(

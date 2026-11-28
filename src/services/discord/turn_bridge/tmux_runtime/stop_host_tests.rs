@@ -1103,6 +1103,7 @@ async fn a_runtime_clear_refuses_another_hosts_session_before_any_change_pg() {
         seeded.push((name, token, alive));
     }
     let _ = fx.take_calls();
+    crate::services::discord::install_engine_probes();
     let clear = crate::services::auto_queue::runtime::clear_slot_threads_for_slot_pg;
     clear(
         slot_row_host_refusal,

@@ -300,6 +300,8 @@ pub fn run_from_args() -> Result<()> {
 include!("config/runtime_root_guard/test_process.rs");
 
 #[cfg(test)]
+mod engine_probe_tests;
+#[cfg(test)]
 mod ke_routines_tests;
 #[cfg(test)]
 mod krx_claude_tests;
