@@ -9,4 +9,4 @@ mod stale_turn_reconciler_root_lookup;
 #[path = "../services/turn_lifecycle/host_guard_tests.rs"]
 mod turn_lifecycle_host_guard;
 #[path = "../services/turn_lifecycle/queue_truth_tests.rs"]
-mod turn_lifecycle_queue_truth;
+pub(crate) mod turn_lifecycle_queue_truth;

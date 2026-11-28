@@ -105,8 +105,7 @@ pub(crate) fn v2_channels(provider: &ProviderKind, token_hash: &str) -> Vec<Chan
 pub(crate) struct V2HeldSources {
     /// Queued, attempted or retained inputs the owner still owes a delivery.
     pub(crate) owed: Vec<u64>,
-    /// Inputs only the settled history holds: the owner confirmed their delivery, or refused them
-    /// for good and never sends them again.
+    /// Inputs settled, refused for good, or retained after the owner's delivery obligation ended.
     pub(crate) delivered: Vec<u64>,
 }
 
@@ -125,21 +124,25 @@ pub(crate) fn v2_held_sources(
         [] => vec![item.message_id],
         ids => ids.to_vec(),
     };
-    let inputs = snapshot.head_injection.iter();
-    let inputs = inputs.chain(snapshot.retained_inputs.iter().map(|entry| &entry.input));
-    let attempted = inputs.flat_map(|input| {
-        let followers = input
-            .payload
-            .iter()
-            .flat_map(|payload| payload.followers.iter());
-        std::iter::once(&input.original).chain(followers)
-    });
-    let owed: Vec<u64> = snapshot
+    let attempted = snapshot
+        .head_injection
+        .iter()
+        .flat_map(|input| input.members());
+    let mut owed: Vec<u64> = snapshot
         .items
         .iter()
         .chain(attempted)
         .flat_map(ids)
         .collect();
+    let mut delivered = Vec::new();
+    for entry in &snapshot.retained_inputs {
+        let held = if entry.owed_to_owner() {
+            &mut owed
+        } else {
+            &mut delivered
+        };
+        held.extend(entry.input.members().flat_map(ids));
+    }
     let settled = snapshot.terminal_identities.iter();
     let refused = (snapshot.refused_inputs.iter().flat_map(|r| &r.members))
         .chain(snapshot.refused_fronts.iter().flat_map(|r| &r.members));
@@ -147,7 +150,8 @@ pub(crate) fn v2_held_sources(
         .chain(refused.map(|member| &member.identity))
         .flat_map(|identity| identity.sources.iter().map(|s| s.message_id));
     // An id still owed stays owed even when an earlier delivery of it settled.
-    let delivered = settled.filter(|id| !owed.contains(id)).collect();
+    delivered.extend(settled);
+    delivered.retain(|id| !owed.contains(id));
     V2HeldSources { owed, delivered }
 }
 
