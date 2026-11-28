@@ -403,6 +403,7 @@ async fn a_headless_run_recovered_after_a_restart_posts_nothing_in_a_saved_threa
 
 #[tokio::test(flavor = "current_thread")]
 async fn every_notice_of_a_run_its_thread_failed_goes_to_the_primary_channel_pg() {
+    crate::services::discord::outbound::install_engine_ports();
     const SAVED: &str = "1479671302387081999";
     let root = tempfile::tempdir().unwrap();
     let _root = crate::config::set_agentdesk_root_for_test(root.path());

@@ -1,4 +1,4 @@
-use crate::services::discord::turn_presence::activity::observation_hook_tests::{
+use crate::services::discord::turn_presence::activity::observation_hook_test_support::{
     ReadTrace, ReadyPane,
 };
 use crate::services::discord::turn_presence::activity::tests::{

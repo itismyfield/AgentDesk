@@ -569,7 +569,7 @@ async fn read_now(
             judge(&held, &ports, shadow, channel.get(), target)
         };
         #[cfg(all(unix, any(test, feature = "test-support")))]
-        observation_hook_tests::record_io(
+        observation_hook_test_support::record_io(
             channel.get(),
             "effect",
             crate::services::tui_o::shadow::capture::io_trace::take(),
@@ -873,7 +873,7 @@ fn rebuild(
                 size = ?facts.source_len(), "activity rebuild complete");
         }
         #[cfg(all(unix, any(test, feature = "test-support")))]
-        observation_hook_tests::record_io(
+        observation_hook_test_support::record_io(
             channel,
             stage,
             crate::services::tui_o::shadow::capture::io_trace::take(),
@@ -1091,7 +1091,7 @@ impl Ports for LivePorts {
 
     fn final_ready(&self, session: &str) -> bool {
         #[cfg(all(unix, any(test, feature = "test-support")))]
-        if observation_hook_tests::pane_ready_for_tests(session) {
+        if observation_hook_test_support::pane_ready_for_tests(session) {
             return true;
         }
         self.scoped(|| claude_activity::ready(session))
@@ -1120,11 +1120,11 @@ impl Ports for LivePorts {
 }
 
 #[cfg(all(unix, any(test, feature = "test-support")))]
-#[path = "activity_observation_hook_tests.rs"]
-pub(in crate::services::discord) mod observation_hook_tests;
+#[path = "activity_observation_hook_test_support.rs"]
+pub(in crate::services::discord) mod observation_hook_test_support;
 
 #[cfg(all(test, unix))]
-#[path = "activity_fixture_tests.rs"]
+#[path = "activity_fixture_test_support.rs"]
 pub(in crate::services::discord) mod tests;
 
 #[cfg(all(test, unix))]

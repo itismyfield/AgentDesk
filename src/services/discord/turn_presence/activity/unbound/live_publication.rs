@@ -44,7 +44,7 @@ impl Stamp {
             return None;
         }
         #[cfg(any(test, feature = "test-support"))]
-        publication_hook_tests::before_publication(self.channel.get());
+        publication_hook_test_support::before_publication(self.channel.get());
         let shared = self.shared.upgrade()?;
         let apply = || -> Result<Option<R>, &'static str> {
             let guard = watch.try_lock().map_err(|_| "watch_busy")?;
