@@ -4,28 +4,30 @@
 
 use sqlx::PgPool;
 
+use super::bot_http::resolve_bot_http;
 use super::manual_delivery::{
     ManualDeliveryOutcome, SerenityManualOutboundClient, deliver_manual_dm_notification,
 };
 use super::send_gate::{
     ManualOutboundOptions, send_message_with_backends_and_delivery_id_for_caller,
 };
+use crate::domain::bot_role::UtilityBotRole;
 use crate::domain::outbound::key::ManualOutboundDeliveryId;
-use crate::services::discord::bot_role::UtilityBotRole;
-use crate::services::discord::health::{HealthRegistry, resolve_bot_http};
 use crate::services::discord::outbound::shared_outbound_deduper;
+use crate::services::discord::session_notice::ChannelRuntimeHttp;
+use crate::services::discord::shared_state::health_ports::RuntimeHealth;
 use crate::services::message_outbox::source_registry::SendCallerClass;
 
-pub async fn handle_send<'a>(
-    registry: &HealthRegistry,
+pub(crate) async fn handle_send<'a>(
+    registry: &(impl RuntimeHealth + ChannelRuntimeHttp),
     pg_pool: Option<&PgPool>,
     body: &str,
 ) -> (&'a str, String) {
     handle_send_with_caller(registry, pg_pool, body, SendCallerClass::LoopbackInternal).await
 }
 
-pub async fn handle_send_with_caller<'a>(
-    registry: &HealthRegistry,
+pub(crate) async fn handle_send_with_caller<'a>(
+    registry: &(impl RuntimeHealth + ChannelRuntimeHttp),
     pg_pool: Option<&PgPool>,
     body: &str,
     caller_class: SendCallerClass,
@@ -118,7 +120,10 @@ fn parse_transcript_options(json: &serde_json::Value) -> ManualOutboundOptions {
 /// Handle POST /api/discord/send-dm — send a DM to a Discord user.
 /// Accepts JSON:
 /// {"user_id":"...", "content":"...", "bot":"announce|notify|claude|codex"}
-pub async fn handle_senddm(registry: &HealthRegistry, body: &str) -> (&'static str, String) {
+pub(crate) async fn handle_senddm(
+    registry: &(impl RuntimeHealth + ?Sized),
+    body: &str,
+) -> (&'static str, String) {
     let request = match parse_senddm_body(body) {
         Ok(request) => request,
         Err(error) => {
@@ -129,7 +134,13 @@ pub async fn handle_senddm(registry: &HealthRegistry, body: &str) -> (&'static s
         }
     };
 
-    let http = match resolve_bot_http(registry, &request.bot).await {
+    let http = match resolve_bot_http(
+        &request.bot,
+        |role| registry.utility_bot_http_clone(role),
+        async { registry.provider_bot_http(&request.bot).await },
+    )
+    .await
+    {
         Ok(h) => h,
         Err(resp) => {
             // #3643: a DM that resolves no bot HTTP handle (unknown/misconfigured

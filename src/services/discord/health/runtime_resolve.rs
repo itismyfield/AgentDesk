@@ -11,6 +11,7 @@ use super::HealthRegistry;
 use crate::services::cluster::intake_worker::IntakeWorkerRuntime;
 use crate::services::discord::SharedData;
 use crate::services::discord::bot_role::UtilityBotRole;
+use crate::services::discord::outbound::bot_http;
 use crate::services::discord::shared_state::health_ports::RuntimeHealth;
 use crate::services::provider::ProviderKind;
 
@@ -20,29 +21,30 @@ pub async fn resolve_bot_http(
     registry: &HealthRegistry,
     bot: &str,
 ) -> Result<Arc<serenity::Http>, (&'static str, String)> {
-    if let Some(role) = UtilityBotRole::from_alias(bot) {
-        return resolve_utility_bot_http(registry, role).await;
-    }
+    bot_http::resolve_bot_http(
+        bot,
+        |role| registry.utility_bot_http_clone(role),
+        registry.provider_bot_http(bot),
+    )
+    .await
+}
 
-    // Look up provider bot (e.g. "claude", "codex").
-    let clients = registry.discord_http.lock().await;
-    for (name, http) in clients.iter() {
-        if bot_names_match(name, bot) {
-            return Ok(http.clone());
+impl HealthRegistry {
+    pub(super) async fn provider_bot_http(&self, bot: &str) -> Option<Arc<serenity::Http>> {
+        let clients = self.discord_http.lock().await;
+        for (name, http) in clients.iter() {
+            if bot_names_match(name, bot) {
+                return Some(http.clone());
+            }
         }
+        None
     }
-    Err((
-        "400 Bad Request",
-        format!(r#"{{"ok":false,"error":"unknown bot: {bot}"}}"#),
-    ))
 }
 
 pub(crate) async fn resolve_utility_bot_http(
     registry: &(impl RuntimeHealth + ?Sized),
     role: UtilityBotRole,
 ) -> Result<Arc<serenity::Http>, (&'static str, String)> {
-    use crate::services::discord::outbound::bot_http;
-
     bot_http::resolve_utility_bot_http(role, registry.utility_bot_http_clone(role)).await
 }
 

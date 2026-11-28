@@ -17,18 +17,25 @@ pub(crate) trait ChannelRuntimeLookup: Send + Sync {
 }
 
 #[derive(Clone)]
-pub(in crate::services::discord) struct UnboundRuntimeSnapshot {
+pub(crate) struct UnboundRuntimeSnapshot {
     pub generation: u64,
     pub entries: Vec<(String, Arc<SharedData>)>,
 }
 
-pub(in crate::services::discord) trait RuntimeHealth:
-    Any + ChannelRuntimeLookup
-{
+pub(crate) trait RuntimeHealth: Any + ChannelRuntimeLookup {
     fn registered_token_hashes<'a>(
         &'a self,
         provider: &'a ProviderKind,
     ) -> BoxFuture<'a, Vec<String>>;
+
+    fn provider_bot_http<'a>(&'a self, bot: &'a str) -> BoxFuture<'a, Option<Arc<Http>>>;
+
+    fn dm_default_agent_authorizes_private_channel<'a>(
+        &'a self,
+        channel_id: ChannelId,
+        is_private_channel: bool,
+        source: &'a str,
+    ) -> BoxFuture<'a, bool>;
 
     fn utility_bot_http_clone(&self, role: UtilityBotRole) -> BoxFuture<'_, Option<Arc<Http>>>;
 

@@ -14,8 +14,9 @@
 use sqlx::PgPool;
 
 use super::send_gate::send_message_with_backends;
-use crate::services::discord::bot_role::UtilityBotRole;
-use crate::services::discord::health::HealthRegistry;
+use crate::domain::bot_role::UtilityBotRole;
+use crate::services::discord::session_notice::ChannelRuntimeHttp;
+use crate::services::discord::shared_state::health_ports::RuntimeHealth;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ParsedSendToAgentRequest {
@@ -70,8 +71,8 @@ pub(crate) fn parse_send_to_agent_body(
     })
 }
 
-pub async fn handle_send_to_agent(
-    registry: &HealthRegistry,
+pub(crate) async fn handle_send_to_agent(
+    registry: &(impl RuntimeHealth + ChannelRuntimeHttp),
     pg_pool: Option<&PgPool>,
     body: &str,
 ) -> (&'static str, String) {

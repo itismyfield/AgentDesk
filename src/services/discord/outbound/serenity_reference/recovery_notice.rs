@@ -1,10 +1,11 @@
 //! Only refusal-notice retry metadata enters the existing persistent outbox.
 use super::send_referenced_lifecycle_notice;
-use crate::services::discord::{ProviderKind, health::HealthRegistry};
+use crate::services::discord::shared_state::health_ports::ChannelRuntimeLookup;
 #[cfg(unix)]
 use crate::services::message_outbox::{
     OutboxMessage, enqueue_outbox_pg_returning_id_with_persistent_dedupe,
 };
+use crate::services::provider::ProviderKind;
 use poise::serenity_prelude::{ChannelId, MessageId};
 
 const SOURCE: &str = "lifecycle_notifier";
@@ -36,7 +37,7 @@ pub(crate) async fn enqueue(
 }
 
 pub(crate) async fn deliver(
-    registry: &HealthRegistry,
+    registry: &impl ChannelRuntimeLookup,
     (source, reason): (&str, Option<&str>),
     (target, bot): (&str, &str),
     (content, key): (&str, Option<&str>),

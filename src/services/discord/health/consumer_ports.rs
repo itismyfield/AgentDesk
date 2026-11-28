@@ -329,6 +329,24 @@ impl RuntimeHealth for HealthRegistry {
         Box::pin(HealthRegistry::registered_token_hashes(self, provider))
     }
 
+    fn provider_bot_http<'a>(&'a self, bot: &'a str) -> BoxFuture<'a, Option<Arc<Http>>> {
+        Box::pin(HealthRegistry::provider_bot_http(self, bot))
+    }
+
+    fn dm_default_agent_authorizes_private_channel<'a>(
+        &'a self,
+        channel_id: ChannelId,
+        is_private_channel: bool,
+        source: &'a str,
+    ) -> BoxFuture<'a, bool> {
+        Box::pin(HealthRegistry::dm_default_agent_authorizes_private_channel(
+            self,
+            channel_id,
+            is_private_channel,
+            source,
+        ))
+    }
+
     fn utility_bot_http_clone(&self, role: UtilityBotRole) -> BoxFuture<'_, Option<Arc<Http>>> {
         Box::pin(HealthRegistry::utility_bot_http_clone(self, role))
     }

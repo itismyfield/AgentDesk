@@ -120,7 +120,7 @@ pub(crate) use super::turn_presence::supervisor::{
 };
 #[cfg(test)]
 pub use crate::domain::human_input::{ExternalHold, HumanInputDelivery, HumanInputError};
-pub use crate::services::discord::outbound::send_api::{handle_send, handle_senddm};
+pub(crate) use crate::services::discord::outbound::send_api::{handle_send, handle_senddm};
 use crate::services::discord::outbound::send_gate::dm_default_agent_authorizes_unmapped_private_channel;
 #[allow(unused_imports)]
 pub use crate::services::discord::outbound::send_gate::is_allowed_send_source_for;

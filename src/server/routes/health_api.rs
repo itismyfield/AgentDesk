@@ -986,7 +986,7 @@ pub async fn send_handler(
         .into_response();
     }
 
-    let Some(ref registry) = state.health_registry else {
+    let Some(registry) = state.health_registry.as_deref() else {
         return legacy_health_error(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             ErrorCode::Config,
@@ -1131,7 +1131,7 @@ pub async fn send_to_agent_handler(
         .into_response();
     }
 
-    let Some(ref registry) = state.health_registry else {
+    let Some(registry) = state.health_registry.as_deref() else {
         return legacy_health_error(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             ErrorCode::Config,
@@ -1172,7 +1172,7 @@ pub async fn senddm_handler(
         .into_response();
     }
 
-    let Some(ref registry) = state.health_registry else {
+    let Some(registry) = state.health_registry.as_deref() else {
         return legacy_health_error(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             ErrorCode::Config,

@@ -7,6 +7,7 @@ use poise::serenity_prelude as serenity;
 use serenity::ChannelId;
 use sqlx::PgPool;
 
+use super::bot_http::resolve_bot_http;
 use super::manual_delivery::{
     ManualNotification, ManualOutboundDeliveryId, ResolvedManualMessage,
     SerenityManualOutboundClient, send_authorized_manual_message,
@@ -15,8 +16,9 @@ use super::send_target::{
     SendTargetResolutionError, resolve_send_target_channel_id_with_backends,
     routine_thread_parent_hint,
 };
-use crate::services::discord::health::{HealthRegistry, resolve_bot_http};
 use crate::services::discord::outbound::shared_outbound_deduper;
+use crate::services::discord::session_notice::ChannelRuntimeHttp;
+use crate::services::discord::shared_state::health_ports::RuntimeHealth;
 use crate::services::provider::ProviderKind;
 
 use crate::services::message_outbox::source_registry::{SendCallerClass, validate_send_source_for};
@@ -27,7 +29,7 @@ use crate::services::message_outbox::source_registry::{SendCallerClass, validate
 /// `summary` is optional minimal fallback content if Discord rejects the
 /// length-truncated primary send.
 pub(crate) async fn send_message_with_backends(
-    registry: &HealthRegistry,
+    registry: &(impl RuntimeHealth + ChannelRuntimeHttp),
     pg_pool: Option<&PgPool>,
     target: &str,
     content: &str,
@@ -43,7 +45,7 @@ pub(crate) async fn send_message_with_backends(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn send_message_with_backends_and_delivery_id(
-    registry: &HealthRegistry,
+    registry: &(impl RuntimeHealth + ChannelRuntimeHttp),
     pg_pool: Option<&PgPool>,
     target: &str,
     content: &str,
@@ -69,7 +71,7 @@ pub(crate) async fn send_message_with_backends_and_delivery_id(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn send_message_with_backends_and_delivery_id_for_caller(
-    registry: &HealthRegistry,
+    registry: &(impl RuntimeHealth + ChannelRuntimeHttp),
     pg_pool: Option<&PgPool>,
     target: &str,
     content: &str,
@@ -140,7 +142,7 @@ pub(crate) struct ManualOutboundOptions {
 
 /// Provider-owned notices use the same channel runtime credentials as tool cards.
 async fn resolve_manual_bot_http(
-    registry: &HealthRegistry,
+    registry: &(impl RuntimeHealth + ChannelRuntimeHttp),
     bot: &str,
     channel_id: ChannelId,
     options: &ManualOutboundOptions,
@@ -152,12 +154,15 @@ async fn resolve_manual_bot_http(
         .await
         .map_err(|error| ("503 Service Unavailable", error));
     }
-    resolve_bot_http(registry, bot).await
+    resolve_bot_http(bot, |role| registry.utility_bot_http_clone(role), async {
+        registry.provider_bot_http(bot).await
+    })
+    .await
 }
 
 /// The durable routing cursor owns retries; this only resolves the bot and posts once.
 pub(crate) async fn post_routing_notice(
-    registry: &HealthRegistry,
+    registry: &(impl RuntimeHealth + ChannelRuntimeHttp),
     channel_id: u64,
     content: &str,
     bot: &str,
@@ -177,7 +182,7 @@ pub(crate) async fn post_routing_notice(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn send_message_with_backends_and_delivery_options(
-    registry: &HealthRegistry,
+    registry: &(impl RuntimeHealth + ChannelRuntimeHttp),
     pg_pool: Option<&PgPool>,
     target: &str,
     content: &str,
@@ -217,7 +222,7 @@ fn rejects_untrusted_message_outbox_delivery_id(
 
 #[allow(clippy::too_many_arguments)]
 async fn send_message_with_backends_and_delivery_options_for_caller(
-    registry: &HealthRegistry,
+    registry: &(impl RuntimeHealth + ChannelRuntimeHttp),
     pg_pool: Option<&PgPool>,
     target: &str,
     content: &str,
