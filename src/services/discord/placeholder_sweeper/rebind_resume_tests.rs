@@ -1,6 +1,13 @@
 //! The warm sweep's rebind-origin reaps resume a front the reaped row held exactly once; a row the
 //! pass leaves, and an owner downgrade that keeps its row, give no notice.
 
+use crate::services::discord::SharedData;
+use crate::services::discord::inflight::InflightTurnState;
+use crate::services::discord::placeholder_sweeper::{
+    StalledEditTracker, run_placeholder_sweep_pass,
+};
+use crate::services::provider::ProviderKind;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -24,7 +31,7 @@ use crate::services::discord::queue_io::input_owner::pump;
 use crate::services::session_host::test_support::InjectedLivenessGuard;
 use crate::services::session_host::{HostLiveness, HostSessionRef};
 use crate::services::turn_orchestrator::{PendingQueueItem, QueuePersistenceContext, v2_queue};
-use crate::test_support::wait::{WAIT_CAP, await_within};
+use adk_test_support::test_support::wait::{WAIT_CAP, await_within};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Case {

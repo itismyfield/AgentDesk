@@ -35,7 +35,7 @@ pub(super) fn should_advance_recovery_dispatch_after_relay(relay_ok: bool) -> bo
     relay_ok
 }
 
-pub(super) struct CapturedRecoveryDelivery {
+pub(in crate::services::discord) struct CapturedRecoveryDelivery {
     pub(super) outcome: RecoveryRelayOutcome,
     pub(super) pending_anchor: Option<terminal_text_idempotency::PendingRecoveryAnchor>,
 }
@@ -146,7 +146,7 @@ pub(super) async fn relay_captured_recovery_terminal_notice(
     .await
 }
 
-pub(super) async fn relay_captured_recovery_terminal_notice_with_gateway(
+pub(in crate::services::discord) async fn relay_captured_recovery_terminal_notice_with_gateway(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,

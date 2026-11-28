@@ -580,7 +580,11 @@ async fn t2_parked_row_is_deleted_by_the_next_pending_drain() {
             .add_pending_queue_exit_placeholder_clear_one(kept_channel, kept_user, kept_card)
             .await;
     };
-    crate::test_support::wait::await_within(setup, crate::test_support::wait::WAIT_CAP).await;
+    adk_test_support::test_support::wait::await_within(
+        setup,
+        adk_test_support::test_support::wait::WAIT_CAP,
+    )
+    .await;
     let (http, server, requests) = exit_http_fixture(204, 0).await;
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(10),

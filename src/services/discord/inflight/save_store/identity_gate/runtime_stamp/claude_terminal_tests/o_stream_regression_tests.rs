@@ -1,4 +1,18 @@
-use super::*;
+use crate::services::discord::make_shared_data_for_tests;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use poise::serenity_prelude::{ChannelId, MessageId};
+
+use crate::services::agent_protocol::{RuntimeHandoffKind, StreamMessage};
+use crate::services::discord::inflight::{
+    GuardedSaveOutcome, InflightTurnIdentity, InflightTurnState, inflight_runtime_root,
+    save_inflight_state_in_root,
+};
+use crate::services::provider::ProviderKind;
+use crate::services::tui_prompt_dedupe as dedupe;
+
+use crate::services::discord::inflight::save_store::identity_gate::runtime_stamp::claude_terminal_fixture_tests::Fixture;
 use crate::services::discord::{mailbox_snapshot, turn_bridge::STREAM_TEST_EVENTS};
 use crate::services::tui_o::cutover::test_override;
 
@@ -36,7 +50,13 @@ fn isolated(name: &str, mode: &str) -> bool {
 async fn case(mode: &str, restore: bool) {
     let temp = tempfile::tempdir().unwrap();
     let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
-    let mut f = Fixture::new(temp.path(), 7453, ProviderKind::Codex).await;
+    let mut f = Fixture::new(
+        temp.path(),
+        7453,
+        ProviderKind::Codex,
+        make_shared_data_for_tests(),
+    )
+    .await;
     f.local.full_response = if mode == "owned_empty" {
         ""
     } else if restore {
@@ -52,7 +72,7 @@ async fn case(mode: &str, restore: bool) {
     f.local.external_turn_id = Some("external-7453".into());
     f.local.injected_prompt_message_id = Some(f.local.user_msg_id);
     f.local.request_owner_user_id =
-        crate::services::discord::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID;
+        crate::services::discord::tui_direct_pending_start::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID;
     f.local
         .set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::None);
     let first = serde_json::json!({"type":"response_item","payload":{"type":"message","id":"m1","role":"assistant","content":[{"type":"output_text","text":"answer"}]}});
@@ -285,13 +305,19 @@ async fn crash_then_restore() {
     if std::env::var_os("ADK_7453_CRASH_CHANNEL").is_some() {
         let root = std::env::var_os("ADK_7453_CRASH_ROOT").unwrap();
         let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", Path::new(&root));
-        let mut f = Fixture::new(Path::new(&root), 7453, ProviderKind::Codex).await;
+        let mut f = Fixture::new(
+            Path::new(&root),
+            7453,
+            ProviderKind::Codex,
+            make_shared_data_for_tests(),
+        )
+        .await;
         f.local.session_id = Some("session-7453".into());
         f.local.turn_source = crate::services::discord::inflight::TurnSource::ExternalInput;
         f.local.external_turn_id = Some("external-7453".into());
         f.local.injected_prompt_message_id = Some(f.local.user_msg_id);
         f.local.request_owner_user_id =
-            crate::services::discord::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID;
+            crate::services::discord::tui_direct_pending_start::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID;
         let first = serde_json::json!({"type":"response_item","payload":{"type":"message","id":"m1","role":"assistant","content":[{"type":"output_text","text":"answer"}]}});
         let second = serde_json::json!({"type":"response_item","payload":{"type":"message","id":"m2","role":"assistant","content":[{"type":"output_text","text":"suffx"}]}});
         let raw = format!(
@@ -469,7 +495,13 @@ async fn i7453_native_prefix_conflict_keeps_durable_bytes() {
     }
     let root = tempfile::tempdir().unwrap();
     let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
-    let mut f = Fixture::new(root.path(), 7453, ProviderKind::Codex).await;
+    let mut f = Fixture::new(
+        root.path(),
+        7453,
+        ProviderKind::Codex,
+        make_shared_data_for_tests(),
+    )
+    .await;
     f.local.full_response = "base".into();
     f.local.response_sent_offset = 4;
     save_inflight_state_in_root(&inflight_runtime_root().unwrap(), &f.local).unwrap();
@@ -506,7 +538,13 @@ async fn i7453_native_restart_marker_refuses_admission() {
     }
     let root = tempfile::tempdir().unwrap();
     let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
-    let mut f = Fixture::new(root.path(), 7453, ProviderKind::Codex).await;
+    let mut f = Fixture::new(
+        root.path(),
+        7453,
+        ProviderKind::Codex,
+        make_shared_data_for_tests(),
+    )
+    .await;
     f.local.full_response = "answer".into();
     f.local.response_sent_offset = 6;
     f.local
@@ -532,7 +570,13 @@ async fn i7453_native_same_file_alias_keeps_stream_coordinates() {
     }
     let root = tempfile::tempdir().unwrap();
     let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
-    let mut f = Fixture::new(root.path(), 7453, ProviderKind::Codex).await;
+    let mut f = Fixture::new(
+        root.path(),
+        7453,
+        ProviderKind::Codex,
+        make_shared_data_for_tests(),
+    )
+    .await;
     let raw = format!(
         "{}\n{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"task_complete\"}}}}\n",
         serde_json::json!({"type":"response_item","payload":{"type":"message","id":"alias-answer","role":"assistant","content":[{"type":"output_text","text":"answer"}]}})

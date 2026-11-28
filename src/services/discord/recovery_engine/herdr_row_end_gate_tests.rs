@@ -81,7 +81,7 @@ fn a_pass_during_a_running_end_names_the_task_pg() {
                 Arc::new(tokio::sync::Notify::new()),
             );
             let (at, go) = (reached.clone(), release.clone());
-            let _hooked = super::super::on_while("before_clear", move || {
+            let _hooked = on_while("before_clear", move || {
                 let (at, go) = (at.clone(), go.clone());
                 Box::pin(async move {
                     at.notify_one();

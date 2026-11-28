@@ -307,7 +307,7 @@ impl Fixture {
                 values.push(json!({"type":"user","uuid":"background-input","isMeta":true,"message":{"content":"<task-notification>background task completed</task-notification>"}}));
             }
             if !body.is_empty()
-                && crate::services::discord::semantic_boundaries::semantic_chunk_separator_needed(
+                && crate::domain::message_split::semantic_boundaries::semantic_chunk_separator_needed(
                     &body, text,
                 )
             {

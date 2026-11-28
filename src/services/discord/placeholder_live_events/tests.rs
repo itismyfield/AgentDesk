@@ -1652,7 +1652,7 @@ fn status_panel_resets_across_two_tui_direct_spawns_via_stamped_nonce() {
     }
 }
 
-use crate::test_env_panic_probe::{assert_root_restored, checkpoint};
+use crate::config::test_env::panic_probe::{assert_root_restored, checkpoint};
 
 #[cfg(unix)]
 #[test]

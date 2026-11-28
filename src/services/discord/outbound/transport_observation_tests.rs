@@ -81,7 +81,7 @@ async fn common_http_client_observes_each_raw_post_and_edit() {
             module_path!(),
             "::common_http_client_observes_each_raw_post_and_edit"
         )
-        .trim_start_matches("agentdesk::"),
+        .trim_start_matches(concat!(env!("CARGO_CRATE_NAME"), "::")),
     ) {
         return;
     }
@@ -123,7 +123,7 @@ async fn common_http_client_preserves_errors_retries_and_unknown_destinations() 
             module_path!(),
             "::common_http_client_preserves_errors_retries_and_unknown_destinations"
         )
-        .trim_start_matches("agentdesk::"),
+        .trim_start_matches(concat!(env!("CARGO_CRATE_NAME"), "::")),
     ) {
         return;
     }
@@ -267,7 +267,7 @@ async fn raw_requests_observe_body_operations_and_retry_once() {
             module_path!(),
             "::raw_requests_observe_body_operations_and_retry_once"
         )
-        .trim_start_matches("agentdesk::"),
+        .trim_start_matches(concat!(env!("CARGO_CRATE_NAME"), "::")),
     ) {
         return;
     }
@@ -362,7 +362,7 @@ async fn nested_observation_preserves_owner_fences_and_uncertain_results_pg() {
             module_path!(),
             "::nested_observation_preserves_owner_fences_and_uncertain_results_pg"
         )
-        .trim_start_matches("agentdesk::"),
+        .trim_start_matches(concat!(env!("CARGO_CRATE_NAME"), "::")),
     ) {
         return;
     }
@@ -483,7 +483,7 @@ async fn o_ack_counts_only_fresh_created_responses() {
             module_path!(),
             "::o_ack_counts_only_fresh_created_responses"
         )
-        .trim_start_matches("agentdesk::"),
+        .trim_start_matches(concat!(env!("CARGO_CRATE_NAME"), "::")),
     ) {
         return;
     }
@@ -553,7 +553,7 @@ async fn claim_api_scopes_no_claim_transport_without_creating_a_tag() {
             module_path!(),
             "::claim_api_scopes_no_claim_transport_without_creating_a_tag"
         )
-        .trim_start_matches("agentdesk::"),
+        .trim_start_matches(concat!(env!("CARGO_CRATE_NAME"), "::")),
     ) {
         return;
     }
@@ -626,7 +626,7 @@ async fn claim_held_context_preserves_lifetime_none_guard_and_outer_site() {
             module_path!(),
             "::claim_held_context_preserves_lifetime_none_guard_and_outer_site"
         )
-        .trim_start_matches("agentdesk::"),
+        .trim_start_matches(concat!(env!("CARGO_CRATE_NAME"), "::")),
     ) {
         return;
     }
@@ -723,7 +723,7 @@ async fn tagged_http_send_does_not_wait_for_a_blocked_journal() {
             module_path!(),
             "::tagged_http_send_does_not_wait_for_a_blocked_journal"
         )
-        .trim_start_matches("agentdesk::"),
+        .trim_start_matches(concat!(env!("CARGO_CRATE_NAME"), "::")),
     ) {
         return;
     }
@@ -780,7 +780,7 @@ async fn recovered_body_delivery_preserves_source_without_waiting_for_journal() 
             module_path!(),
             "::recovered_body_delivery_preserves_source_without_waiting_for_journal"
         )
-        .trim_start_matches("agentdesk::"),
+        .trim_start_matches(concat!(env!("CARGO_CRATE_NAME"), "::")),
     ) {
         return;
     }
@@ -882,7 +882,7 @@ async fn a_full_observation_queue_keeps_the_send_and_invalidates_the_window() {
             module_path!(),
             "::a_full_observation_queue_keeps_the_send_and_invalidates_the_window"
         )
-        .trim_start_matches("agentdesk::"),
+        .trim_start_matches(concat!(env!("CARGO_CRATE_NAME"), "::")),
     ) {
         return;
     }
@@ -931,7 +931,7 @@ async fn a_crash_before_body_drain_cannot_certify_the_next_window() {
             module_path!(),
             "::a_crash_before_body_drain_cannot_certify_the_next_window"
         )
-        .trim_start_matches("agentdesk::"),
+        .trim_start_matches(concat!(env!("CARGO_CRATE_NAME"), "::")),
     ) {
         return;
     }
@@ -968,7 +968,7 @@ async fn a_crash_before_body_drain_cannot_certify_the_next_window() {
                 module_path!(),
                 "::a_crash_before_body_drain_cannot_certify_the_next_window"
             )
-            .trim_start_matches("agentdesk::"),
+            .trim_start_matches(concat!(env!("CARGO_CRATE_NAME"), "::")),
             "--nocapture",
         ])
         .env("ADK_CENSUS_CRASH_CHILD", "1")

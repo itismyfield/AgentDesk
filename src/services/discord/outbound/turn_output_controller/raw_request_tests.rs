@@ -1,10 +1,17 @@
-use super::*;
+use crate::services::discord::gateway::TurnGateway;
+use crate::services::discord::inflight::RelayOwnerKind;
+use crate::services::discord::placeholder_controller::PlaceholderController;
+use crate::services::discord::turn_finalizer::TurnKey;
+use crate::services::discord::{DeliveryLeaseCell, DeliveryLeaseKey, LeaseHolder};
+use poise::serenity_prelude::{ChannelId, MessageId};
+
 use crate::services::cluster::intake_router_hook::owner_record::output;
 use crate::services::discord::SharedData;
 use crate::services::discord::formatting::rollback_transport_test_hook;
 use crate::services::discord::gateway::DiscordGateway;
+use crate::services::discord::outbound::turn_output_controller::*;
 use crate::services::provider::ProviderKind;
-use crate::test_support::wait::{WAIT_CAP, join_within};
+use adk_test_support::test_support::wait::{WAIT_CAP, join_within};
 use std::future::{Future, poll_fn};
 use std::sync::{
     Arc, Mutex,
@@ -301,15 +308,16 @@ async fn output_origin_real_gateway_rechecks_after_pacing_and_blocks_rollback_pg
         first_post.await.unwrap();
         output::tests::revoke(&revoked_pool, &origin).await;
     });
-    let guarded = super::transport::OriginGateway {
-        inner: &gateway,
-        scope: Some(output::Scope {
-            pool: pool.clone(),
-            provider: "claude".into(),
-        }),
-        origin: Some(&artifact),
-        body: &body,
-    };
+    let guarded =
+        crate::services::discord::outbound::turn_output_controller::transport::OriginGateway {
+            inner: &gateway,
+            scope: Some(output::Scope {
+                pool: pool.clone(),
+                provider: "claude".into(),
+            }),
+            origin: Some(&artifact),
+            body: &body,
+        };
     assert!(
         guarded
             .send_long_message_with_rollback(channel, MessageId::new(1), &body)
@@ -392,12 +400,13 @@ async fn output_origin_real_gateway_fallback_rollback_and_edit_raw_guards_pg() {
         pool,
         provider: "claude".into(),
     };
-    let guarded = super::transport::OriginGateway {
-        inner: &gateway,
-        scope: Some(scope.clone()),
-        origin: Some(&artifact),
-        body: "answer",
-    };
+    let guarded =
+        crate::services::discord::outbound::turn_output_controller::transport::OriginGateway {
+            inner: &gateway,
+            scope: Some(scope.clone()),
+            origin: Some(&artifact),
+            body: "answer",
+        };
     assert!(matches!(guarded.replace_message_with_outcome(channel, MessageId::new(1), "answer").await.unwrap(),
         crate::services::discord::formatting::ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { .. }));
     guarded
@@ -406,12 +415,13 @@ async fn output_origin_real_gateway_fallback_rollback_and_edit_raw_guards_pg() {
         .unwrap();
     let body = "x".repeat(3980);
     let artifact = origin.seal(&body);
-    let guarded = super::transport::OriginGateway {
-        inner: &gateway,
-        scope: Some(scope),
-        origin: Some(&artifact),
-        body: &body,
-    };
+    let guarded =
+        crate::services::discord::outbound::turn_output_controller::transport::OriginGateway {
+            inner: &gateway,
+            scope: Some(scope),
+            origin: Some(&artifact),
+            body: &body,
+        };
     assert!(
         guarded
             .send_long_message_with_rollback(channel, MessageId::new(9), &body)

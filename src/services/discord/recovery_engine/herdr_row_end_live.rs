@@ -55,8 +55,8 @@ pub(super) async fn end_live(
     let http = shared.serenity_http_or_token_fallback()?;
     let (observation, record, fresh_end) =
         execution_gone(pool, &shared.token_hash, provider, &row, &nonce).await?;
-    #[cfg(test)]
-    super::tests::hook("live_after_end").await;
+    #[cfg(any(test, feature = "test-support"))]
+    super::row_end_hook_tests::hook("live_after_end").await;
     let (kind, held, actor) = (provider.clone(), state.clone(), turn.token.clone());
     let read = tokio::task::spawn_blocking(move || read_ended(&kind, &held, &actor));
     let read = read.await.ok().flatten();
@@ -105,8 +105,8 @@ pub(super) async fn end_live(
     }
     // Before the settlement wakes the reader, so its late active status finds the row ended.
     disconnect_ended(pool, &observation, &record).await;
-    #[cfg(test)]
-    super::tests::hook("live_before_settle").await;
+    #[cfg(any(test, feature = "test-support"))]
+    super::row_end_hook_tests::hook("live_before_settle").await;
     let token = turn.token.clone();
     let settled = settle_captured(shared, provider, Some(turn)).await;
     if settled != TerminationResult::Retired {

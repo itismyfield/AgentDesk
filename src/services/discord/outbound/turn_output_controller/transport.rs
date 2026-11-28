@@ -312,13 +312,13 @@ where
 }
 
 /// Each raw request keeps the immutable artifact's guard; state callbacks run after it releases.
-pub(super) struct OriginGateway<'a, G: ?Sized> {
-    pub(super) inner: &'a G,
-    pub(super) scope:
+pub(in crate::services::discord) struct OriginGateway<'a, G: ?Sized> {
+    pub(in crate::services::discord) inner: &'a G,
+    pub(in crate::services::discord) scope:
         Option<crate::services::cluster::intake_router_hook::owner_record::output::Scope>,
-    pub(super) origin:
+    pub(in crate::services::discord) origin:
         Option<&'a crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
-    pub(super) body: &'a str,
+    pub(in crate::services::discord) body: &'a str,
 }
 
 impl<G: TurnGateway + ?Sized> OriginGateway<'_, G> {

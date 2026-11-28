@@ -7,7 +7,7 @@ use crate::services::tui_input::human_frame::history::v2::{
     Registry, native, native_support::Fixture,
 };
 use crate::services::turn_orchestrator::{PendingQueueItem, QueuePersistenceContext};
-use crate::test_support::wait::{WAIT_CAP, await_within};
+use adk_test_support::test_support::wait::{WAIT_CAP, await_within};
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 use serde_json::json;
 use std::sync::{

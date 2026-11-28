@@ -19,7 +19,7 @@ use super::manual_rebind_output_path::saved_output_path_for_rebind_resolution;
 use super::manual_rebind_override::upsert_rebind_session_id_override;
 use super::*;
 
-mod adoption;
+pub(in crate::services::discord) mod adoption;
 mod codex_tui_replay;
 mod coordinate_adoption;
 #[cfg(test)]

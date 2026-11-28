@@ -335,7 +335,7 @@ async fn recovered_notices_record_bodies_without_counting_neutral_markers() {
             module_path!(),
             "::recovered_notices_record_bodies_without_counting_neutral_markers"
         )
-        .trim_start_matches("agentdesk::"),
+        .trim_start_matches(concat!(env!("CARGO_CRATE_NAME"), "::")),
     ) {
         return;
     }

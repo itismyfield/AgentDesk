@@ -22,8 +22,6 @@ mod ke_wire_tests;
 pub(crate) mod manual_delivery;
 pub(crate) mod message;
 pub(crate) use adk_runtime::services::discord::outbound::notification_policy;
-#[cfg(all(test, unix))]
-mod notification_policy_tests;
 #[cfg(unix)]
 pub(in crate::services::discord) mod o_delivery_evidence;
 #[cfg(unix)]

@@ -37,7 +37,7 @@ Turn-output `send_long_message_raw*` + `replace_long_message_raw*` compress to *
 
 ### 1.3 Live motivating defect (#3416)
 
-On the deployed binary, `save_inflight_state_in_root`'s **observe-only** monotonic guard (#3154, `inflight.rs:999-1044`, gated by same `user_msg_id`+`turn_start_offset`) fires when a TUI-direct synthetic inflight creation + a turn_start watcher-at-offset-0 replacement writes `last_offset`/`response_sent_offset` **backward within the same turn**. Observe-only means the backward write persists. 29 occurrences over 3 days, across binaries (incl. #3358-deployed). This is precisely the *multiple writers updating one turn's offset without a single authority* problem; #3089's single offset authority (Phase B) closes the class structurally and lets the guard be promoted from observe to enforce.
+On the deployed binary, `save_inflight_state_in_root`'s **observe-only** monotonic guard (#3154, `inflight.rs:1018-1064`, gated by same `user_msg_id`+`turn_start_offset`) fires when a TUI-direct synthetic inflight creation + a turn_start watcher-at-offset-0 replacement writes `last_offset`/`response_sent_offset` **backward within the same turn**. Observe-only means the backward write persists. 29 occurrences over 3 days, across binaries (incl. #3358-deployed). This is precisely the *multiple writers updating one turn's offset without a single authority* problem; #3089's single offset authority (Phase B) closes the class structurally and lets the guard be promoted from observe to enforce.
 
 ---
 
@@ -45,7 +45,7 @@ On the deployed binary, `save_inflight_state_in_root`'s **observe-only** monoton
 
 | Primitive | file:line | What it gives | Durability |
 |---|---|---|---|
-| `RelayOwnerKind` | `inflight.rs:312` (field `:252`) | durable "who owns" (None/Watcher/StandbyRelay/SessionBoundRelay/Unknown) | **durable** (inflight JSON) |
+| `RelayOwnerKind` | `inflight.rs:320` (field `:252`) | durable "who owns" (None/Watcher/StandbyRelay/SessionBoundRelay/Unknown) | **durable** (inflight JSON) |
 | `DeliveryLeaseCell` | `mod.rs:1756` | single-winner CAS acquire/commit/release, 3-way outcome, B6 advance gate. **In-memory state machine** `Unleased → Leased{holder,turn,deadline_ms,start,end} → Committed{outcome}` (`mod.rs:1691`). Inline by Watcher/Bridge/Sink. Standby/recovery/sweeper/idle-tail do NOT lease. | process-local (non-durable) |
 | `TurnFinalizer` | `turn_finalizer.rs` | `submit_terminal(key,event)→ack`, ledger Pending→Finalizing→Finalized exactly-once. Dormant `FinalizeMsg::{Acquire,Commit,Release}Delivery` (`:417`), `commit_delivery` awaits actor (`:589`) — reverted to inline by #3143. | actor in-memory; finalize side-effects durable |
 | `PlaceholderController` | `placeholder_controller.rs` | `TurnGateway` trait + `ensure_active`/`transition`/`detach` + `classify_edit_error` | n/a |
@@ -147,10 +147,10 @@ struct DeliveredCommit {           // the durable mirror of confirmed_end_offset
 
 ### 4.4 Mixed-binary safety (review fix H3 — this is a hard blocker for Phase B)
 
-Old binaries deserialize into their older `InflightTurnState` and reserialize with `serde_json::to_string_pretty` (`inflight.rs:1177`, `:2218`), **dropping unknown fields**. Standby rewrites the same `{channel_id}.json` on its heartbeat (`standby_relay.rs:434`). So a `#[serde(default)]` field added on the new primary is silently erased by an old standby, and a B2 reader that has flipped to record-authority then sees a missing record and falls back to legacy markers (which lack durable END) → duplicate or lost range. `#[serde(default)]` + tolerant deserialize is **not** sufficient.
+Old binaries deserialize into their older `InflightTurnState` and reserialize with `serde_json::to_string_pretty` (`inflight.rs:1197`, `:2218`), **dropping unknown fields**. Standby rewrites the same `{channel_id}.json` on its heartbeat (`standby_relay.rs:434`). So a `#[serde(default)]` field added on the new primary is silently erased by an old standby, and a B2 reader that has flipped to record-authority then sees a missing record and falls back to legacy markers (which lack durable END) → duplicate or lost range. `#[serde(default)]` + tolerant deserialize is **not** sufficient.
 
 Resolution (pick one, decided at B-start):
-- **(a) sidecar delivery record — default.** A separate store old binaries never read **or scan**. Critical (review r2 H): it must live **outside the inflight provider directory's `*.json` scan path** — old binaries enumerate every `*.json` there and *delete malformed* entries (`inflight.rs:2573`), so a sibling `{channel_id}.delivery.json` would be reaped. Use a dedicated `delivery_records/` subtree **or** a non-`.json` extension the old scan ignores. With the sidecar, the inline `inflight.rs` `delivery_lease`/`delivered_frontier` fields are NOT added (no inflight LoC pressure, no old-writer erasure).
+- **(a) sidecar delivery record — default.** A separate store old binaries never read **or scan**. Critical (review r2 H): it must live **outside the inflight provider directory's `*.json` scan path** — old binaries enumerate every `*.json` there and *delete malformed* entries (`inflight.rs:2593`), so a sibling `{channel_id}.delivery.json` would be reaped. Use a dedicated `delivery_records/` subtree **or** a non-`.json` extension the old scan ignores. With the sidecar, the inline `inflight.rs` `delivery_lease`/`delivered_frontier` fields are NOT added (no inflight LoC pressure, no old-writer erasure).
 - **(b) rollout gate** that guarantees no old writer is live before B2 flips authority (cluster-version fence). Only this option uses the inline `inflight.rs` nested fields; it needs fleet-wide version coordination, so it is the fallback.
 
 Either way, B2 must not flip read-authority until the chosen isolation holds.
@@ -208,7 +208,7 @@ Fold delivery into the finalizer ledger only if A+B leave a measured exactly-onc
 1. **#2757 flattening** → `EditFailPlaceholderPolicy` injected explicitly per owner, no default; A0 pins both arms; cutover blocked until A0 green.
 2. **#3143 duplicate re-open** → I1 promoted to a tested invariant; commit+advance owned inside the controller before any post-send await (H2); blocking fake-gateway test; never wake dormant ledger-routed commit.
 3. **Leased-but-not-Committed lost on restart** (H1 / r2-H) → persist `delivery_lease` and `delivered_frontier` as **separate** fields; release clears only the lease; only `Delivered` writes the frontier; reclaim local-instance leases on restart (process-monotonic deadline dead), judge remote holders by `deadline_epoch_ms`.
-4. **Mixed-binary authority split** (H3 / r2-H) → B0 sidecar **outside the `*.json` scan path** (`inflight.rs:2573` reaps malformed siblings) or a rollout gate, before any authority flip; conservative I3 fallback (missing record ≠ delivered).
+4. **Mixed-binary authority split** (H3 / r2-H) → B0 sidecar **outside the `*.json` scan path** (`inflight.rs:2593` reaps malformed siblings) or a rollout gate, before any authority flip; conservative I3 fallback (missing record ≠ delivered).
 5. **#1270 rotation-vs-respawn watermark** → write `generation_mtime_ns` in the same atomic transition as `range`; characterization test for both #1270 scenarios across restart.
 6. **size review** (M5) → Whole `#[cfg(test)] mod` blocks remain test-only for classification; raw growth warns. Review a split when adding an independent responsibility.
 7. **recon count drift** → replace is 6 not 4; `OutputPlan::Replace` carries `PlaceholderLifecycle` to keep the cancel/prompt-too-long/normal variants distinct.

@@ -106,7 +106,7 @@ fn seed_tui_direct_row(dir: &std::path::Path, channel_id: u64, tmux: &str) -> st
         ProviderKind::Claude,
         channel_id,
         None,
-        crate::services::discord::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID,
+        crate::services::discord::tui_direct_pending_start::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID,
         5_340_990_001,
         5_340_990_002,
         "tui prompt".to_string(),

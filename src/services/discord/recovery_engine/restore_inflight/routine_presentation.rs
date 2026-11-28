@@ -5,7 +5,7 @@ use crate::services::agent_protocol::NativeTerminalKind;
 use crate::services::discord::routine_presentation::TerminalPresentation;
 use crate::services::discord::turn_bridge::NoVisibleResultLease;
 
-pub(in crate::services::discord::recovery_engine) async fn settle_routine_no_visible(
+pub(in crate::services::discord) async fn settle_routine_no_visible(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     saved: &inflight::InflightTurnState,

@@ -54,7 +54,7 @@ mod replay_hold;
 #[path = "restore_inflight/routine_presentation.rs"]
 mod routine_presentation;
 pub(super) use routine_presentation::adopt_quiet_drain_restart;
-pub(super) use routine_presentation::settle_routine_no_visible;
+pub(in crate::services::discord) use routine_presentation::settle_routine_no_visible;
 
 #[path = "restore_inflight/replay_decision.rs"]
 mod replay_decision;
@@ -2311,14 +2311,14 @@ pub(in crate::services::discord) async fn restore_inflight_states(
         };
         std::thread::spawn(move || {
             let read = read_restored_output(&reader, start_offset, &tx, cancel_for_reader);
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             let traced = (
                 reader.name.clone(),
                 super::tmux_probe::reader_trace::end_of(&read),
             );
             match read {
                 Ok(RestoredRead::HandOff(offset)) => {
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     super::tmux_probe::reader_trace::runtime_ready(&reader.name);
                     let _ = tx.send(StreamMessage::RuntimeReady {
                         handoff: runtime_handoff_for_recovery(
@@ -2356,7 +2356,7 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                     });
                 }
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             super::tmux_probe::reader_trace::ended(&traced.0, traced.1);
         });
         let recovery_dispatch_id = parse_dispatch_id(&state.user_text)
@@ -2430,6 +2430,7 @@ pub(in crate::services::discord) async fn restore_inflight_states(
 
 #[cfg(test)]
 mod tests {
+    pub(super) use super::ready_without_output_fixture_tests::recovery_state;
     use crate::services::agent_protocol::{RuntimeHandoffKind, StreamMessage};
     use crate::services::discord::InflightRestartMode;
     use crate::services::discord::inflight::{
@@ -2476,23 +2477,6 @@ mod tests {
         tracing::subscriber::with_default(subscriber, run);
         String::from_utf8(buffer.lock().expect("captured logs").clone())
             .expect("captured logs are utf8")
-    }
-
-    pub(super) fn recovery_state(provider: ProviderKind, channel_id: u64) -> InflightTurnState {
-        InflightTurnState::new(
-            provider,
-            channel_id,
-            None,
-            1,
-            2,
-            3,
-            "restore reconcile gate".to_string(),
-            Some(format!("session-{channel_id}")),
-            Some(format!("AgentDesk-claude-{channel_id}")),
-            Some(format!("/tmp/{channel_id}.jsonl")),
-            None,
-            0,
-        )
     }
 
     #[test]
@@ -2784,13 +2768,14 @@ mod host_probe_tests;
 #[cfg(test)]
 #[path = "restore_inflight/kickoff_identity_tests.rs"]
 mod kickoff_identity_tests;
+#[cfg(any(test, feature = "test-support"))]
+#[path = "restore_inflight/ready_without_output_fixture_tests.rs"]
+pub(in crate::services::discord) mod ready_without_output_fixture_tests;
+
 #[cfg(test)]
 #[path = "restore_inflight/ready_without_output_tests.rs"]
 mod ready_without_output_tests;
 
-#[cfg(all(test, unix))]
-#[path = "restore_inflight/replay_hold_tests.rs"]
-mod replay_hold_tests;
 #[cfg(test)]
 #[path = "restore_inflight/scheduled_body_restore_tests.rs"]
 mod scheduled_body_restore_tests;

@@ -68,7 +68,7 @@ fn refused_readoption_consumes_only_a_previous_unreadopted_marker() {
         ("owner zero", |state| state.request_owner_user_id = 0),
         ("synthetic owner", |state| {
             state.request_owner_user_id =
-                crate::services::discord::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID;
+                crate::services::discord::tui_direct_pending_start::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID;
         }),
         ("zero marker generation", |state| {
             state.restart_generation = Some(0)
@@ -144,7 +144,7 @@ async fn two_shutdowns_refresh_real_and_readopted_synthetic_markers_before_boot(
     let real = row(7_807_721);
     let mut synthetic = row(7_807_722);
     synthetic.request_owner_user_id =
-        crate::services::discord::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID;
+        crate::services::discord::tui_direct_pending_start::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID;
     synthetic.set_relay_owner_kind(RelayOwnerKind::Watcher);
     let mut id_zero = row(7_807_723);
     id_zero.user_msg_id = 0;

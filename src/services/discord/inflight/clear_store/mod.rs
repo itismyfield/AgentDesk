@@ -829,7 +829,7 @@ pub(super) fn clear_inflight_state_if_matches_tmux_response_in_root(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn refresh_inflight_last_offset_if_matches_identity_in_root(
+pub(in crate::services::discord) fn refresh_inflight_last_offset_if_matches_identity_in_root(
     root: &std::path::Path,
     provider: &ProviderKind,
     channel_id: u64,

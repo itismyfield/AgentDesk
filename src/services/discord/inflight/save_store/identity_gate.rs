@@ -12,7 +12,7 @@ mod heartbeat;
 #[path = "identity_gate/host_locator.rs"]
 mod host_locator;
 #[path = "identity_gate/runtime_stamp.rs"]
-pub(in crate::services::discord::inflight) mod runtime_stamp;
+pub(in crate::services::discord) mod runtime_stamp;
 #[path = "identity_gate/stamp_merge.rs"]
 mod stamp_merge;
 #[path = "identity_gate/stream_loop_patch.rs"]

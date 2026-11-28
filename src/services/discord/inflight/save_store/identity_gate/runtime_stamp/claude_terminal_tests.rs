@@ -1,166 +1,9 @@
-use super::*;
-use crate::services::discord::{mailbox_try_start_turn, make_shared_data_for_tests};
+use super::{claude_terminal_fixture_tests::Fixture, *};
+use crate::services::discord::make_shared_data_for_tests;
 use crate::services::provider::CancelToken;
 use crate::services::tui_prompt_dedupe as dedupe;
 use serenity::all::{ChannelId, MessageId, UserId};
 use std::sync::Arc;
-
-#[path = "claude_terminal_tests/o_stream_regression_tests.rs"]
-mod o_stream_regression_tests;
-
-struct Fixture {
-    shared: Arc<crate::services::discord::SharedData>,
-    actor: Arc<CancelToken>,
-    local: InflightTurnState,
-    baseline: InflightTurnState,
-    expected: InflightTurnIdentity,
-    transcript: PathBuf,
-    tmux: String,
-    generation: i64,
-    file: (u64, u64),
-    end: u64,
-}
-
-impl Fixture {
-    async fn new(root: &Path, index: u64, provider: ProviderKind) -> Self {
-        let runtime = if provider == ProviderKind::Codex {
-            RuntimeHandoffKind::CodexTui
-        } else {
-            RuntimeHandoffKind::ClaudeTui
-        };
-        let shared = make_shared_data_for_tests();
-        let actor = Arc::new(CancelToken::from_persisted_turn_nonce(Some(
-            "same-nonce".into(),
-        )));
-        let channel = ChannelId::new(583_350_000 + index);
-        let tmux = format!("AgentDesk-claude-terminal-source-5833-{index}");
-        let transcript = root.join(format!("claude-{index}.jsonl"));
-        std::fs::write(&transcript, b"{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]}}\n{\"type\":\"result\",\"result\":\"answer\"}\n").unwrap();
-        let transcript = std::fs::canonicalize(transcript).unwrap();
-        let end = std::fs::metadata(&transcript).unwrap().len();
-        std::fs::write(
-            crate::services::tmux_common::session_temp_path(&tmux, "generation"),
-            b"1",
-        )
-        .unwrap();
-        let generation = tmux_generation_file_mtime_ns(&tmux);
-        dedupe::register_tmux_runtime_binding(
-            &tmux,
-            dedupe::TuiRuntimeBinding {
-                runtime_kind: runtime,
-                output_path: transcript.display().to_string(),
-                relay_output_path: None,
-                input_fifo_path: None,
-                session_id: None,
-                last_offset: 0,
-                relay_last_offset: None,
-            },
-        );
-        let mut local = InflightTurnState::new(
-            provider,
-            channel.get(),
-            None,
-            343_742_347_365_974_026,
-            77_010,
-            18,
-            "source witness".into(),
-            None,
-            Some(tmux.clone()),
-            Some(transcript.display().to_string()),
-            None,
-            0,
-        );
-        local.runtime_kind = Some(runtime);
-        local.turn_nonce = actor.turn_nonce().map(str::to_owned);
-        local.turn_start_offset = Some(0);
-        assert!(
-            mailbox_try_start_turn(
-                &shared,
-                channel,
-                actor.clone(),
-                UserId::new(local.request_owner_user_id),
-                MessageId::new(local.user_msg_id)
-            )
-            .await
-        );
-        let runtime_root = inflight_runtime_root().unwrap();
-        save_inflight_state_in_root(&runtime_root, &local).unwrap();
-        let expected = InflightTurnIdentity::from_state(&local);
-        Self {
-            shared,
-            actor,
-            baseline: local.clone(),
-            expected,
-            local,
-            file: file_identity(&transcript).unwrap(),
-            transcript,
-            tmux,
-            generation,
-            end,
-        }
-    }
-
-    fn frame(&self) -> StreamMessage {
-        if self.local.provider_kind() == Some(ProviderKind::Codex) {
-            return StreamMessage::CodexTuiTerminalDone {
-                result: "answer".into(),
-                session_id: None,
-                rollout_path: self.transcript.display().to_string(),
-                tmux_session_name: self.tmux.clone(),
-                turn_nonce: "same-nonce".into(),
-                source_start: 0,
-                complete_record_end: self.end,
-                captured_source: Some(crate::services::agent_protocol::CapturedTuiTerminalSource {
-                    generation_mtime_ns: self.generation,
-                    source_file_dev: self.file.0,
-                    source_file_ino: self.file.1,
-                    actor: Arc::downgrade(&self.actor),
-                }),
-                kind: crate::services::agent_protocol::NativeTerminalKind::Completed,
-            };
-        }
-        StreamMessage::ClaudeTuiTerminalDone {
-            result: "answer".into(),
-            session_id: None,
-            transcript_path: self.transcript.display().to_string(),
-            tmux_session_name: self.tmux.clone(),
-            turn_nonce: "same-nonce".into(),
-            source_start: 0,
-            complete_record_end: self.end,
-            generation_mtime_ns: self.generation,
-            source_file_dev: self.file.0,
-            source_file_ino: self.file.1,
-            actor: Arc::downgrade(&self.actor),
-            kind: crate::services::agent_protocol::NativeTerminalKind::Completed,
-        }
-    }
-
-    async fn admit(
-        &mut self,
-        frame: StreamMessage,
-    ) -> Result<(StreamMessage, Option<TuiTerminalRange>, bool), GuardedSaveOutcome> {
-        self.local
-            .admit_tui_terminal_frame(
-                &mut self.baseline,
-                &self.expected,
-                true,
-                (&self.shared, &self.actor),
-                "answer",
-                frame,
-            )
-            .await
-            .map(|(message, range, terminal, _)| (message, range, terminal))
-    }
-
-    fn durable(&self) -> Vec<u8> {
-        std::fs::read(inflight_state_path(
-            &inflight_runtime_root().unwrap(),
-            &self.local.provider_kind().unwrap(),
-            self.local.channel_id,
-        ))
-        .unwrap()
-    }
-}
 
 #[test]
 fn contended_captured_terminal_keeps_scheduler_timer_and_loopback_live() {
@@ -205,6 +48,7 @@ fn assert_terminal_lock_liveness(uncaptured: bool) {
         } else {
             ProviderKind::Claude
         },
+        make_shared_data_for_tests(),
     ));
     if uncaptured {
         crate::services::codex_tui::session::write_codex_tui_rollout_marker_with_start_offset(
@@ -319,7 +163,13 @@ fn claude_terminal_range_admits_actual_file_and_retains_receipt_after_cursor_pro
         .unwrap()
         .block_on(async {
             for provider in [ProviderKind::Claude, ProviderKind::Codex] {
-                let mut fixture = Fixture::new(temp.path(), 1, provider.clone()).await;
+                let mut fixture = Fixture::new(
+                    temp.path(),
+                    1,
+                    provider.clone(),
+                    make_shared_data_for_tests(),
+                )
+                .await;
                 let mut frame = fixture.frame();
                 // A parsed terminal may omit result while the same reader streamed the body.
                 if let StreamMessage::ClaudeTuiTerminalDone { result, .. } = &mut frame {
@@ -447,8 +297,13 @@ fn claude_terminal_range_rejects_unproven_source_and_same_nonce_successor_withou
                 .into_iter()
                 .enumerate()
                 {
-                    let mut fixture =
-                        Fixture::new(temp.path(), index as u64 + 10, provider.clone()).await;
+                    let mut fixture = Fixture::new(
+                        temp.path(),
+                        index as u64 + 10,
+                        provider.clone(),
+                        make_shared_data_for_tests(),
+                    )
+                    .await;
                     let mut frame = fixture.frame();
                     let mut foreign_actor = None;
                     if let StreamMessage::ClaudeTuiTerminalDone {
@@ -602,7 +457,8 @@ fn an_admitted_terminal_keeps_its_kind_and_an_unverified_abort_is_never_done() {
                 (42, ProviderKind::Claude, NativeTerminalKind::Completed),
             ];
             for (index, provider, kind) in cases {
-                let mut fixture = Fixture::new(temp.path(), index, provider).await;
+                let mut fixture =
+                    Fixture::new(temp.path(), index, provider, make_shared_data_for_tests()).await;
                 let frame = with_kind(fixture.frame(), kind);
                 let (done, range, _) = fixture.admit(frame).await.unwrap();
                 assert!(matches!(done, StreamMessage::Done { .. }));
@@ -612,7 +468,13 @@ fn an_admitted_terminal_keeps_its_kind_and_an_unverified_abort_is_never_done() {
                 (43, NativeTerminalKind::Completed),
                 (44, NativeTerminalKind::Aborted),
             ] {
-                let mut fixture = Fixture::new(temp.path(), index, ProviderKind::Codex).await;
+                let mut fixture = Fixture::new(
+                    temp.path(),
+                    index,
+                    ProviderKind::Codex,
+                    make_shared_data_for_tests(),
+                )
+                .await;
                 let mut frame = with_kind(fixture.frame(), kind);
                 if let StreamMessage::CodexTuiTerminalDone {
                     captured_source, ..
@@ -669,7 +531,13 @@ fn a_completed_range_persists_its_pre_kind_bytes_and_an_aborted_one_its_kind() {
         (46, NativeTerminalKind::Aborted),
     ] {
         let range = runtime.block_on(async {
-            let mut fixture = Fixture::new(temp.path(), index, ProviderKind::Claude).await;
+            let mut fixture = Fixture::new(
+                temp.path(),
+                index,
+                ProviderKind::Claude,
+                make_shared_data_for_tests(),
+            )
+            .await;
             let frame = with_kind(fixture.frame(), kind);
             fixture.admit(frame).await.unwrap().1.unwrap()
         });

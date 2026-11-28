@@ -93,7 +93,7 @@ Before retains the channel sum; PinSupplyBefore has the repaired P gate but lack
 | 1 | `OwnerPastesA` | Original `owner_input.rs:576` (`execute_owned`) creates/pastes the busy attempt |
 | 2–3 | `BusyEffectReturns`, `SettleBusySubmission` | Reviewed `queue_io/input_owner/effect.rs:201–205` returns from `inject_owned` and collects attempt history |
 | 4–5 | `ObserveBusyReceipt`, `SupplyBusyPin` | Existing `hosting/warm_followup.rs::busy_owner_observer` actual-user branch; impl-7 adds only its approved callback and the arm/source guard |
-| 6–8 | `ShutdownRestamps`, `SettleBoot`, `RestoreAlive` | Original `inflight.rs:799–801` refreshes the marker; `restore_inflight.rs:1924` re-registers; refused adoption does not own A |
+| 6–8 | `ShutdownRestamps`, `SettleBoot`, `RestoreAlive` | Original `inflight.rs:807–809` refreshes the marker; `restore_inflight.rs:1924` re-registers; refused adoption does not own A |
 | 9–11 | Second shutdown, boot and restore | Same existing lifecycle, with current-generation shutdown refresh preserved |
 | 12–14 | A ends, N starts, output is captured/delivered | Original native boundary predicate `completion_scan.rs:207`; O gate `carried_turn_close.rs:376` |
 | 15–17 | B is admitted, claims, collides, and releases its own claim | Original `foreign_row.rs:44–53` headless / `:70–80` intake; queue front stays pending |

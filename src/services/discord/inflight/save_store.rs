@@ -14,7 +14,7 @@
 use super::*;
 
 #[path = "save_store/create_monotonic_observer.rs"]
-mod create_monotonic_observer;
+pub(in crate::services::discord) mod create_monotonic_observer;
 
 // Dormant until the legacy restart replay installer calls it.
 #[cfg(test)]
@@ -30,7 +30,7 @@ mod coordinate_replay_tests;
 #[path = "save_store/delivery_rewind.rs"]
 mod delivery_rewind;
 #[path = "save_store/identity_gate.rs"]
-pub(super) mod identity_gate;
+pub(in crate::services::discord) mod identity_gate;
 #[path = "save_store/rebind_adoption.rs"]
 mod rebind_adoption;
 
@@ -85,7 +85,7 @@ mod outcome_decomposition_tests;
 /// TEST SEED ONLY (#4259 R4): the production symbol is compile-time absent.
 /// Runtime writers must use a create-shaped API or a lock-held narrow RMW seam;
 /// identity checking alone does not make a stale whole-row snapshot safe.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(in crate::services::discord) fn save_inflight_state(
     state: &InflightTurnState,
 ) -> Result<(), String> {
@@ -1116,7 +1116,7 @@ pub(in crate::services::discord) fn save_inflight_state_create_new(
 /// Test-visible inner form of `save_inflight_state_create_new`. Takes an
 /// explicit root so unit tests can exercise create-new semantics without
 /// tripping over `AGENTDESK_ROOT_DIR` env-var races.
-fn save_inflight_state_create_new_in_root(
+pub(in crate::services::discord) fn save_inflight_state_create_new_in_root(
     root: &Path,
     state: &InflightTurnState,
 ) -> Result<(), CreateNewInflightError> {
@@ -1260,8 +1260,8 @@ fn create_new_atomic_write(path: &Path, data: &str) -> Result<(), String> {
     store::publish_row(path, data)
 }
 
-#[cfg(test)]
-pub(super) fn save_inflight_state_in_root(
+#[cfg(any(test, feature = "test-support"))]
+pub(in crate::services::discord) fn save_inflight_state_in_root(
     root: &Path,
     state: &InflightTurnState,
 ) -> Result<(), String> {
@@ -1307,7 +1307,7 @@ pub(in crate::services::discord) fn save_inflight_state_if_absent(
     save_inflight_state_if_absent_in_root(&root, state)
 }
 
-fn save_inflight_state_if_absent_in_root(
+pub(in crate::services::discord) fn save_inflight_state_if_absent_in_root(
     root: &Path,
     state: &InflightTurnState,
 ) -> Result<bool, String> {

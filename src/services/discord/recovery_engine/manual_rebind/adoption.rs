@@ -445,7 +445,7 @@ pub(crate) fn announce_adopt_fence_forward(
         let message = crate::services::message_outbox::OutboxMessage {
             target: &target,
             content: &notice,
-            bot: crate::services::discord::bot_role::UtilityBotRole::Notify.alias(),
+            bot: crate::domain::bot_role::UtilityBotRole::Notify.alias(),
             source: "adopt_fence_forward_notice",
             reason_code: Some("adopt.fence_forward"),
             session_key: Some(&target),
@@ -471,10 +471,6 @@ pub(crate) fn rebind_output_paths_same(left: &str, right: &str) -> bool {
     let right_path = std::fs::canonicalize(right_path).unwrap_or_else(|_| right_path.to_path_buf());
     left_path == right_path
 }
-
-#[cfg(test)]
-#[path = "adoption_notice_pg_tests.rs"]
-mod notice_pg_tests;
 
 #[cfg(test)]
 mod tests {
@@ -694,7 +690,7 @@ mod tests {
             ProviderKind::Claude,
             channel_id,
             None,
-            crate::services::discord::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID,
+            crate::services::discord::tui_direct_pending_start::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID,
             6_159_000_001,
             6_159_000_002,
             "tui prompt".to_string(),

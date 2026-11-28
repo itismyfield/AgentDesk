@@ -49,7 +49,7 @@ use transport::{TransportResult, drive_non_fresh_transport, post_send_finalize};
 mod fresh_send;
 #[cfg(test)]
 mod fresh_send_tests;
-mod transport;
+pub(in crate::services::discord) mod transport;
 
 /// The narrow delivery-lease surface the turn-output controller drives
 /// (acquire → commit → release, plus `read` for the tests). Abstracting the
@@ -3632,6 +3632,3 @@ mod tests {
         }
     }
 }
-
-#[cfg(test)]
-mod raw_request_tests;

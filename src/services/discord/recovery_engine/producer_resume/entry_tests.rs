@@ -1,11 +1,10 @@
 //! Producer revival through the supervised watcher and periodic health entry points.
 
-use std::collections::HashMap;
 use std::io::Write;
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::Duration;
 
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
@@ -17,6 +16,9 @@ use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::health::test_support::{MockDiscord, message_json};
 use crate::services::discord::inflight::{self, InflightTurnState, RelayOwnerKind};
 use crate::services::discord::outbound::{completed_turn_ledger, delivery_record};
+use crate::services::discord::recovery_engine::producer_resume::producer_resume_hook_tests::{
+    ENSURE_HOOK, EPILOGUES, PREFLIGHT_REFUSED,
+};
 use crate::services::discord::{self, SharedData, TmuxWatcherHandle};
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::tui_prompt_dedupe::{self as dedupe, TuiRuntimeBinding};
@@ -25,20 +27,6 @@ const OWNER: u64 = 343_742_347_365_974_026;
 const SESSION: &str = "resume-entry-session";
 const NATIVE_TURN: &str = "resume-entry-native-turn";
 const PROMPT: &str = "continue this exact managed turn";
-
-type EpilogueObservers = HashMap<(u64, String), Weak<AtomicU64>>;
-static EPILOGUES: LazyLock<Mutex<EpilogueObservers>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-
-pub(in crate::services::discord) fn record_epilogue_body(channel: u64, nonce: Option<&str>) {
-    if let Some(observer) = EPILOGUES
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .get(&(channel, nonce.unwrap_or_default().to_owned()))
-        .and_then(Weak::upgrade)
-    {
-        observer.fetch_add(1, Ordering::AcqRel);
-    }
-}
 
 fn records(values: impl IntoIterator<Item = Value>) -> Vec<u8> {
     values
@@ -400,16 +388,16 @@ impl Fixture {
     async fn ensure_ready(&self) {
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
-                let outcome = super::ensure(
+                let outcome = crate::services::discord::recovery_engine::producer_resume::ensure(
                     self.shared.clone(),
                     self.handle.tmux_session_name.clone(),
                     self.handle.cancel.clone(),
                 )
                 .await;
-                if outcome == super::ResumeOutcome::WriterReady {
+                if outcome == crate::services::discord::recovery_engine::producer_resume::ResumeOutcome::WriterReady {
                     break;
                 }
-                assert_eq!(outcome, super::ResumeOutcome::RetryLater);
+                assert_eq!(outcome, crate::services::discord::recovery_engine::producer_resume::ResumeOutcome::RetryLater);
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
         })
@@ -938,7 +926,7 @@ async fn r6_contention_retains_event_order_and_clear_blocks_old_output() {
     *PREFLIGHT_REFUSED.lock().unwrap() =
         Some((f.handle.tmux_session_name.clone(), Arc::downgrade(&refused)));
     let (outcome, ()) = tokio::join!(
-        super::ensure(
+        crate::services::discord::recovery_engine::producer_resume::ensure(
             f.shared.clone(),
             f.handle.tmux_session_name.clone(),
             f.handle.cancel.clone(),
@@ -953,7 +941,7 @@ async fn r6_contention_retains_event_order_and_clear_blocks_old_output() {
     );
     assert_eq!(
         outcome,
-        super::ResumeOutcome::WriterReady,
+        crate::services::discord::recovery_engine::producer_resume::ResumeOutcome::WriterReady,
         "one entry must retry transient preflight contention without another recovery tick"
     );
     let row_lock = inflight::try_lock_inflight_state_path(&row_path).unwrap();
@@ -1023,49 +1011,38 @@ fn r9_applicability_requires_old_codex_wrapper_episode_and_retains_scope_fences(
     row.runtime_kind = Some(RuntimeHandoffKind::CodexTui);
     row.set_relay_owner_kind(RelayOwnerKind::Watcher);
     row.turn_start_offset = Some(0);
-    assert!(super::applicable(&row, tmux, 10));
-    assert!(!super::applicable(&row, tmux, 0));
+    assert!(crate::services::discord::recovery_engine::producer_resume::applicable(&row, tmux, 10));
+    assert!(!crate::services::discord::recovery_engine::producer_resume::applicable(&row, tmux, 0));
     let original = row.clone();
     row.runtime_kind = Some(RuntimeHandoffKind::LegacyTmuxWrapper);
-    assert!(!super::applicable(&row, tmux, 10));
+    assert!(
+        !crate::services::discord::recovery_engine::producer_resume::applicable(&row, tmux, 10)
+    );
     row = original.clone();
     row.output_path = Some("/native/rollout.jsonl".into());
-    assert!(!super::applicable(&row, tmux, 10));
+    assert!(
+        !crate::services::discord::recovery_engine::producer_resume::applicable(&row, tmux, 10)
+    );
     row = original.clone();
     row.runtime_kind_unknown_on_disk = true;
-    assert!(!super::applicable(&row, tmux, 10));
+    assert!(
+        !crate::services::discord::recovery_engine::producer_resume::applicable(&row, tmux, 10)
+    );
     row = original.clone();
     row.version = u32::MAX;
-    assert!(!super::applicable(&row, tmux, 10));
+    assert!(
+        !crate::services::discord::recovery_engine::producer_resume::applicable(&row, tmux, 10)
+    );
     row = original.clone();
     row.terminal_delivery_committed = true;
-    assert!(!super::applicable(&row, tmux, 10));
+    assert!(
+        !crate::services::discord::recovery_engine::producer_resume::applicable(&row, tmux, 10)
+    );
     row = original;
     row.turn_source = inflight::TurnSource::ExternalInput;
-    assert!(!super::applicable(&row, tmux, 10));
-}
-
-type PreflightRefusal = Option<(String, std::sync::Weak<tokio::sync::Notify>)>;
-static PREFLIGHT_REFUSED: std::sync::Mutex<PreflightRefusal> = std::sync::Mutex::new(None);
-
-pub(super) fn preflight_refused(tmux: &str) {
-    if let Some((key, notification)) = PREFLIGHT_REFUSED.lock().unwrap().as_ref()
-        && key == tmux
-        && let Some(notification) = notification.upgrade()
-    {
-        notification.notify_one();
-    }
-}
-
-thread_local! {
-    static ENSURE_HOOK: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
-}
-pub(super) async fn before_ensure() {
-    match ENSURE_HOOK.with(|hook| hook.replace(0)) {
-        1 => panic!("injected producer startup panic"),
-        2 => tokio::time::sleep(Duration::from_secs(5)).await,
-        _ => {}
-    }
+    assert!(
+        !crate::services::discord::recovery_engine::producer_resume::applicable(&row, tmux, 10)
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1257,7 +1234,7 @@ async fn r11_incident_shaped_pending_row_still_rejects_whole_rebind_without_muta
         dedupe::runtime_binding_for_tmux_session(&f.handle.tmux_session_name),
         f.binding_before
     );
-    assert!(!super::generations::present(f.wrapper.to_str().unwrap()));
+    assert!(!crate::services::discord::recovery_engine::producer_resume::relay_generation_present_for_test(f.wrapper.to_str().unwrap()));
     assert!(
         discord::mailbox_snapshot(&f.shared, f.channel)
             .await

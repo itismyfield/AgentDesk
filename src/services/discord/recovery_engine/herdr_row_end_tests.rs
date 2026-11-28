@@ -1,62 +1,13 @@
 //! Which rows boot restore leaves to the end pass, and that the end pass's clear removes only the
 //! turn it read; the end-to-end scenarios run in `rig`.
-use std::sync::Mutex;
-
+use super::row_end_hook_tests::{CURRENT, PRIOR};
 use super::*;
 use crate::services::provider::cancel_token_claude_interrupt::HERDR_SETTLEMENT_OVERRIDE;
 
-#[path = "herdr_row_end_rig_tests.rs"]
-mod rig;
-pub(in crate::services::discord) use rig::settled_tasks;
-
-type Hook = Arc<dyn Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
-
-/// Hooks a scenario places at a named point of the end task.
-static HOOKS: Mutex<Vec<(&'static str, Hook)>> = Mutex::new(Vec::new());
-
-/// Runs every hook registered for `point`, in order.
-pub(super) async fn hook(point: &'static str) {
-    let hooks: Vec<Hook> = HOOKS
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|(at, _)| *at == point)
-        .map(|(_, hook)| hook.clone())
-        .collect();
-    for run in hooks {
-        run().await;
-    }
-}
-
-fn on(
-    point: &'static str,
-    hook: impl Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync + 'static,
-) {
-    HOOKS.lock().unwrap().push((point, Arc::new(hook)));
-}
-
-/// `hook` at `point` until the guard drops, for a scenario outside this module.
-pub(in crate::services::discord) fn on_while(
-    point: &'static str,
-    hook: impl Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync + 'static,
-) -> Hooked {
-    on(point, hook);
-    Hooked(point)
-}
-
-pub(in crate::services::discord) struct Hooked(&'static str);
-
-impl Drop for Hooked {
-    fn drop(&mut self) {
-        let point = self.0;
-        HOOKS.lock().unwrap().retain(|(at, _)| *at != point);
-    }
-}
+pub(in crate::services::discord) use super::row_end_hook_tests::{on_while, settled_tasks};
 
 const CHANNEL: u64 = 5_340_871_001;
 const NONCE: &str = "turn-row-end";
-const PRIOR: u64 = 4;
-const CURRENT: u64 = 5;
 
 /// A fresh runtime root whose process generation is `CURRENT`.
 struct Root {

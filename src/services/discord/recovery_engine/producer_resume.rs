@@ -53,8 +53,8 @@ pub(in crate::services::discord) async fn ensure(
     tmux: String,
     cancel: Arc<AtomicBool>,
 ) -> ResumeOutcome {
-    #[cfg(test)]
-    entry_tests::before_ensure().await;
+    #[cfg(any(test, feature = "test-support"))]
+    producer_resume_hook_tests::before_ensure().await;
     if shared.provider != ProviderKind::Codex {
         return ResumeOutcome::NotApplicable;
     }
@@ -136,7 +136,11 @@ fn current(shared: &SharedData, channel: ChannelId, tmux: &str, cancel: &Arc<Ato
         })
         && shared.tmux_watchers.owner_channel_for_tmux_session(tmux) == Some(channel)
 }
-fn applicable(state: &InflightTurnState, tmux: &str, len: u64) -> bool {
+pub(in crate::services::discord) fn applicable(
+    state: &InflightTurnState,
+    tmux: &str,
+    len: u64,
+) -> bool {
     state.provider == "codex"
         && state.runtime_kind == Some(RuntimeHandoffKind::CodexTui)
         && !state.runtime_kind_unknown_on_disk
@@ -226,8 +230,8 @@ fn prepare(
     let state_path = inflight::inflight_state_path(&root, &ProviderKind::Codex, channel.get());
     let (state, binding) = {
         let _lock = inflight::try_lock_inflight_state_path(&state_path).map_err(|_| {
-            #[cfg(test)]
-            entry_tests::preflight_refused(&tmux);
+            #[cfg(any(test, feature = "test-support"))]
+            producer_resume_hook_tests::preflight_refused(&tmux);
             RetryLater
         })?;
         let state =
@@ -388,8 +392,13 @@ fn retry(context: &Context) {
     }
 }
 
-#[cfg(test)]
-#[path = "producer_resume/entry_tests.rs"]
-mod entry_tests;
-#[cfg(test)]
-pub(in crate::services::discord) use entry_tests::record_epilogue_body;
+#[cfg(any(test, feature = "test-support"))]
+#[path = "producer_resume/producer_resume_hook_tests.rs"]
+pub(in crate::services::discord) mod producer_resume_hook_tests;
+#[cfg(any(test, feature = "test-support"))]
+pub(in crate::services::discord) use producer_resume_hook_tests::record_epilogue_body;
+
+#[cfg(any(test, feature = "test-support"))]
+pub(in crate::services::discord) fn relay_generation_present_for_test(path: &str) -> bool {
+    generations::present(path)
+}

@@ -1,13 +1,19 @@
 //! Actual restart scan: a durable hold preserves the episode while delivering its saved debt.
 
+use std::sync::Arc;
+
+use crate::services::discord::{inflight, mailbox_snapshot, runtime_store};
+use crate::services::provider::ProviderKind;
+use poise::serenity_prelude::{self as serenity, MessageId};
+
 #[path = "replay_hold_tests/routine_presentation_tests.rs"]
 mod routine_presentation_tests;
 
-use super::*;
 use crate::services::discord::host_teardown_gate::test_support::{
     Stored, channel_key, nameless_turn, seed, shared_on,
 };
 use crate::services::discord::recovery_engine::o_cut_recorder;
+use crate::services::discord::recovery_engine::{restore_inflight_states, restore_inflight_turns};
 use crate::services::session_host::test_support::{InjectedLivenessGuard, InjectedPresenceGuard};
 use crate::services::session_host::{HostLiveness, HostPresence, HostSessionRef};
 use poise::serenity_prelude::ChannelId;
@@ -192,7 +198,7 @@ async fn replay_hold_restore_delivers_debt_without_finalizing_or_readopting_pg()
                 .contains_key(&ChannelId::new(original.channel_id))
         );
         assert!(
-            super::super::tmux_probe::reader_trace::events(
+            crate::services::discord::recovery_engine::tmux_probe::reader_trace::events(
                 original.tmux_session_name.as_deref().unwrap()
             )
             .is_empty()
@@ -580,7 +586,7 @@ async fn replay_hold_restore_preserves_a_fresh_actor_while_old_debt_waits_pg() {
     assert!(discord.contents().is_empty());
     assert!(!actor.cancelled.load(std::sync::atomic::Ordering::Relaxed));
     assert_eq!(
-        super::super::mailbox_snapshot(&shared, channel)
+        mailbox_snapshot(&shared, channel)
             .await
             .active_user_message_id,
         Some(MessageId::new(channel.get() + 1))
@@ -1027,7 +1033,7 @@ async fn recovery_history_retry_reads_the_canonical_fence_before_and_after_http_
 }
 
 // The positive control and the execution mutant cross the same public native provider entry.
-pub(super) fn execution_probe() {
+fn execution_probe() {
     let cwd = std::env::var("ADK_RECOVERY_PROBE_CWD").unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
     crate::services::codex::execute_command_streaming(

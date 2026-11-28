@@ -276,8 +276,8 @@ async fn settle_row(
         }
     }
     let report = super::restart_report::load_restart_report(provider, row.channel_id);
-    #[cfg(test)]
-    tests::hook("before_clear").await;
+    #[cfg(any(test, feature = "test-support"))]
+    row_end_hook_tests::hook("before_clear").await;
     if o_owned {
         super::super::outbound::completed_turn_ledger::o_pending::capture(provider, &row).await;
     }
@@ -504,8 +504,8 @@ fn ended_read(
 /// Retires an E's execution by CAS, then releases the execution's input hold.
 async fn commit(pool: &sqlx::PgPool, seen: &Seen) -> Result<(), Held> {
     if let Some((observation, record)) = &seen.retire {
-        #[cfg(test)]
-        tests::hook("before_retire").await;
+        #[cfg(any(test, feature = "test-support"))]
+        row_end_hook_tests::hook("before_retire").await;
         let retired = retire_confirmed(pool, observation, record).await;
         retired.map_err(|_| "retire_cas_failed")?;
     }
@@ -709,7 +709,7 @@ fn codex_last_turn_closed(file: &mut std::fs::File, len: u64) -> Option<bool> {
 }
 
 #[path = "herdr_row_end/diagnostics.rs"]
-mod diagnostics;
+pub(in crate::services::discord) mod diagnostics;
 #[path = "herdr_row_end_live.rs"]
 mod live;
 #[path = "herdr_row_end/outcome.rs"]
@@ -722,3 +722,7 @@ mod placeholder;
 #[cfg(test)]
 #[path = "herdr_row_end_tests.rs"]
 pub(in crate::services::discord) mod tests;
+
+#[cfg(any(test, feature = "test-support"))]
+#[path = "herdr_row_end_hook_tests.rs"]
+pub(in crate::services::discord) mod row_end_hook_tests;

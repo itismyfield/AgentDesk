@@ -221,7 +221,7 @@ mod tests {
         test(state, tmp.path());
     }
 
-    use crate::test_env_panic_probe::{assert_root_restored, checkpoint};
+    use crate::config::test_env::panic_probe::{assert_root_restored, checkpoint};
 
     fn exercise_readopted_crash_turn() {
         with_readopted_crash_turn(|_, root| checkpoint(&[("AGENTDESK_ROOT_DIR", root.as_os_str())]))
@@ -300,7 +300,7 @@ mod tests {
     fn synthetic_owner_turn_is_not_a_real_user_black_hole() {
         with_readopted_crash_turn(|mut state, _root| {
             state.request_owner_user_id =
-                crate::services::discord::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID;
+                crate::services::discord::tui_direct_pending_start::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID;
             assert!(!crash_readopt_real_user_live_turn(&state));
         });
     }

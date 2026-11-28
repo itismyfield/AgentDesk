@@ -59,7 +59,7 @@ mod phase_policy;
 #[path = "recovery_engine/terminal_watcher.rs"]
 mod terminal_watcher;
 #[path = "recovery_engine/tmux_probe.rs"]
-mod tmux_probe;
+pub(in crate::services::discord) mod tmux_probe;
 // #3479 item-2: behavior-preserving extraction of the inflight-state derivation
 // helper cluster (handoff message, ready-for-input probes, worktree info /
 // spawn-cwd derivation) into a leaf module.
@@ -102,7 +102,7 @@ mod runtime;
 // are re-imported below so sibling modules and restart recovery call sites keep
 // their existing names.
 #[path = "recovery_engine/completion_delivery.rs"]
-mod completion_delivery;
+pub(in crate::services::discord) mod completion_delivery;
 // #3834 r2: behavior-preserving extraction of the restart-path inflight recovery
 // scan (`restore_inflight_turns`) plus its tmux retry/output-path helpers into a
 // leaf module. Entry points are re-exported below so external paths stay stable.
@@ -113,7 +113,7 @@ pub(in crate::services::discord) mod o_cut_recorder;
 #[path = "recovery_engine/o_recovery_cut_tests.rs"]
 mod o_recovery_cut_tests;
 #[path = "recovery_engine/restore_inflight.rs"]
-mod restore_inflight;
+pub(in crate::services::discord) mod restore_inflight;
 pub(crate) use completion_delivery::CapturedReadyDeliveryCommit;
 #[cfg(unix)]
 #[path = "recovery_engine/herdr_admitted_restart.rs"]
@@ -578,3 +578,11 @@ pub(crate) use restore_persist_outcome::codex_restart_output_for_tests;
 #[cfg(all(test, unix))]
 #[path = "recovery_engine/o_settlement_tests.rs"]
 pub(in crate::services::discord) mod o_settlement_tests;
+
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) fn interrupted_recovery_message_for_test(
+    row: &inflight::InflightTurnState,
+    text: &str,
+) -> String {
+    interrupted_recovery_message(row, text)
+}

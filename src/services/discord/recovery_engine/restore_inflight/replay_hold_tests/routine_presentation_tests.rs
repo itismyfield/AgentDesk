@@ -1,6 +1,9 @@
+use crate::services::discord::SharedData;
+use crate::services::provider::CancelToken;
+
 use super::*;
 use crate::services::discord::routine_presentation::RoutinePresentation;
-use crate::test_support::wait::{WAIT_CAP, await_within};
+use adk_test_support::test_support::wait::{WAIT_CAP, await_within};
 use sha2::{Digest, Sha256};
 
 fn restore_boot<'a>(
@@ -18,9 +21,11 @@ fn idle_boot<'a>(
     output: &'a std::path::Path,
     gateway: &'a dyn crate::services::discord::gateway::TurnGateway,
 ) -> std::pin::Pin<Box<impl std::future::Future<Output = bool> + 'a>> {
-    Box::pin(super::super::super::idle_captured_response::recover_idle_partial_response_from_ready_source(
-        http, shared, row, output, gateway,
-    ))
+    Box::pin(
+        crate::services::discord::recovery_engine::recover_idle_partial_response_from_ready_source(
+            http, shared, row, output, gateway,
+        ),
+    )
 }
 
 fn restored(
@@ -164,7 +169,7 @@ fn restored(
                 let task_shared = shared.clone();
                 let task_row = serialized.clone();
                 let task = tokio::spawn(async move {
-                    super::super::settle_routine_no_visible(
+                    crate::services::discord::recovery_engine::restore_inflight::settle_routine_no_visible(
                         &task_shared,
                         &ProviderKind::Claude,
                         &task_row,

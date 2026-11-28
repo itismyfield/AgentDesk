@@ -231,7 +231,7 @@ T3 기준 의미는 다음과 같다(`adapter.ts:566-571`). agy는 실행 중 �
 3a. **완료 영수증 직전 디스크 원본 병합:**
    - **문제:** bridge는 시작할 때 inflight를 메모리로 복제한다(`src/services/discord/turn_bridge/mod.rs:427`, `turn_bridge/stream_loop.rs:121-133`). B의 write-ahead는 디스크 행에만 들어가고, bridge 사본은 다음 stream tick 병합에서야 B를 안다. 그 전에 취소가 오면 bridge는 tick 없이 끝난다(`stream_loop.rs:220-225`). 종료 저장 병합은 pending message 후보가 있을 때만 돈다(`turn_bridge/stream_loop/exit_reconcile.rs:179-207`). 그래서 완료 영수증(`turn_bridge/completion_postlude.rs:904-919` → `turn_bridge/turn_analytics.rs:26-67`, `consumed_origin_ids: &inflight_state.input_origin_ids`는 `:49`)에 B가 빠질 수 있다. 영수증 뒤에 행을 지우면 B를 소유한 내구 증거도 사라진다. 1e 델타 리뷰 P1이다.
    - **계약:** `record_terminal_receipt`(`turn_analytics.rs:26-67`)가 `TurnReceipt`를 만들기 직전에 새 child `turn_bridge/receipt_origins.rs`의 `latest_origins(provider, channel_id, &inflight_state) -> ReceiptOrigins`를 부른다. 이 함수는 그 턴의 최신 디스크 행을 읽어 메모리 원본과 병합한다.
-     - 읽기는 기존 `inflight::load_inflight_state_read_only_result`(`src/services/discord/inflight.rs:909-925`)다. 없음(`Ok(None)`)과 읽기 실패(`Err`)를 구분한다.
+     - 읽기는 기존 `inflight::load_inflight_state_read_only_result`(`src/services/discord/inflight.rs:917-933`)다. 없음(`Ok(None)`)과 읽기 실패(`Err`)를 구분한다.
      - 소유 판정은 bridge 완료 경로가 이미 쓰는 두 검사다. `InflightTurnIdentity::from_state(&inflight_state).matches_state(&row)`(`inflight/model/identity.rs:57-63`)와 `row.owned_by_turn_nonce(inflight_state.turn_nonce.as_deref())`(`inflight/save_store/identity_gate/captured_nonce.rs:12-15`)다.
      - 새 원장도 새 inflight 필드도 없다. 거대 파일 `completion_postlude.rs`(1,078줄)는 손대지 않는다. 바뀌는 곳은 `turn_analytics.rs`(562줄)의 호출 몇 줄과 새 child 하나, 부모 `turn_bridge/mod.rs`의 `mod` 한 줄이다.
 

@@ -1,4 +1,4 @@
-use super::notification_policy::progress;
+use adk_runtime::services::discord::outbound::notification_policy::progress;
 
 #[tokio::test(flavor = "current_thread")]
 async fn scoped_progress_silences_the_shared_card_and_relay_builders() {

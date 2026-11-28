@@ -234,8 +234,11 @@ pub(super) fn settled(provider: &ProviderKind, row: &inflight::InflightTurnState
 }
 
 /// The reason the channel's row was last held, for a scenario's assertions.
-#[cfg(test)]
-pub(super) fn last_reason(provider: &ProviderKind, channel: u64) -> Option<&'static str> {
+#[cfg(any(test, feature = "test-support"))]
+pub(in crate::services::discord) fn last_reason(
+    provider: &ProviderKind,
+    channel: u64,
+) -> Option<&'static str> {
     let held = HELD.lock().unwrap_or_else(|e| e.into_inner());
     (held.iter())
         .find(|(key, _)| key.0 == provider.as_str() && key.1 == channel)

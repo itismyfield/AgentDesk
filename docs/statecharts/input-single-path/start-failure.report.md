@@ -88,7 +88,7 @@ and duplicate notifications cannot release another closing pin or create another
 
 | Physical point | Existing path / authority |
 |---|---|
-| `inflight.rs:570` | Policy API `remove_inflight_row_for_policy_op`; public JS `src/engine/ops/exec_ops.rs:323–389` |
+| `inflight.rs:578` | Policy API `remove_inflight_row_for_policy_op`; public JS `src/engine/ops/exec_ops.rs:323–389` |
 | `inflight/circuit_removal.rs:74` | Checked delete with circuit handoff |
 | `inflight/rebind_reap.rs:311` | Abandoned rebind reap |
 | `inflight/rebind_reap.rs:387` | Other-provider abandoned rebind reap |

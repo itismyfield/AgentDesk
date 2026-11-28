@@ -1,4 +1,7 @@
-use super::*;
+use crate::services::agent_protocol::RuntimeHandoffKind;
+use crate::services::discord::inflight;
+
+use crate::services::discord::recovery_engine::manual_rebind::adoption::*;
 use crate::services::provider::ProviderKind;
 use std::sync::{Arc, Mutex};
 
@@ -39,7 +42,7 @@ async fn fence_forward_notice_is_enqueued_and_delivered_pg() {
         ProviderKind::Claude,
         channel_id,
         None,
-        crate::services::discord::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID,
+        crate::services::discord::tui_direct_pending_start::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID,
         6_304_000_002,
         6_304_000_003,
         "tui prompt".to_string(),
@@ -87,10 +90,7 @@ async fn fence_forward_notice_is_enqueued_and_delivered_pg() {
     assert_eq!(rows.len(), 1, "fence-forward notice must reach the outbox");
     let (source, bot, reason_code, content) = rows.remove(0);
     assert_eq!(source, "adopt_fence_forward_notice");
-    assert_eq!(
-        bot,
-        crate::services::discord::bot_role::UtilityBotRole::Notify.alias()
-    );
+    assert_eq!(bot, crate::domain::bot_role::UtilityBotRole::Notify.alias());
     assert_eq!(reason_code.as_deref(), Some("adopt.fence_forward"));
     assert!(content.contains("응답 이어받기 실패"), "{content}");
 
@@ -98,7 +98,7 @@ async fn fence_forward_notice_is_enqueued_and_delivered_pg() {
     let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
     registry
         .set_utility_bot_http_for_tests(
-            crate::services::discord::bot_role::UtilityBotRole::Notify,
+            crate::domain::bot_role::UtilityBotRole::Notify,
             notify_http,
         )
         .await;

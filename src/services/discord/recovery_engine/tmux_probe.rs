@@ -33,7 +33,7 @@ pub(super) fn observe_liveness_with_retry(name: &str) -> SessionLiveness {
 
 fn liveness_with_retry(name: &str, row: Option<&InflightTurnState>) -> SessionLiveness {
     let mut liveness = observe_liveness(name, row);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     reader_trace::observed(name, liveness);
     for attempt in 1..=2u32 {
         if matches!(liveness, SessionLiveness::Alive | SessionLiveness::Unknown) {
@@ -41,7 +41,7 @@ fn liveness_with_retry(name: &str, row: Option<&InflightTurnState>) -> SessionLi
         }
         std::thread::sleep(recovery_retry_backoff(attempt));
         liveness = observe_liveness(name, row);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         reader_trace::observed(name, liveness);
         if liveness == SessionLiveness::Alive {
             tracing::info!(
@@ -383,7 +383,7 @@ fn after_death(reader: &RestoredReader, died_at: u64) -> Option<RestoredRead> {
 
 /// A result read past an unobserved pane is handed to a watcher only on a confirmed live pane.
 fn settle_result(reader: &RestoredReader, offset: u64) -> RestoredRead {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let _settling = reader_trace::Settling::enter();
     match restart_pane_local(&reader.provider, &reader.name, &reader.row) {
         RestartProbe::Alive => RestoredRead::HandOff(offset),
@@ -397,78 +397,16 @@ fn settle_result(reader: &RestoredReader, offset: u64) -> RestoredRead {
 
 /// What a restore reader did, for tests: each pane observation (and whether it settled a
 /// held result), each RuntimeReady it sent, and how it ended.
-#[cfg(test)]
-pub(super) mod reader_trace {
-    use super::SessionLiveness;
-    use std::sync::Mutex;
+#[cfg(any(test, feature = "test-support"))]
+#[path = "tmux_probe_reader_hook_tests.rs"]
+mod reader_hook_tests;
 
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub(in crate::services::discord) enum Event {
-        Observed {
-            settling: bool,
-            liveness: SessionLiveness,
-        },
-        RuntimeReady,
-        Ended(&'static str),
-    }
-
-    static EVENTS: Mutex<Vec<(String, Event)>> = Mutex::new(Vec::new());
-
-    std::thread_local! {
-        static SETTLING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    }
-
-    fn push(name: &str, event: Event) {
-        let mut events = EVENTS.lock().unwrap_or_else(|poison| poison.into_inner());
-        events.push((name.to_string(), event));
-    }
-
-    pub(super) fn observed(name: &str, liveness: SessionLiveness) {
-        let settling = SETTLING.with(std::cell::Cell::get);
-        push(name, Event::Observed { settling, liveness });
-    }
-
-    pub(in crate::services::discord) fn runtime_ready(name: &str) {
-        push(name, Event::RuntimeReady);
-    }
-
-    pub(in crate::services::discord) fn end_of(
-        read: &Result<super::RestoredRead, String>,
-    ) -> &'static str {
-        match read {
-            Ok(super::RestoredRead::HandOff(_)) => "handoff",
-            Ok(super::RestoredRead::Died) => "died",
-            Ok(super::RestoredRead::Ended) => "ended",
-            Err(_) => "error",
-        }
-    }
-
-    /// Recorded once the reader thread has sent everything it will send.
-    pub(in crate::services::discord) fn ended(name: &str, end: &'static str) {
-        push(name, Event::Ended(end));
-    }
-
-    pub(in crate::services::discord) fn events(name: &str) -> Vec<Event> {
-        let events = EVENTS.lock().unwrap_or_else(|poison| poison.into_inner());
-        let mine = events.iter().filter(|(owner, _)| owner == name);
-        mine.map(|(_, event)| event.clone()).collect()
-    }
-
-    /// Marks this thread's observations as settling a held result until dropped.
-    pub(super) struct Settling;
-
-    impl Settling {
-        pub(super) fn enter() -> Self {
-            SETTLING.with(|settling| settling.set(true));
-            Self
-        }
-    }
-
-    impl Drop for Settling {
-        fn drop(&mut self) {
-            SETTLING.with(|settling| settling.set(false));
-        }
-    }
+#[cfg(any(test, feature = "test-support"))]
+pub(in crate::services::discord) mod reader_trace {
+    pub(in crate::services::discord) use super::reader_hook_tests::{
+        Event, end_of, ended, events, runtime_ready,
+    };
+    pub(super) use super::reader_hook_tests::{Settling, observed};
 }
 
 #[cfg(all(test, unix))]

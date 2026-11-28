@@ -1,5 +1,17 @@
 //! A prior process's Herdr row through boot restore and the source tick, against the shared Herdr
 //! fixture, a Discord fake and a fresh database, each scenario in its own child process.
+
+use crate::db::dispatched_sessions::hosted_execution::{
+    self as hosted, HostedLookup, HostedLookupKey, HostedRecord,
+};
+use crate::services::discord::recovery_engine::{
+    interrupted_recovery_message_for_test as interrupted_recovery_message, restore_inflight_turns,
+};
+use crate::services::discord::{InflightRestartMode, SharedData, inflight};
+use crate::services::provider::ProviderKind;
+use poise::serenity_prelude::{self as serenity, ChannelId};
+use std::sync::{Arc, atomic::Ordering};
+
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -8,12 +20,14 @@ use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
+use crate::services::discord::recovery_engine::herdr_row_end::row_end_hook_tests::{
+    CURRENT, PRIOR, on, on_while, settled_tasks, wait,
+};
 use serde_json::{Value, json};
 
-use super::super::*;
-use super::{CURRENT, PRIOR, on};
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::discord::krx_session_host_test_host::herdr_termination_rig as herdr;
+use crate::services::discord::recovery_engine::herdr_row_end::*;
 use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock::{self, DiscordMockState};
 use crate::services::provider::cancel_token_claude_interrupt::HERDR_SETTLEMENT_OVERRIDE;
 use crate::services::tui_prompt_dedupe::binding_events::{CauseSource, Proposal, record_verified};
@@ -228,7 +242,7 @@ struct Run {
 }
 
 fn generation(value: u64) {
-    let path = super::super::super::runtime_store::generation_path().unwrap();
+    let path = crate::services::discord::runtime_store::generation_path().unwrap();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, value.to_string()).unwrap();
 }
@@ -317,7 +331,7 @@ impl Run {
         let (proxy, gateway, server) = discord_mock::start(mock.clone()).await;
         let ctx = discord_mock::serenity_context(proxy, gateway).await;
         let mut shared =
-            super::super::super::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+            crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
         Arc::get_mut(&mut shared)
             .expect("fresh shared")
             .restart
@@ -628,25 +642,6 @@ impl Run {
         self.pool.close().await;
         self.db.drop().await;
     }
-}
-
-pub(in crate::services::discord) async fn settled_tasks() {
-    let idle = wait(Duration::from_secs(30), || {
-        ENDING.lock().unwrap().is_empty()
-    })
-    .await;
-    assert!(idle, "the end task finished");
-}
-
-async fn wait(limit: Duration, mut done: impl FnMut() -> bool) -> bool {
-    let deadline = Instant::now() + limit;
-    while Instant::now() < deadline {
-        if done() {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    done()
 }
 
 /// The row ended: one notice of `text`, the row gone, the hold released and the next input taken

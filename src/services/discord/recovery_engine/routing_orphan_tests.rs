@@ -9,8 +9,9 @@ use crate::services::discord::host_teardown_gate::test_support::{
     Stored, busy_turn, channel_key, seed, shared_on, turn_kept,
 };
 use crate::services::discord::inflight;
+use crate::services::discord::outbound::restart_report_types::RestartReportContext;
 use crate::services::discord::recovery_engine::o_cut_recorder;
-use crate::services::discord::restart_report::{self, RestartReportContext};
+use crate::services::discord::restart_report;
 use crate::services::discord::settings::BotChannelRoutingGuardFailure;
 use crate::services::provider::ProviderKind;
 use crate::services::session_host::test_support::InjectedLivenessGuard;

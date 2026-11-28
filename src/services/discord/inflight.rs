@@ -175,6 +175,9 @@ pub(in crate::services::discord) use self::removal::{
     load_channel_inflight_for_probe, load_inflight_states_for_probe_from_root,
 };
 use self::removal::{load_inflight_probe_from_root_excluding, load_inflight_states_from_root};
+#[cfg(any(test, feature = "test-support"))]
+pub(in crate::services::discord) use self::save_store::save_inflight_state_in_root;
+
 pub(super) use self::removal::{log_inflight_remove, log_inflight_remove_for_path};
 #[cfg(test)]
 pub(in crate::services::discord) use self::restart_mark::short_pass_event_for_test;
@@ -229,7 +232,7 @@ mod clear_store;
 pub(crate) use clear_store::inject_archive_read_error;
 #[allow(unused_imports)]
 pub(in crate::services::discord) use clear_store::operator_disposition_remove_pinned;
-mod save_store;
+pub(in crate::services::discord) mod save_store;
 
 // Shared persist/validate primitives (moved to `store.rs`): re-imported at the
 // parent's original inflight-private visibility so sibling children resolve
@@ -245,7 +248,7 @@ use self::store::{
 // Save cluster re-exports (original visibility mirrored). The save child declares
 // these `pub(in crate::services::discord)` (the absolute spelling of the parent's
 // original `pub(super)`), so this `pub(super)` re-export does not widen the surface.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) use self::save_store::save_inflight_state;
 pub(super) use self::save_store::{
     CreateNewInflightError, save_inflight_delivery_rewind_if_matches_identity,
@@ -278,7 +281,7 @@ pub(in crate::services::discord) use self::save_store::{
 use self::save_store::{
     save_existing_inflight_rebind_adoption_if_matches_identity_in_root,
     save_existing_inflight_rebind_adoption_with_offset_rebase_if_matches_identity_in_root,
-    save_inflight_state_if_matches_identity_in_root, save_inflight_state_in_root,
+    save_inflight_state_if_matches_identity_in_root,
 };
 
 // Clear/Abandon cluster re-exports (original visibility mirrored).
@@ -311,6 +314,8 @@ pub(super) use self::clear_store::{
 // `normalize_response_sent_offset` is consumed by the `watcher_state` sibling in
 // production, so it stays re-imported here at the parent's original private seam.
 use self::clear_store::normalize_response_sent_offset;
+#[cfg(any(test, feature = "test-support"))]
+pub(in crate::services::discord) use self::clear_store::refresh_inflight_last_offset_if_matches_identity_in_root;
 // Explicit-root clear seams reached only by the parent's / siblings' test modules.
 #[cfg(test)]
 use self::clear_store::{
@@ -318,7 +323,6 @@ use self::clear_store::{
     clear_inflight_state_if_matches_identity_in_root,
     clear_inflight_state_if_matches_tmux_response_in_root,
     clear_rebind_origin_inflight_state_if_matches_identity_in_root,
-    refresh_inflight_last_offset_if_matches_identity_in_root,
     request_inflight_abandon_if_matches_in_root,
     request_inflight_abandon_if_matches_zero_owned_in_root, row_has_finalizable_placeholder,
 };
@@ -995,8 +999,15 @@ mod post_loop_identity_guard_tests;
 /// (`#[cfg(test)]`) rather than tying it to the removed SQLite-only harness.
 /// The heavier tests below require fixtures that still are not available in
 /// plain `cargo test --bin agentdesk` invocations.
+#[cfg(any(test, feature = "test-support"))]
+#[path = "inflight/synthetic_carry_forward_fixture_tests.rs"]
+pub(in crate::services::discord) mod synthetic_carry_forward_fixture_tests;
+
 #[cfg(test)]
 mod stall_recovery_tests {
+    use super::synthetic_carry_forward_fixture_tests::{
+        build_synth_3358, monotonic_3358_test_mutex,
+    };
     use super::{
         GuardedClearOutcome, GuardedSaveOutcome, INFLIGHT_STALENESS_THRESHOLD_SECS,
         InflightRestartMode, InflightTurnIdentity, InflightTurnState, RelayOwnerKind,
@@ -3456,42 +3467,6 @@ mod stall_recovery_tests {
     // birth offset is the relay-cursor base AND the `turn_start_offset` identity
     // key (`InflightTurnState::new`: turn_start_offset == last_offset, rso == 0).
     //
-    // The on-disk row carries the watcher's COMMITTED frontier as last_offset
-    // (the watcher is the single authority — #3017 `confirmed_end_offset`). When
-    // the synthetic re-claims/refreshes the row, it writes its BIRTH offset back:
-    //   * Pre-fix: birth == lagging `relay_last_offset()` (2821677) < committed
-    //     frontier (2838484). Same identity (the watcher row is still keyed by
-    //     this turn's anchor + this birth turn_start_offset) → BACKWARD write →
-    //     the `last_offset` + `response_sent_offset` monotonicity guards fire (the
-    //     incident's ERROR triple). This is the REPRODUCE witness.
-    //   * Post-fix: `synthetic_start_offset_carry_forward` births the synthetic at
-    //     the committed frontier (2838484) — equal to the on-disk last_offset, so
-    //     the re-claim is a forward/equal write and NO invariant fires.
-    fn build_synth_3358(birth: u64) -> InflightTurnState {
-        InflightTurnState::new(
-            ProviderKind::Claude,
-            321,
-            Some("adk-cc".to_string()),
-            1,
-            1_514_752_860_691_370_014, // synthetic user_msg_id (anchor id)
-            9002,
-            "new synthetic prompt".to_string(),
-            None,
-            Some("AgentDesk-claude-adk-cc".to_string()),
-            Some("/tmp/out.jsonl".to_string()),
-            None,
-            birth,
-        )
-    }
-
-    /// #3358: the two monotonicity tests catch panics via `catch_unwind` while
-    /// sharing the process-global panic hook with every parallel test thread —
-    /// serialize them so a sibling's hook traffic cannot interleave (rare
-    /// parallel-run flake observed on loaded machines).
-    fn monotonic_3358_test_mutex() -> &'static std::sync::Mutex<()> {
-        static M: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        M.get_or_init(|| std::sync::Mutex::new(()))
-    }
 
     #[test]
     fn synthetic_lagging_birth_reproduces_backward_regression_3358() {
@@ -3529,46 +3504,6 @@ mod stall_recovery_tests {
         assert!(
             lag.is_err() || cfg!(not(debug_assertions)),
             "lagging-birth re-claim must trip the monotonicity guard (incident + genuine-regression witness)"
-        );
-    }
-
-    #[test]
-    fn synthetic_carry_forward_skipped_on_generation_mismatch_3358() {
-        // #3358 round 2 — Finding 1 guard, at the production-helper level.
-        //
-        // After a tmux wrapper RESTART the output stream legitimately resets to
-        // offset 0. The committed watermark from the PREVIOUS generation is stale;
-        // the claim choke-point detects the generation mismatch and passes `None`
-        // for the committed frontier. The helper MUST then fall back to the
-        // synthetic's own (lagging) birth offset — NOT lift it over the stale
-        // watermark, which would treat future bytes below that watermark as
-        // already delivered (CONTENT SKIP, strictly worse than the original
-        // ERROR-only bug). On HEAD (helper took a bare `u64` and always clamped)
-        // there was no way to express "stale → do not clamp", so this guard
-        // failed.
-        let relay_last_offset: u64 = 100; // fresh post-restart birth (lagging).
-        let stale_frontier: u64 = 2_838_484; // pre-restart, NUMERICALLY higher.
-
-        // Generation mismatch → `None`: NO clamp, born at its own cursor.
-        let birth =
-            crate::services::discord::tui_prompt_relay::synthetic_start_offset_carry_forward(
-                relay_last_offset,
-                None,
-            );
-        assert_eq!(
-            birth, relay_last_offset,
-            "a stale (different-generation) watermark must NOT clamp the new synthetic forward"
-        );
-
-        // Same generation → `Some(..)`: clamp DOES carry the frontier forward.
-        let same_gen_birth =
-            crate::services::discord::tui_prompt_relay::synthetic_start_offset_carry_forward(
-                relay_last_offset,
-                Some(stale_frontier),
-            );
-        assert_eq!(
-            same_gen_birth, stale_frontier,
-            "a same-generation committed frontier must still carry forward (the #3358 fix)"
         );
     }
 
@@ -6347,4 +6282,22 @@ mod recovery_relay_attempts_tests {
             "alive tmux pane must preserve the row regardless of the relay counter; got {result:?}"
         );
     }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(in crate::services::discord) fn load_inflight_states_for_test(
+    root: &Path,
+    provider: &ProviderKind,
+) -> Vec<InflightTurnState> {
+    load_inflight_states_from_root(root, provider)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(in crate::services::discord) fn reap_abandoned_rebind_origin_for_test(
+    root: &Path,
+    provider: &ProviderKind,
+    row: &InflightTurnState,
+    generation: u64,
+) -> RebindReapOutcome {
+    reap_abandoned_rebind_origin_locked_in_root(root, provider, row, generation)
 }

@@ -292,7 +292,7 @@ mod tests {
         use crate::services::discord::outbound::raw_output::tests as fixture;
         if fixture::isolated(
             concat!(module_path!(), "::common_reference_posts_are_observed_once")
-                .trim_start_matches("agentdesk::"),
+                .trim_start_matches(concat!(env!("CARGO_CRATE_NAME"), "::")),
         ) {
             return;
         }

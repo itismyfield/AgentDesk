@@ -1478,6 +1478,10 @@ impl InflightTurnState {
 #[path = "runtime_stamp/claude_terminal_tests.rs"]
 mod claude_terminal_tests;
 
+#[cfg(all(unix, any(test, feature = "test-support")))]
+#[path = "runtime_stamp/claude_terminal_fixture_tests.rs"]
+pub(in crate::services::discord) mod claude_terminal_fixture_tests;
+
 #[path = "runtime_stamp/stamp_guard.rs"]
 mod stamp_guard;
 

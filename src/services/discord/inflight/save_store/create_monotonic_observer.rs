@@ -127,16 +127,19 @@ pub(super) fn observe_successful_real_create(state: &InflightTurnState) {
     slot.witness = candidate;
 }
 
-#[cfg(test)]
-pub(super) mod test_seams {
+#[cfg(any(test, feature = "test-support"))]
+pub(in crate::services::discord) mod test_seams {
     use super::*;
+    #[cfg(test)]
     use std::cell::RefCell;
 
+    #[cfg(test)]
     thread_local! {
         static SYNC_ERROR: RefCell<Option<std::io::ErrorKind>> = const { RefCell::new(None) };
         static IO_HOOK: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
     }
 
+    #[cfg(test)]
     pub(in crate::services::discord::inflight) fn sync_result(
         file: &fs::File,
     ) -> std::io::Result<()> {
@@ -146,10 +149,12 @@ pub(super) mod test_seams {
         file.sync_all()
     }
 
+    #[cfg(test)]
     pub(in crate::services::discord::inflight) fn fail_next_sync(kind: std::io::ErrorKind) {
         SYNC_ERROR.with(|slot| *slot.borrow_mut() = Some(kind));
     }
 
+    #[cfg(test)]
     pub(in crate::services::discord::inflight) fn before_io() {
         IO_HOOK.with(|slot| {
             let pending = { slot.borrow_mut().take() };
@@ -162,22 +167,27 @@ pub(super) mod test_seams {
         });
     }
 
+    #[cfg(test)]
     pub(super) fn set_io_hook(hook: impl FnMut() + 'static) {
         IO_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
     }
 
+    #[cfg(test)]
     pub(super) fn clear_io_hook() {
         IO_HOOK.with(|slot| slot.borrow_mut().take());
     }
 
-    pub(super) fn clear(provider: ProviderKind, channel: u64) {
+    pub(in crate::services::discord) fn clear(provider: ProviderKind, channel: u64) {
         WITNESSES
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .remove(&(provider, channel));
     }
 
-    pub(super) fn offset(provider: ProviderKind, channel: u64) -> Option<u64> {
+    pub(in crate::services::discord) fn offset(
+        provider: ProviderKind,
+        channel: u64,
+    ) -> Option<u64> {
         WITNESSES
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -186,6 +196,7 @@ pub(super) mod test_seams {
             .map(|witness| witness.start)
     }
 
+    #[cfg(test)]
     pub(super) fn clear_all() {
         WITNESSES
             .lock()
@@ -193,6 +204,7 @@ pub(super) mod test_seams {
             .clear();
     }
 
+    #[cfg(test)]
     pub(super) fn slot_count() -> usize {
         WITNESSES
             .lock()
@@ -201,35 +213,14 @@ pub(super) mod test_seams {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+#[path = "create_monotonic_fixture_tests.rs"]
+pub(in crate::services::discord) mod fixture;
+
 #[cfg(test)]
 mod tests {
+    use super::fixture::*;
     use super::*;
-    use std::io::Write;
-
-    static SERIAL: Mutex<()> = Mutex::new(());
-
-    fn state(channel: u64, path: &Path, start: u64) -> InflightTurnState {
-        InflightTurnState::new(
-            ProviderKind::Codex,
-            channel,
-            None,
-            7,
-            start + 10,
-            9,
-            "turn".into(),
-            None,
-            Some("AgentDesk-codex-observer-5490".into()),
-            Some(path.display().to_string()),
-            None,
-            start,
-        )
-    }
-
-    fn write_bytes(path: &Path, byte: u8, len: usize) {
-        let mut file = fs::File::create(path).unwrap();
-        file.write_all(&vec![byte; len]).unwrap();
-        file.sync_all().unwrap();
-    }
 
     #[test]
     fn same_path_lower_start_warns() {
@@ -281,89 +272,6 @@ mod tests {
             observe_successful_real_create(&state(54_900_002, &first, 128));
         });
         assert!(return_to_first.is_empty());
-    }
-
-    #[test]
-    fn create_paths_observe_real_but_exclude_all_synthetic_shapes() {
-        let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
-        let temp = tempfile::tempdir().unwrap();
-        let output = temp.path().join("turn.jsonl");
-        write_bytes(&output, b'a', 512);
-        let real = state(54_900_003, &output, 256);
-        test_seams::clear(ProviderKind::Codex, real.channel_id);
-        save_inflight_state_create_new_in_root(temp.path(), &real).unwrap();
-        assert_eq!(
-            test_seams::offset(ProviderKind::Codex, real.channel_id),
-            Some(256)
-        );
-
-        let adopted = crate::services::discord::recovery_engine::manual_rebind::build_external_adopted_inflight_state(
-            state(54_900_011, &output, 128),
-        );
-        assert!(is_synthetic_create_state(&adopted));
-        test_seams::clear(ProviderKind::Codex, adopted.channel_id);
-        save_inflight_state_create_new_in_root(temp.path(), &adopted).unwrap();
-        assert_eq!(
-            test_seams::offset(ProviderKind::Codex, adopted.channel_id),
-            None
-        );
-
-        let lease = crate::services::tui_prompt_dedupe::ExternalInputRelayLease::unassigned(Some(
-            54_900_006,
-        ));
-        let tui = crate::services::discord::tui_prompt_relay::synthetic_start::build_tui_direct_synthetic_inflight_state(
-            ProviderKind::Codex,
-            crate::services::discord::ChannelId::new(54_900_006),
-            crate::services::discord::MessageId::new(54_900_106),
-            None,
-            "observer prompt",
-            "AgentDesk-codex-observer-5490",
-            Some(&output),
-            128,
-            &lease,
-            RelayOwnerKind::Watcher,
-        );
-        assert!(is_synthetic_create_state(&tui));
-        test_seams::clear(ProviderKind::Codex, tui.channel_id);
-        assert!(save_inflight_state_if_absent_in_root(temp.path(), &tui).unwrap());
-        assert_eq!(
-            test_seams::offset(ProviderKind::Codex, tui.channel_id),
-            None
-        );
-
-        #[cfg(unix)]
-        {
-            let monitor = crate::services::discord::tmux::build_monitor_triggered_inflight_state(
-                state(54_900_004, &output, 128),
-            );
-            assert!(is_synthetic_create_state(&monitor));
-            test_seams::clear(ProviderKind::Codex, monitor.channel_id);
-            save_inflight_state_create_new_in_root(temp.path(), &monitor).unwrap();
-            assert_eq!(
-                test_seams::offset(ProviderKind::Codex, monitor.channel_id),
-                None
-            );
-
-            let watcher = crate::services::discord::tmux::tmux_watcher::liveness::build_watcher_reacquire_inflight_state(
-                state(54_900_005, &output, 128),
-            );
-            assert!(is_synthetic_create_state(&watcher));
-            test_seams::clear(ProviderKind::Codex, watcher.channel_id);
-            assert!(save_inflight_state_if_absent_in_root(temp.path(), &watcher).unwrap());
-            assert_eq!(
-                test_seams::offset(ProviderKind::Codex, watcher.channel_id),
-                None
-            );
-        }
-
-        let real_if_absent = state(54_900_007, &output, 192);
-        assert!(!is_synthetic_create_state(&real));
-        assert!(!is_synthetic_create_state(&real_if_absent));
-        assert!(save_inflight_state_if_absent_in_root(temp.path(), &real_if_absent).unwrap());
-        assert_eq!(
-            test_seams::offset(ProviderKind::Codex, real_if_absent.channel_id),
-            Some(192)
-        );
     }
 
     #[test]

@@ -38,9 +38,7 @@ use crate::services::provider::ProviderKind;
 
 mod abandon_guard;
 mod panel_shape;
-#[cfg(test)]
-mod retirement_tests;
-mod tick;
+pub(in crate::services::discord) mod tick;
 use abandon_guard::{
     AbandonedTmuxCleanupDecision, abandoned_tmux_cleanup_decision_for,
     finalize_owner_dead_cleanup_if_same_turn,
@@ -322,7 +320,7 @@ pub(in crate::services::discord) fn is_message_still_placeholder(content: &str) 
 /// Run a single sweep pass for the given provider. Public for testability —
 /// callers in the bootstrap path schedule this on a fixed cadence via
 /// `spawn_placeholder_sweeper`.
-async fn run_placeholder_sweep_pass(
+pub(in crate::services::discord) async fn run_placeholder_sweep_pass(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -666,7 +664,7 @@ impl StalledEditKey {
 }
 
 #[derive(Debug, Default)]
-struct StalledEditTracker {
+pub(in crate::services::discord) struct StalledEditTracker {
     edited: HashSet<StalledEditKey>,
     pending: HashSet<StalledEditKey>,
 }

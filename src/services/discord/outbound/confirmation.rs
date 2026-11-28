@@ -101,7 +101,3 @@ pub(in crate::services::discord) async fn send_terminal_notice_http_once(
         .map(|message| message.id)
         .map_err(|error| error.to_string())
 }
-
-#[cfg(test)]
-#[path = "confirmation/terminal_notice_tests.rs"]
-mod terminal_notice_tests;
