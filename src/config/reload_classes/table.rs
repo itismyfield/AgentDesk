@@ -171,7 +171,7 @@ pub const FIELDS: &[FieldReload] = &[
     row("memory.backend", Live, "`src/runtime_layout/mod.rs` load_memory_backend (validated snapshot for the runtime root; disk only before publication or for another root) via services/discord/settings/memory.rs:configured_memory_backend_name"),
     row("memory.file.sak_path", Live, "`src/runtime_layout/mod.rs` load_memory_backend (validated snapshot for the runtime root; disk only before publication or for another root) via runtime_layout/mod.rs:shared_agent_knowledge_path"),
     row("memory.file.sam_path", Live, "`src/runtime_layout/mod.rs` memory_backend_from_config (no daemon reader)"),
-    row("memory.file.ltm_root", Live, "`src/runtime_layout/mod.rs` load_memory_backend (validated snapshot for the runtime root; disk only before publication or for another root) via runtime_layout/mod.rs:long_term_memory_root"),
+    row("memory.file.ltm_root", Live, "`src/runtime_layout/mod.rs` ensure_layout_dirs (load_memory_backend reads the validated snapshot for the runtime root; disk only before publication or for another root)"),
     row("memory.file.auto_memory_root", Live, "`src/runtime_layout/mod.rs` memory_backend_from_config (no daemon reader)"),
     row("memory.mcp.endpoint", Live, "`src/runtime_layout/mod.rs` load_memory_backend (validated snapshot for the runtime root; disk only before publication or for another root) via services/memory/memento.rs:runtime_config"),
     row("memory.mcp.access_key_env", Live, "`src/runtime_layout/mod.rs` load_memory_backend (validated snapshot for the runtime root; disk only before publication or for another root) via services/memory/memento.rs:runtime_config"),

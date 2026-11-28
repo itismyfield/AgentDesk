@@ -1995,11 +1995,7 @@ test or turning it `#[ignore]` needs an exact ID and kind row in
 - canonical_modules: `src/cli/*.rs`.
 - legacy_modules: none.
 - do_not_edit_without_migration_plan (giant-file):
-  - `src/cli/migrate.rs` is the retired postgres-cutover facade (now below the
-    giant-file threshold; bugfix only).
   - `src/cli/doctor/orchestrator.rs` (giant review surface).
-  - `src/cli/migrate/apply.rs` (giant review surface; +1 from #3690 AgentDef preferred_intake_node_labels literal; +6 from #3697 OpenClaw --write-db non-leader roster-sync gate).
-  - `src/cli/migrate/{plan.rs (1513), source.rs (1612)}`.
   - `src/cli/{init.rs (1448), client.rs (2955), direct.rs (1781),
     dcserver.rs (1560)}`.
   - `src/cli/provider_cli/mod.rs` (giant review surface).
@@ -2449,9 +2445,6 @@ Measured giant paths (planning metadata remains manual):
 - `src/cli/direct.rs`
 - `src/cli/doctor/orchestrator.rs`
 - `src/cli/init.rs`
-- `src/cli/migrate/apply.rs`
-- `src/cli/migrate/plan.rs`
-- `src/cli/migrate/source.rs`
 - `src/cli/provider_cli/mod.rs`
 - `src/config.rs`
 - `src/db/auto_queue/entries.rs`

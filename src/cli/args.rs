@@ -2,8 +2,6 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-pub(crate) use super::migrate::MigrateAction;
-
 mod command_args;
 pub(crate) use command_args::*;
 
@@ -156,11 +154,6 @@ pub(crate) enum Commands {
     Terminations(TerminationsArgs),
     /// Environment diagnostics
     Doctor(DoctorArgs),
-    /// Migration helpers
-    Migrate {
-        #[command(subcommand)]
-        action: MigrateAction,
-    },
     /// Apply pending PostgreSQL migrations before release activation
     #[command(hide = true)]
     ReleaseMigratePostgres,
@@ -769,7 +762,6 @@ mod tests {
             "api",
             "terminations",
             "doctor",
-            "migrate",
             "release-migrate-postgres",
             "provider-cli",
             "show",
@@ -782,6 +774,14 @@ mod tests {
         ];
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn removed_migrate_subcommand_is_rejected() {
+        let Err(error) = Cli::try_parse_from(["agentdesk", "migrate", "openclaw"]) else {
+            panic!("migrate must be rejected as an unknown subcommand");
+        };
+        assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
     }
 
     #[test]
