@@ -381,8 +381,8 @@ S14d부터 DB 함수는 완료 직전 지점에서 멈추고(`PreparedCompletion
 |`src/services/discord/terminal_delivery_custody/pg_tests.rs:30`|i7353-d1314-calls.txt|`foreign_terminal_custody_pg_failure_restart_and_exact_dedupe`|fixture가 pool API에 위임; fixture 자체 관측 없음|
 |`src/services/discord/terminal_delivery_custody/pg_tests.rs:32`|dto.git-grep.txt|`foreign_terminal_custody_pg_failure_restart_and_exact_dedupe`|fixture가 pool API에 위임; fixture 자체 관측 없음|
 |`src/services/discord/tmux_watcher/discrete_trigger_marker.rs:214`|i7353-d1314-calls.txt|`background_marker_provider_outbox_survives_restart_replay_pg`|fixture가 pool API에 위임; fixture 자체 관측 없음|
-|`src/services/discord/tmux_watcher/o_evidence_tests.rs:1798`|i7353-d1314-calls.txt|`headless_restart_frame`|fixture가 pool API에 위임; fixture 자체 관측 없음|
-|`src/services/discord/tmux_watcher/o_evidence_tests.rs:1800`|dto.git-grep.txt|`headless_restart_frame`|fixture가 pool API에 위임; fixture 자체 관측 없음|
+|`src/services/discord/tmux_watcher/o_evidence_tests.rs:1465`|i7353-d1314-calls.txt|`headless_restart_frame`|fixture가 pool API에 위임; fixture 자체 관측 없음|
+|`src/services/discord/tmux_watcher/o_evidence_tests.rs:1467`|dto.git-grep.txt|`headless_restart_frame`|fixture가 pool API에 위임; fixture 자체 관측 없음|
 |`src/services/discord/turn_bridge/headless_delivery/durable_outbox.rs:262`|dto.git-grep.txt|`output_origin_delayed_producer_consumer_restore_and_old_format_pg`|fixture가 pool API에 위임; fixture 자체 관측 없음|
 |`src/services/discord/turn_bridge/headless_delivery/durable_outbox.rs:385`|dto.git-grep.txt|`output_origin_delayed_producer_consumer_restore_and_old_format_pg`|fixture가 pool API에 위임; fixture 자체 관측 없음|
 |`src/services/discord/turn_bridge/headless_delivery/observation_tests.rs:27`|i7353-d1314-calls.txt|`enqueue`|fixture가 pool API에 위임; fixture 자체 관측 없음|

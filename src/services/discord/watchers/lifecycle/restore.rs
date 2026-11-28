@@ -5,10 +5,6 @@ use crate::services::discord::tmux_lifecycle::DispatchTmuxProtection;
 use crate::services::session_host::HostLiveness;
 use crate::services::tmux_common::current_tmux_owner_marker;
 
-#[cfg(all(test, unix))]
-#[path = "n3bc_restore_tests.rs"]
-mod n3bc_restore_tests;
-
 #[path = "restore_core.rs"]
 mod restore_core;
 
@@ -666,8 +662,8 @@ async fn restore_selected_tmux_watchers(
         );
 
         shared.record_tmux_watcher_reconnect(pw.channel_id);
-        #[cfg(all(test, unix))]
-        crate::services::discord::tmux::watcher_install_fixture::record_reader_start(
+        #[cfg(all(unix, any(test, feature = "test-support")))]
+        super::restore_hook_test_support::record_reader_start(
             pw.channel_id.get(),
             pw.initial_offset,
         );
@@ -905,6 +901,7 @@ mod keyed_teardown_tests {
     use std::sync::Mutex;
 
     use super::*;
+
     use crate::db::dispatched_sessions::hosted_execution::HostedState;
     use crate::db::dispatched_sessions::hosted_execution::test_support::{
         TOKEN, owner, record, wire,

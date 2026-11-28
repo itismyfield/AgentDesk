@@ -935,5 +935,5 @@ impl Effects for LiveEffects {
 }
 
 #[cfg(test)]
-#[path = "supervisor_fixture_tests.rs"]
+#[path = "supervisor_fixture_test_support.rs"]
 pub(in crate::services::discord) mod tests;

@@ -1,8 +1,14 @@
-use super::*;
 use crate::config::TestRuntimeRootGuard;
+use crate::services::discord::SharedData;
+use crate::services::discord::queue_io::input_owner::admission::{Admission, AdmissionTicket};
+use crate::services::discord::queue_io::input_owner::ingress::*;
 use crate::services::discord::runtime_store::durable_probe::{Plan, Step, Watch};
 use crate::services::discord::{IntakeRequest, TurnKind, make_shared_data_for_tests};
+use crate::services::provider::ProviderKind;
+use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem};
+use poise::serenity_prelude::ChannelId;
 use poise::serenity_prelude::{MessageId, UserId};
+use serde_json::json;
 
 /// A booted process has a settled queue generation; a fresh test root has none.
 fn seed_generation() {
@@ -262,9 +268,24 @@ async fn a_local_tui_channel_is_adopted_once_and_a_non_tui_one_never() {
     let shared = make_shared_data_for_tests();
     let (claude, codex) = (ChannelId::new(7_272_563), ChannelId::new(7_272_564));
     let adopted = ADOPTS.scope(true, async {
-        let first = super::adopt(&shared, &ProviderKind::Claude, claude).await;
-        let again = super::adopt(&shared, &ProviderKind::Claude, claude).await;
-        let other = super::adopt(&shared, &ProviderKind::Codex, codex).await;
+        let first = crate::services::discord::queue_io::input_owner::ingress::adopt(
+            &shared,
+            &ProviderKind::Claude,
+            claude,
+        )
+        .await;
+        let again = crate::services::discord::queue_io::input_owner::ingress::adopt(
+            &shared,
+            &ProviderKind::Claude,
+            claude,
+        )
+        .await;
+        let other = crate::services::discord::queue_io::input_owner::ingress::adopt(
+            &shared,
+            &ProviderKind::Codex,
+            codex,
+        )
+        .await;
         (first, again, other)
     });
     assert_eq!(adopted.await, (Ok(true), Ok(true), Ok(false)));

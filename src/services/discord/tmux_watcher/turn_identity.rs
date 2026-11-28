@@ -173,9 +173,9 @@ mod soft_terminal_authority;
 
 // #5175: the soft-terminal authority contract lives in its own module; keep it
 // reachable under the historical `turn_identity::` path the watcher globs in.
+pub(in crate::services::discord) use soft_terminal_authority::watcher_soft_terminal_has_turn_authority;
 pub(super) use soft_terminal_authority::{
     SoftTerminalAuthorityDenial, WatcherSoftTerminalAuthority,
-    watcher_soft_terminal_has_turn_authority,
 };
 
 pub(super) fn matching_watcher_turn_nonce(
@@ -493,7 +493,7 @@ pub(super) fn should_submit_restored_watcher_finalize(
 /// turn or an OLDER turn (`turn_start_offset < current_offset`), or there is no
 /// inflight, or it is `rebind_origin`/`user_msg_id == 0`, this returns FALSE and
 /// all existing behavior is preserved.
-pub(super) fn committed_completion_is_stale_for_newer_turn(
+pub(in crate::services::discord) fn committed_completion_is_stale_for_newer_turn(
     inflight_before_relay: Option<&crate::services::discord::inflight::InflightTurnState>,
     inflight_state: Option<&crate::services::discord::inflight::InflightTurnState>,
     tmux_session_name: &str,
@@ -540,7 +540,7 @@ pub(super) fn committed_completion_is_stale_for_newer_turn(
 /// Narrow by construction: for a normal anchor completion (the inflight is THIS
 /// or an OLDER turn with `start < current_offset`, absent, or on a different
 /// session) this returns FALSE → the anchor cleanup runs as today.
-pub(super) fn committed_anchor_cleanup_is_stale_for_newer_turn(
+pub(in crate::services::discord) fn committed_anchor_cleanup_is_stale_for_newer_turn(
     inflight_before_relay: Option<&crate::services::discord::inflight::InflightTurnState>,
     inflight_state: Option<&crate::services::discord::inflight::InflightTurnState>,
     tmux_session_name: &str,

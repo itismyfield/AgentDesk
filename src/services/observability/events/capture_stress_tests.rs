@@ -1,4 +1,4 @@
-use crate::ke_assembly_tests::policy_observability_root_tests::{
+use crate::launch::ke_turn_tests::turn_lifecycle_queue_truth::policy_observability::{
     assert_noop_cancel_event,
     cancel_observability_emits_unknown_noop_direct_fallback_scenario as noop_cancel,
 };

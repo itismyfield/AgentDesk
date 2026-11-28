@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 #[path = "host_gate.rs"]
-pub(super) mod host_gate;
+pub(in crate::services::discord) mod host_gate;
 
 /// #4229 S5: post-stream-exit finalize tail of `tmux_output_watcher_with_restore`
 /// (DashMap slot removal, dispatch-protection resolve + dead-session dispatch fail,
@@ -487,7 +487,3 @@ mod tests {
         assert!(!registry.contains_key(&channel));
     }
 }
-
-#[cfg(all(test, unix))]
-#[path = "codex_replacement_tests.rs"]
-mod codex_replacement_tests;

@@ -2,7 +2,7 @@
 //! the deadline that pass arms is the wake that hands the front on.
 use super::*;
 use crate::services::turn_orchestrator::RetryWaitCause;
-use crate::test_support::wait::{WAIT_CAP, await_within};
+use adk_test_support::test_support::wait::{WAIT_CAP, await_within};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_restored_retry_wait_grants_nothing_until_its_armed_due_wakes_the_drive() {

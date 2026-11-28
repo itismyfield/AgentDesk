@@ -550,10 +550,10 @@ main `984d802d9f`에서 아래 4개 시험 파일이 삭제됐다. 이 파일의
 | `src/services/discord/queue_dispatch/kickoff.rs` (기준 402행) | `kickoff_idle_queues_with_deps` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/queue_dispatch/kickoff.rs` (기준 423행) | `kickoff_idle_queues_with_deps` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/queue_dispatch/kickoff.rs` (기준 435행) | `kickoff_idle_queues_with_deps` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/queue_io.rs:319` | `schedule_race_loss_requeue_post_enqueue_idle_recheck` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/queue_io.rs:379` | `schedule_writer_ready_queue_kick` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/queue_io.rs:506` | `kick_queue_channel_if_context_available` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/queue_io.rs:508` | `kick_queue_channel_if_context_available` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/queue_io.rs` (예약된 재확인) | `schedule_race_loss_requeue_post_enqueue_idle_recheck` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/queue_io.rs` (writer 준비 시점) | `schedule_writer_ready_queue_kick` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/queue_io.rs` (kickoff 기록) | `kick_queue_channel_if_context_available` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/queue_io.rs` (kickoff 의존성 준비) | `kick_queue_channel_if_context_available` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/queue_io/auto_queue_eligibility.rs:37` | `held` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/queue_io/auto_queue_eligibility.rs:38` | `held` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/queue_io/auto_queue_eligibility.rs:102` | `run_queued_lane` | Kick(wake/event/queue admission, 같은 head 재검증) |

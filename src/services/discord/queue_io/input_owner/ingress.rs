@@ -1,5 +1,5 @@
 //! Raw custody at the existing ingress seams; an installed actor owns admission, never a callback.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use super::admission::Admission;
 use super::admission::AdmissionTicket;
 use crate::services::cluster::intake_turn::IntakeExecution;
@@ -11,26 +11,17 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 tokio::task_local! { static EXISTING_RETRY: bool; static NOTICE_CLAIMED: bool; }
-// A test adopts only inside this scope; any other test keeps the channel unadopted.
-#[cfg(test)]
-tokio::task_local! { pub(crate) static ADOPTS: bool; }
-#[cfg(test)]
-tokio::task_local! {
-    pub(crate) static BEFORE_RESUME: std::cell::RefCell<Option<(
-        tokio::sync::oneshot::Sender<()>,
-        tokio::sync::oneshot::Receiver<()>,
-    )>>;
-    pub(crate) static BEFORE_INGRESS_HOLD: std::cell::RefCell<Option<(
-        tokio::sync::oneshot::Sender<()>,
-        tokio::sync::oneshot::Receiver<()>,
-    )>>;
-}
+#[cfg(any(test, feature = "test-support"))]
+#[path = "ingress_hook_test_support.rs"]
+mod ingress_hook_tests;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use ingress_hook_tests::{ADOPTS, BEFORE_INGRESS_HOLD, BEFORE_RESUME};
 
 /// Whether a local TUI channel's seams adopt its queue: always in production.
 fn adopts() -> bool {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     return ADOPTS.try_with(|adopts| *adopts).unwrap_or(false);
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     true
 }
 
@@ -300,7 +291,7 @@ impl Original {
         Self { item, ticket }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn admit(&self, handle: &ChannelMailboxHandle) -> Admission {
         super::admission::admit(handle, &self.item, self.ticket.clone()).await
     }
@@ -312,7 +303,7 @@ impl Original {
         let before = super::admission::status(handle, &self.ticket).await;
         let first = before.is_ok_and(|state| state != AdmissionState::Committed);
         let ticket = self.ticket.as_str().to_string();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Ok(Some((entered, release))) =
             BEFORE_RESUME.try_with(|pause| pause.borrow_mut().take())
         {
@@ -450,7 +441,7 @@ async fn admit_raw(
     };
     let (intake, first) = original.admit_first(&handle).await;
     if first && let Some(hold) = ingress_hold(shared, uploads_pending) {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Ok(Some((entered, release))) =
             BEFORE_INGRESS_HOLD.try_with(|pause| pause.borrow_mut().take())
         {
@@ -561,7 +552,3 @@ pub(crate) async fn enqueue(
         persistence_error,
     })
 }
-
-#[cfg(all(test, unix))]
-#[path = "ingress_tests.rs"]
-mod tests;

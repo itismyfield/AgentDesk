@@ -97,13 +97,13 @@ pub(in crate::services::discord) struct Pending {
     session: String,
     path: String,
     cancel: Arc<AtomicBool>,
-    pub(super) source: Arc<std::fs::File>,
-    pub(super) authority: WatcherSourceAuthority,
-    pub(super) offset: u64,
-    pub(super) buffer: String,
-    pub(super) buffer_start: u64,
-    pub(super) utf8: Utf8ChunkDecoder,
-    pub(super) turn: Option<CollectedTurnStream>,
+    pub(in crate::services::discord) source: Arc<std::fs::File>,
+    pub(in crate::services::discord) authority: WatcherSourceAuthority,
+    pub(in crate::services::discord) offset: u64,
+    pub(in crate::services::discord) buffer: String,
+    pub(in crate::services::discord) buffer_start: u64,
+    pub(in crate::services::discord) utf8: Utf8ChunkDecoder,
+    pub(in crate::services::discord) turn: Option<CollectedTurnStream>,
     pub(super) identity: Option<InflightTurnIdentity>,
     pub(super) nonce: Option<String>,
     pub(super) restored: Option<RestoredWatcherTurn>,
@@ -211,7 +211,7 @@ impl Pending {
 /// its checkpoint. A successor cannot race ahead of a still-running predecessor.
 /// Waiting is bounded: a wedged reader leaves custody intact and the caller exits
 /// for the existing recovery machinery, rather than guessing that it joined.
-pub(super) struct Custody {
+pub(in crate::services::discord) struct Custody {
     store: Store,
     pending: OwnedMutexGuard<Vec<Pending>>,
     checkpoint: Option<Pending>,
@@ -222,7 +222,7 @@ pub(super) struct Custody {
 }
 
 impl Custody {
-    pub(super) async fn acquire(
+    pub(in crate::services::discord) async fn acquire(
         shared: &SharedData,
         channel: ChannelId,
         provider: &ProviderKind,
@@ -258,7 +258,7 @@ impl Custody {
         })
     }
 
-    pub(super) fn take_for_current(
+    pub(in crate::services::discord) fn take_for_current(
         &mut self,
         shared: &SharedData,
         channel: ChannelId,
@@ -333,7 +333,7 @@ impl Custody {
         Some(pending)
     }
 
-    pub(super) fn checkpoint(
+    pub(in crate::services::discord) fn checkpoint(
         &mut self,
         parser: &TurnParseState<'_>,
         relay: &SupervisorRelayState<'_>,
@@ -424,10 +424,10 @@ impl Drop for Custody {
 
 #[cfg(test)]
 #[path = "cancel_handoff/interrupted_adoption_tests.rs"]
-pub(super) mod interrupted_adoption_tests;
+pub(in crate::services::discord) mod interrupted_adoption_tests;
 
 #[path = "cancel_handoff/completion.rs"]
-pub(super) mod completion;
+pub(in crate::services::discord) mod completion;
 
 /// A retained original episode still owes preview/actor settlement after the
 /// sink commits. Do not let the rowless watermark shortcut bypass that epilogue.
@@ -456,7 +456,7 @@ pub(super) fn has_recorded_completion(
 /// Cancellation moves custody; it does not discard output this collector already
 /// parsed. The post-collect cancel exit belongs to the no-result path only, so a
 /// turn whose terminal was parsed before the cancel still reaches delivery.
-pub(super) fn cancel_yields_before_delivery(
+pub(in crate::services::discord) fn cancel_yields_before_delivery(
     cancel: &AtomicBool,
     turn: Option<&CollectedTurnStream>,
 ) -> bool {
@@ -479,7 +479,7 @@ pub(in crate::services::discord) mod capsule_observation {
         pub has_startup_snapshot: bool,
         pub startup_snapshot: Option<serde_json::Value>,
         pub restored_response_seed: String,
-        pub(in crate::services::discord::tmux::tmux_watcher) authority: WatcherSourceAuthority,
+        pub(in crate::services::discord) authority: WatcherSourceAuthority,
         pub opened_source: crate::services::cluster::stream_relay::SourceFileIdentity,
         pub cancel_address: usize,
         pub has_restored_seed: bool,

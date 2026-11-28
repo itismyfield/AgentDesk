@@ -4,7 +4,7 @@ use crate::db::dispatched_sessions::hosted_execution::{
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::commands::control::codex_clear_relaunch_tests::settled_owner_observation;
 use crate::services::discord::turn_presence::activity::unbound::live::fixture_tests::Rig;
-use crate::services::discord::turn_presence::activity::unbound::live::live_snapshot_hook_tests::{
+use crate::services::discord::turn_presence::activity::unbound::live::live_snapshot_hook_test_support::{
     PAUSES, Pause, PauseGuard,
 };
 use crate::services::discord::turn_presence::activity::unbound::live::{
@@ -339,7 +339,7 @@ async fn s1e_marker_change_during_second_snapshot_db_await_pg() {
     let count = ChannelProbeTrace::new(rig.channel.get());
     use futures::FutureExt as _;
     assert!(
-        crate::services::discord::turn_presence::activity::unbound::live::live_snapshot_hook_tests::after_files(rig.channel.get())
+        crate::services::discord::turn_presence::activity::unbound::live::live_snapshot_hook_test_support::after_files(rig.channel.get())
             .now_or_never()
             .is_some(),
         "no snapshot pause is installed"

@@ -1,0 +1,9 @@
+resolver | src/services/discord/dl_turn_finalizer_test_host.rs
+resolver | src/services/discord/dl_turn_finalizer_unix_test_host.rs
+resolver | src/services/discord/queue_io/backstop_hook_test_support.rs
+resolver | src/services/discord/queue_io/idle_queue_kick_hook_test_support.rs
+resolver | src/services/discord/queue_io/input_owner/claude_handoff_hook_test_support.rs
+resolver | src/services/discord/queue_io/input_owner/ingress_hook_test_support.rs
+resolver | src/services/discord/queue_io/queued_head_inject_hook_test_support.rs
+resolver | src/services/discord/turn_finalizer/native_completion_hook_test_support.rs
+resolver | src/services/discord/turn_finalizer/native_read_hook_test_support.rs

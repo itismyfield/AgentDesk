@@ -1,6 +1,6 @@
 use super::*;
 use crate::services::tui_input::human_frame::history::v2::native_support::Fixture;
-use crate::test_support::wait::{WAIT_CAP, await_within};
+use adk_test_support::test_support::wait::{WAIT_CAP, await_within};
 
 #[tokio::test]
 async fn native_8148_p2_gc_keeps_boot_debt_after_an_unconfirmed_terminal_phase() {

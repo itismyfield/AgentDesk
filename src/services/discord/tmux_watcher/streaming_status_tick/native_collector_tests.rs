@@ -1,34 +1,22 @@
 //! Native collector -> sink -> receipt -> preview test: synthetic JSONL and local HTTP only.
-use super::*;
+use crate::services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::{TRAILING_BODY, capture_warns, isolate_root, recorder_for_cycle, seed_recovered_row};
+use crate::services::discord::inflight::{InflightTurnIdentity, load_inflight_state, save_inflight_state};
+use crate::services::discord::tmux::tmux_watcher::turn_stream_collector::*;
+use crate::services::discord::tmux::{HostSnapshot, WatchHost};
+use poise::serenity_prelude as serenity;
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+use std::time::Duration;
+use crate::services::discord::tmux::tmux_watcher::utf8_chunk_decoder::Utf8ChunkDecoder;
+use crate::services::discord::tmux::tmux_watcher::loop_poll_prologue::WatcherSourceAuthority;
+use crate::services::discord::tmux::tmux_watcher::{cancel_handoff, terminal_send};
+use crate::services::discord::tmux::tmux_watcher::pre_emit_guard::*;
+use crate::services::discord::tmux::tmux_watcher::terminal_relay_plan::*;
+use crate::services::discord::tmux::tmux_watcher::turn_identity::watcher_soft_terminal_has_turn_authority;
 use crate::services::cluster::relay_producer_registry::RelayProducerRegistry;
 use crate::services::cluster::session_matcher::MatchedChannel;
 use crate::services::cluster::stream_relay::{SourceFileIdentity, spawn_stream_relay};
 use crate::services::discord::delivery_lease_cell::source_epoch_observer as observer;
 use std::sync::atomic::{AtomicI64, AtomicU64};
-
-pub(super) fn seed_recovered_row(
-    root: &std::path::Path,
-    case: u64,
-) -> (Fixture, InflightTurnState) {
-    let mut fx = seed_row(root, case, false, false);
-    let mut row = load_inflight_state(&fx.provider, fx.channel.get()).unwrap();
-    std::fs::remove_file(fx.path()).unwrap();
-    fx.provider = ProviderKind::Codex;
-    row.provider = fx.provider.as_str().to_owned();
-    fx.tmux = format!("native-5927-{}", uuid::Uuid::new_v4().simple());
-    row.tmux_session_name = Some(fx.tmux.clone());
-    row.current_msg_id = 0;
-    row.current_msg_len = 3;
-    row.turn_source = crate::services::discord::inflight::TurnSource::ExternalInput;
-    row.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui);
-    row.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::SessionBoundRelay);
-    row.set_restart_mode(crate::services::discord::InflightRestartMode::DrainRestart);
-    row.turn_nonce = Some("recovered-original-5833".into());
-    row.injected_prompt_message_id = Some(row.user_msg_id);
-    save_inflight_state(&row).unwrap();
-    fx.identity = InflightTurnIdentity::from_state(&row);
-    (fx, row)
-}
 
 #[test]
 fn recovered_native_preview_terminal_has_one_visible_copy() {
@@ -783,104 +771,5 @@ fn native_collector_case(test_name: &str, mode: u8) {
         handle.shutdown().await;
         crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&fx.tmux);
         std::fs::remove_file(marker).unwrap();
-    });
-}
-
-/// The inflight-gate debug event below the mailbox gate witnesses that a call
-/// got past it: idle mailboxes must reach it, busy/unreachable ones must not.
-#[test]
-fn watcher_direct_idle_commit_passes_mailbox_gate_only_when_idle() {
-    use crate::services::provider::CancelToken;
-    use poise::serenity_prelude::{MessageId, UserId};
-    use tracing_subscriber::layer::SubscriberExt;
-    struct Liveness(std::sync::Arc<std::sync::Mutex<usize>>);
-    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Liveness {
-        fn on_event(
-            &self,
-            event: &tracing::Event<'_>,
-            _: tracing_subscriber::layer::Context<'_, S>,
-        ) {
-            if event
-                .metadata()
-                .target()
-                .ends_with("tmux_watcher::liveness")
-            {
-                *self.0.lock().unwrap() += 1;
-            }
-        }
-    }
-
-    let _lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let _root_env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
-        "AGENTDESK_ROOT_DIR",
-        tmp.path(),
-    );
-    let provider = crate::services::provider::ProviderKind::Claude;
-    let (idle, busy, dead) = (
-        poise::serenity_prelude::ChannelId::new(6_046_101),
-        poise::serenity_prelude::ChannelId::new(6_046_102),
-        poise::serenity_prelude::ChannelId::new(6_046_103),
-    );
-    for channel in [idle, busy, dead] {
-        let state = crate::services::discord::inflight::InflightTurnState::new(
-            provider.clone(),
-            channel.get(),
-            Some("adk-cc".to_string()),
-            7,
-            1001,
-            1002,
-            "prompt".to_string(),
-            None,
-            Some("s".to_string()),
-            None,
-            None,
-            0,
-        );
-        crate::services::discord::inflight::save_inflight_state(&state).expect("save inflight");
-    }
-
-    let events = std::sync::Arc::new(std::sync::Mutex::new(0usize));
-    let subscriber = tracing_subscriber::registry().with(Liveness(std::sync::Arc::clone(&events)));
-    crate::logging::test_capture::pin_callsite_interest();
-    let _guard = tracing::subscriber::set_default(subscriber);
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("current-thread runtime");
-    runtime.block_on(async {
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        assert!(
-            shared
-                .mailbox(busy)
-                .try_start_turn(
-                    std::sync::Arc::new(CancelToken::new()),
-                    UserId::new(7),
-                    MessageId::new(77)
-                )
-                .await
-        );
-        shared.mailboxes.insert_unreachable_for_test(dead);
-        let commit = |channel| {
-            crate::services::discord::tmux::tmux_watcher::liveness::commit_watcher_direct_terminal_session_idle(
-                &shared, &provider, channel, "s", None, 0, 0,
-            )
-        };
-
-        assert!(!commit(idle).await);
-        assert_eq!(
-            *events.lock().unwrap(),
-            1,
-            "idle must reach the inflight gate"
-        );
-        assert!(!commit(busy).await);
-        assert!(!commit(dead).await);
-        assert_eq!(
-            *events.lock().unwrap(),
-            1,
-            "busy/unreachable must stop at the mailbox gate"
-        );
     });
 }

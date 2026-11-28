@@ -190,16 +190,15 @@ async fn delivered_partial_eof_cannot_finish_or_clear_successor_during_transport
 
 #[tokio::test(flavor = "current_thread")]
 async fn captured_live_partial_eof_preserves_failures_then_commits_and_clears_current_generation() {
-    let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    crate::services::discord::runtime_store::set_process_generation_for_tests(Some(5_071_900));
     verify_live_captured_commit(false).await;
     #[cfg(unix)]
     verify_live_captured_commit(true).await;
-    crate::services::discord::runtime_store::set_process_generation_for_tests(None);
 }
 
 async fn verify_live_captured_commit(adopt_v2: bool) {
-    let mut fixture = ready_fixture(5_071_806);
+    let root = crate::config::TestRuntimeRootGuard::new();
+    crate::services::discord::runtime_store::set_process_generation_for_tests(Some(5_071_900));
+    let mut fixture = Fixture::with_root(5_071_806, root.path(), make_shared_data_for_tests());
     fixture.state.born_generation = 5_071_900;
     fixture.claim().await;
     let channel = ChannelId::new(fixture.state.channel_id);
@@ -212,7 +211,7 @@ async fn verify_live_captured_commit(adopt_v2: bool) {
             .shared
             .mailbox(channel)
             .v2_adopt(
-                fixture._root.path().join("v2-captured.json"),
+                root.path().join("runtime/v2-captured.json"),
                 "claude/captured".into(),
             )
             .await
@@ -256,6 +255,7 @@ async fn verify_live_captured_commit(adopt_v2: bool) {
             .cancel_token
             .is_none()
     );
+    crate::services::discord::runtime_store::set_process_generation_for_tests(None);
 }
 
 #[tokio::test(flavor = "current_thread")]

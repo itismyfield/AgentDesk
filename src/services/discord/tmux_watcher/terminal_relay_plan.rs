@@ -10,64 +10,66 @@ use crate::services::discord::outbound::o_delivery_evidence;
 /// An O lookup that spent the shared deadline still leaves the outbox read this long.
 const HEADLESS_OUTBOX_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
 
-pub(super) struct TerminalRelayPlanContext<'a> {
-    pub(super) http: &'a Arc<serenity::Http>,
-    pub(super) shared: &'a Arc<SharedData>,
-    pub(super) channel_id: serenity::ChannelId,
-    pub(super) watcher_provider: &'a ProviderKind,
-    pub(super) tmux_session_name: &'a String,
-    pub(super) evidence_source: Option<(u64, u64)>,
-    pub(super) output_path: &'a String,
-    pub(super) inflight_before_relay: &'a Option<InflightTurnState>,
-    pub(super) cached_relay_producer: &'a Option<RelayProducer>,
-    pub(super) prompt_anchor_present_before_relay: bool,
-    pub(super) external_input_lease_before_relay: bool,
-    pub(super) session_bound_relay_turn_fully_mirrored: bool,
-    pub(super) session_bound_relay_turn_first_forwarded_sequence: Option<u64>,
-    pub(super) split_trailing_turn_follows: bool,
+pub(in crate::services::discord) struct TerminalRelayPlanContext<'a> {
+    pub(in crate::services::discord) http: &'a Arc<serenity::Http>,
+    pub(in crate::services::discord) shared: &'a Arc<SharedData>,
+    pub(in crate::services::discord) channel_id: serenity::ChannelId,
+    pub(in crate::services::discord) watcher_provider: &'a ProviderKind,
+    pub(in crate::services::discord) tmux_session_name: &'a String,
+    pub(in crate::services::discord) evidence_source: Option<(u64, u64)>,
+    pub(in crate::services::discord) output_path: &'a String,
+    pub(in crate::services::discord) inflight_before_relay: &'a Option<InflightTurnState>,
+    pub(in crate::services::discord) cached_relay_producer: &'a Option<RelayProducer>,
+    pub(in crate::services::discord) prompt_anchor_present_before_relay: bool,
+    pub(in crate::services::discord) external_input_lease_before_relay: bool,
+    pub(in crate::services::discord) session_bound_relay_turn_fully_mirrored: bool,
+    pub(in crate::services::discord) session_bound_relay_turn_first_forwarded_sequence: Option<u64>,
+    pub(in crate::services::discord) split_trailing_turn_follows: bool,
     /// #5175: the watcher's turn-identity binding captured at turn-stream exit.
     /// Soft-terminal authority is re-decided HERE against `inflight_before_relay`
     /// instead of the pre-turn snapshot verdict this field used to carry.
-    pub(super) startup_soft_terminal_authority: WatcherSoftTerminalAuthority,
+    pub(in crate::services::discord) startup_soft_terminal_authority: WatcherSoftTerminalAuthority,
 }
 
-pub(super) struct TerminalRelayPlanLocals<'a> {
-    pub(super) current_offset: u64,
-    pub(super) data_start_offset: u64,
+pub(in crate::services::discord) struct TerminalRelayPlanLocals<'a> {
+    pub(in crate::services::discord) current_offset: u64,
+    pub(in crate::services::discord) data_start_offset: u64,
     /// Where `full_response` began; a leftover-buffer turn starts before its read batch.
-    pub(super) turn_data_start_offset: u64,
-    pub(super) all_data: &'a String,
-    pub(super) full_response: &'a String,
-    pub(super) restored_response_seed: &'a RestoredResponseSeed,
-    pub(super) response_sent_offset: usize,
-    pub(super) has_assistant_response: bool,
-    pub(super) terminal_kind: Option<WatcherTerminalKind>,
-    pub(super) task_notification_kind: Option<TaskNotificationKind>,
-    pub(super) assistant_text_seen: bool,
-    pub(super) fresh_assistant_text_seen: bool,
-    pub(super) tool_state: &'a WatcherToolState,
-    pub(super) placeholder_msg_id: Option<serenity::MessageId>,
-    pub(super) status_panel_msg_id: Option<serenity::MessageId>,
+    pub(in crate::services::discord) turn_data_start_offset: u64,
+    pub(in crate::services::discord) all_data: &'a String,
+    pub(in crate::services::discord) full_response: &'a String,
+    pub(in crate::services::discord) restored_response_seed: &'a RestoredResponseSeed,
+    pub(in crate::services::discord) response_sent_offset: usize,
+    pub(in crate::services::discord) has_assistant_response: bool,
+    pub(in crate::services::discord) terminal_kind: Option<WatcherTerminalKind>,
+    pub(in crate::services::discord) task_notification_kind: Option<TaskNotificationKind>,
+    pub(in crate::services::discord) assistant_text_seen: bool,
+    pub(in crate::services::discord) fresh_assistant_text_seen: bool,
+    pub(in crate::services::discord) tool_state: &'a WatcherToolState,
+    pub(in crate::services::discord) placeholder_msg_id: Option<serenity::MessageId>,
+    pub(in crate::services::discord) status_panel_msg_id: Option<serenity::MessageId>,
 }
 
-pub(super) struct TerminalRelayPlanState<'a> {
-    pub(super) all_data_session_bound_relay_ack: &'a mut Option<SessionBoundRelayAckTarget>,
-    pub(super) monitor_auto_turn_claimed: &'a mut bool,
-    pub(super) monitor_auto_turn_finished: &'a mut bool,
-    pub(super) monitor_auto_turn_synthetic_msg_id: &'a mut Option<serenity::MessageId>,
-    pub(super) monitor_auto_turn_ledger_generation: &'a mut Option<u64>,
+pub(in crate::services::discord) struct TerminalRelayPlanState<'a> {
+    pub(in crate::services::discord) all_data_session_bound_relay_ack:
+        &'a mut Option<SessionBoundRelayAckTarget>,
+    pub(in crate::services::discord) monitor_auto_turn_claimed: &'a mut bool,
+    pub(in crate::services::discord) monitor_auto_turn_finished: &'a mut bool,
+    pub(in crate::services::discord) monitor_auto_turn_synthetic_msg_id:
+        &'a mut Option<serenity::MessageId>,
+    pub(in crate::services::discord) monitor_auto_turn_ledger_generation: &'a mut Option<u64>,
 }
 
-pub(super) enum TerminalRelayPlanOutcome<'a> {
+pub(in crate::services::discord) enum TerminalRelayPlanOutcome<'a> {
     ContinueWatcherLoop,
     Proceed(TerminalRelayPlan<'a>),
 }
 
-pub(super) struct TerminalRelayPlan<'a> {
+pub(in crate::services::discord) struct TerminalRelayPlan<'a> {
     pub(super) relay_coord: Arc<TmuxRelayCoord>,
     pub(super) slot_guard: RelaySlotGuard,
     pub(super) relay_decision: TerminalRelayDecision,
-    pub(super) session_bound_relay_owns_terminal_delivery: bool,
+    pub(in crate::services::discord) session_bound_relay_owns_terminal_delivery: bool,
     pub(super) ssh_direct_pending: bool,
     pub(super) watcher_direct_fallback_requested: bool,
     pub(super) watcher_direct_fallback_authorized: bool,
@@ -130,7 +132,7 @@ fn write_terminal_relay_plan_state(
     *state.monitor_auto_turn_ledger_generation = monitor_auto_turn_ledger_generation;
 }
 
-pub(super) async fn run_terminal_relay_plan<'a>(
+pub(in crate::services::discord) async fn run_terminal_relay_plan<'a>(
     context: &TerminalRelayPlanContext<'a>,
     locals: TerminalRelayPlanLocals<'a>,
     state: &mut TerminalRelayPlanState<'a>,

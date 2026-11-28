@@ -43,9 +43,10 @@ pub(super) use self::supervisor_frame_source::{
 /// session simply not in the registry's matched set) the function is a
 /// total no-op and adds no measurable overhead vs the pre-E5 hot path.
 #[derive(Clone)]
-pub(super) struct SessionBoundRelayAckTarget {
-    pub(super) metrics: std::sync::Arc<crate::services::cluster::stream_relay::RelayMetrics>,
-    pub(super) sequence: u64,
+pub(in crate::services::discord) struct SessionBoundRelayAckTarget {
+    pub(in crate::services::discord) metrics:
+        std::sync::Arc<crate::services::cluster::stream_relay::RelayMetrics>,
+    pub(in crate::services::discord) sequence: u64,
     /// #3041 P1-3 (codex P1-3 R6): the `turn_start_offset` of the turn this ACK
     /// target belongs to — taken from the terminal frame's commit fence (the ONLY
     /// frame that yields an ack target). The watcher's per-turn forward carries the
@@ -55,11 +56,11 @@ pub(super) struct SessionBoundRelayAckTarget {
     /// terminal sequence (no false-Delivered black-hole). `None` means the fence
     /// carried no `turn_start_offset` (legacy / no pinned identity) — treated as
     /// "no turn binding", so it is never reused across a turn boundary.
-    pub(super) turn_start_offset: Option<u64>,
+    pub(in crate::services::discord) turn_start_offset: Option<u64>,
 }
 
 #[derive(Clone)]
-pub(super) struct SupervisorRelayForward {
+pub(in crate::services::discord) struct SupervisorRelayForward {
     pub(super) mirrored: bool,
     pub(super) ack_target: Option<SessionBoundRelayAckTarget>,
     pub(super) evicted_frames: Vec<RelayDroppedFrame>,

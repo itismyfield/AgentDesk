@@ -150,6 +150,9 @@ fn capture_gate(channel: u64) {
     let gate = CAPTURE_GATES.lock().unwrap().remove(&channel);
     if let Some((entered, resumed)) = gate {
         let _ = entered.send(());
-        crate::test_support::wait::recv_within(&resumed, std::time::Duration::from_secs(30));
+        adk_test_support::test_support::wait::recv_within(
+            &resumed,
+            std::time::Duration::from_secs(30),
+        );
     }
 }

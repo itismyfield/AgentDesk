@@ -28,11 +28,7 @@ fn routine() -> Value {
         "run_id":"run","agent_id":"agent8146","execution_strategy":"persistent","is_dm":false}})
 }
 fn waiting(rig: &Rig, journal: &Value) -> bool {
-    let key = (
-        rig.channel.get(),
-        journal["id"].as_str().unwrap().to_string(),
-    );
-    WAITING.lock().unwrap().contains(&key)
+    retry_waiting(rig.channel.get(), journal["id"].as_str().unwrap())
 }
 /// Pins the journal's old pane, as a first close attempt does.
 async fn pinned(rig: &Rig, pin: Value) -> Value {
@@ -233,7 +229,7 @@ async fn scheduled_front_with_its_own_session_is_delivered_once_after_the_old_pa
         Some("snap-8146"),
     )
     .await;
-    let own = crate::services::discord::session_identity::SessionIdentity::parse(&key.unwrap());
+    let own = crate::domain::session_identity::SessionIdentity::parse(&key.unwrap());
     let own = own.unwrap().tmux_name;
     assert_ne!(own, "left");
     assert_eq!(reserve(&rig, &own).await, Ok(()));

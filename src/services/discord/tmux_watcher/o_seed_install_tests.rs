@@ -1,17 +1,34 @@
 //! Isolated real watcher entry cases, retaining raw observations through task completion.
-use super::*;
+use crate::services::discord::InflightTurnState;
+use crate::services::discord::dl_tmux_watcher_test_host::watcher_install_fixture::InstallFixture;
 use crate::services::discord::health::test_support::{
     MockDiscord, seed_backfill_row, tree_fingerprint,
 };
 use crate::services::discord::inflight::o_seed_observation::{Guard, Snapshot};
+use crate::services::discord::outbound::delivery_record as dr;
 use crate::services::discord::task_supervisor::watcher_spawn_observation::Scope;
 use crate::services::discord::task_supervisor::{spawn_observed_tmux_watcher, watcher_completion};
-use crate::services::discord::tmux::InstallFixture;
+use crate::services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::{
+    CLAUDE, cancel_for_test, isolated_in_module, said,
+};
+use crate::services::discord::tmux::tmux_watcher::{
+    cancel_handoff, tmux_output_watcher_with_restore,
+};
+use crate::services::discord::tmux::{
+    RestoredWatcherTurn, WatchHost, claim_or_reuse_watcher_for_host,
+    restored_watcher_turn_from_inflight,
+};
+use crate::services::provider::ProviderKind;
 use std::io::Write;
 use std::path::Path;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
+};
+use std::time::Duration;
 
 fn child(test: &str) -> bool {
-    isolated_in("o_seed_install_tests", test, &[])
+    isolated_in_module(module_path!(), test, &[])
 }
 
 fn pane(state: &str) {

@@ -307,7 +307,7 @@ mod self_started_publish_tests {
         deliver::{ChannelWriter, Step},
         pieces::UnitDeriver,
     };
-    use crate::test_support::wait::{WAIT_CAP, await_within};
+    use adk_test_support::test_support::wait::{WAIT_CAP, await_within};
 
     const BODY: &str = "The background task completed; here is its final result.";
 

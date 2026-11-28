@@ -72,7 +72,7 @@ fn unbound_candidates(
     inflight: &Result<Option<InflightTurnState>, String>,
 ) -> Result<Candidates, String> {
     #[cfg(any(test, feature = "test-support"))]
-    dormancy_hook_tests::reached(channel, dormancy_hook_tests::Site::Collect);
+    dormancy_hook_test_support::reached(channel, dormancy_hook_test_support::Site::Collect);
     let events = events?;
     let row = inflight.as_ref().map_err(Clone::clone)?;
     let shadow = match provider {
@@ -196,7 +196,7 @@ fn host_scope(reads: HostReads<'_>) -> HostScope {
 }
 fn host_scope_result(reads: HostReads<'_>) -> Scope {
     #[cfg(any(test, feature = "test-support"))]
-    dormancy_hook_tests::reached(reads.channel, dormancy_hook_tests::Site::Scope);
+    dormancy_hook_test_support::reached(reads.channel, dormancy_hook_test_support::Site::Scope);
     let hold = Scope::Hold;
     let (Ok(mut evidence), Ok(row)) = (reads.evidence, reads.inflight.as_ref()) else {
         return hold("probe_failed");
@@ -409,7 +409,10 @@ pub(in crate::services::discord) fn decide_unbound(
         return Verdict::Hold("probe_failed");
     };
     #[cfg(any(test, feature = "test-support"))]
-    dormancy_hook_tests::reached(candidates.channel, dormancy_hook_tests::Site::Verdict);
+    dormancy_hook_test_support::reached(
+        candidates.channel,
+        dormancy_hook_test_support::Site::Verdict,
+    );
     if candidates.conflict {
         return Verdict::Hold("candidate_conflict");
     }
@@ -533,7 +536,7 @@ fn local_registration(config: &Config, channel: u64, provider: &ProviderKind) ->
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(in crate::services::discord) mod dormancy_hook_tests;
+pub(in crate::services::discord) mod dormancy_hook_test_support;
 #[cfg(test)]
 #[path = "unbound/unit_tests.rs"]
 mod tests;

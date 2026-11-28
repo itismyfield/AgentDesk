@@ -9,7 +9,7 @@ use super::*;
 mod native_restore;
 use crate::services::tui_input::human_frame::history::v2::{Registry, native::Ticket};
 pub(in crate::services::discord) use native_restore::{BootInputs, boot_ready};
-pub(super) use native_restore::{RestoreStep, RestoredInput};
+pub(in crate::services::discord) use native_restore::{RestoreStep, RestoredInput};
 
 // Producer, bridge and O host share this gate after custody and control consumers are installed.
 pub(in crate::services::discord) fn enabled() -> bool {
@@ -311,7 +311,10 @@ pub(in crate::services::discord) async fn holds_row(
         .unwrap_or(true)
 }
 
-pub(super) async fn handle(msg: FinalizeMsg, ledger: &mut HashMap<LedgerKey, LedgerEntry>) {
+pub(in crate::services::discord) async fn handle(
+    msg: FinalizeMsg,
+    ledger: &mut HashMap<LedgerKey, LedgerEntry>,
+) {
     match msg {
         FinalizeMsg::NativeAbstain {
             input,
@@ -480,4 +483,4 @@ pub(super) fn boot_pending(entry: &LedgerEntry) -> bool {
 
 pub(in crate::services::discord) use super::terminal_handler::native_supply::port as supply_port;
 
-pub(super) use native_restore::validate_record as validate_saved_record;
+pub(in crate::services::discord) use native_restore::validate_record as validate_saved_record;

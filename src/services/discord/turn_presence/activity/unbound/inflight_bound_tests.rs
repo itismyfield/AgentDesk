@@ -4,7 +4,7 @@ use crate::services::discord::inflight::InflightTurnState;
 use crate::services::discord::turn_presence::activity::tests::{log_turn_source, settled_reason};
 use crate::services::discord::turn_presence::activity::unbound::Verdict;
 use crate::services::discord::turn_presence::activity::unbound::live::fixture_tests::Rig;
-use crate::services::discord::turn_presence::activity::unbound::live::live_snapshot_hook_tests::{
+use crate::services::discord::turn_presence::activity::unbound::live::live_snapshot_hook_test_support::{
     PAUSES, Pause, PauseGuard,
 };
 use crate::services::discord::turn_presence::activity::unbound::live::{

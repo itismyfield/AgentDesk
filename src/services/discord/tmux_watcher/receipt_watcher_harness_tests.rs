@@ -1,8 +1,13 @@
 //! A watcher ending a managed execution on the real loop commits its receipt before the row
 //! goes; a watcher cancelled for a replacement hands the turn over and records nothing.
 
-use super::*;
+use crate::services::discord::InflightTurnState;
 use crate::services::discord::inflight::TurnSource;
+use crate::services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::{
+    CLAUDE, Harness, field, isolated_in_module, said, stop, user,
+};
+use poise::serenity_prelude::{self as serenity, ChannelId};
+use std::sync::{Arc, atomic::Ordering};
 
 const T0: &str = "I7340 T0 delivered before the watcher started";
 const BODY: &str = "I7340 answer the restored watcher relays";
@@ -13,7 +18,7 @@ async fn i8432_herdr_soft_terminal_submits_and_releases_the_handed_off_turn_pg()
     use crate::services::discord::inflight::herdr_turn_evidence_tests::HELD;
 
     let test = "i8432_herdr_soft_terminal_submits_and_releases_the_handed_off_turn_pg";
-    if !isolated_in("receipt_watcher_harness_tests", test, &[]) {
+    if !isolated_in_module(module_path!(), test, &[]) {
         return;
     }
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
@@ -194,7 +199,7 @@ async fn receipt(
 async fn a_replaced_watcher_records_nothing_and_the_ending_one_commits_before_the_row_goes_pg() {
     let test =
         "a_replaced_watcher_records_nothing_and_the_ending_one_commits_before_the_row_goes_pg";
-    if !isolated_in("receipt_watcher_harness_tests", test, &[]) {
+    if !isolated_in_module(module_path!(), test, &[]) {
         return;
     }
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
@@ -248,7 +253,7 @@ async fn a_replaced_watcher_records_nothing_and_the_ending_one_commits_before_th
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_watcher_ending_whose_receipt_cannot_commit_keeps_the_row_marked() {
     let test = "a_watcher_ending_whose_receipt_cannot_commit_keeps_the_row_marked";
-    if !isolated_in("receipt_watcher_harness_tests", test, &[]) {
+    if !isolated_in_module(module_path!(), test, &[]) {
         return;
     }
     let blocked = sqlx::postgres::PgPoolOptions::new()
@@ -360,7 +365,7 @@ async fn stop_recorded(h: &Harness) -> Option<u64> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stopped_pane_death_ends_cancelled_and_a_rebind_row_ends_nothing_pg() {
     let test = "a_stopped_pane_death_ends_cancelled_and_a_rebind_row_ends_nothing_pg";
-    if !isolated_in("receipt_watcher_harness_tests", test, &[]) {
+    if !isolated_in_module(module_path!(), test, &[]) {
         return;
     }
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
@@ -393,7 +398,7 @@ async fn a_stopped_pane_death_ends_cancelled_and_a_rebind_row_ends_nothing_pg() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_reused_watcher_ends_the_next_stopped_turn_cancelled_pg() {
     let test = "a_reused_watcher_ends_the_next_stopped_turn_cancelled_pg";
-    if !isolated_in("receipt_watcher_harness_tests", test, &[]) {
+    if !isolated_in_module(module_path!(), test, &[]) {
         return;
     }
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
@@ -468,7 +473,7 @@ async fn a_reused_watcher_ends_the_next_stopped_turn_cancelled_pg() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stop_before_the_first_byte_ends_the_execution_cancelled_pg() {
     let test = "a_stop_before_the_first_byte_ends_the_execution_cancelled_pg";
-    if !isolated_in("receipt_watcher_harness_tests", test, &[]) {
+    if !isolated_in_module(module_path!(), test, &[]) {
         return;
     }
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
@@ -532,7 +537,7 @@ async fn zero_byte_turn(case: u64, pool: &sqlx::PgPool) -> (Harness, InflightTur
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stop_released_by_its_bridge_before_the_pane_dies_stays_cancelled_pg() {
     let test = "a_stop_released_by_its_bridge_before_the_pane_dies_stays_cancelled_pg";
-    if !isolated_in("receipt_watcher_harness_tests", test, &[]) {
+    if !isolated_in_module(module_path!(), test, &[]) {
         return;
     }
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
@@ -594,7 +599,7 @@ async fn a_stop_released_by_its_bridge_before_the_pane_dies_stays_cancelled_pg()
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_hand_over_stop_records_no_receipt_pg() {
     let test = "a_hand_over_stop_records_no_receipt_pg";
-    if !isolated_in("receipt_watcher_harness_tests", test, &[]) {
+    if !isolated_in_module(module_path!(), test, &[]) {
         return;
     }
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
@@ -639,7 +644,7 @@ async fn start_live_turn(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_prior_turns_stop_leaves_the_next_turns_pane_death_failed_pg() {
     let test = "a_prior_turns_stop_leaves_the_next_turns_pane_death_failed_pg";
-    if !isolated_in("receipt_watcher_harness_tests", test, &[]) {
+    if !isolated_in_module(module_path!(), test, &[]) {
         return;
     }
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
@@ -744,7 +749,7 @@ async fn herdr_ending(
 async fn a_herdr_ending_without_its_own_end_issues_no_receipt_pg() {
     use crate::services::discord::inflight::herdr_turn_evidence_tests::{HELD, OWN};
     let test = "a_herdr_ending_without_its_own_end_issues_no_receipt_pg";
-    if !isolated_in("receipt_watcher_harness_tests", test, &[]) {
+    if !isolated_in_module(module_path!(), test, &[]) {
         return;
     }
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
@@ -783,4 +788,133 @@ async fn a_herdr_ending_without_its_own_end_issues_no_receipt_pg() {
     }
     pool.close().await;
     db.drop().await;
+}
+
+mod committed_placeholder_cleanup {
+    use crate::services::discord::outbound::delivery_record as dr;
+    use crate::services::provider::ProviderKind;
+    use poise::serenity_prelude::{ChannelId, MessageId};
+    use std::sync::Arc;
+
+    /// After an edit failure on a committed range, the placeholder is deleted only when another
+    /// message is proven to hold the delivered body; otherwise it and its tracking stay.
+    #[test]
+    fn committed_edit_failure_deletes_placeholder_only_with_delivered_elsewhere_proof() {
+        use crate::services::discord::tmux::tmux_watcher::terminal_long_chunks::{
+            GuardedWatcherDeliveryResult, record_watcher_terminal_delivery, watcher_delivery_identity,
+        };
+        use crate::services::discord::tmux::tmux_watcher::terminal_send::committed_placeholder_cleanup::{
+            CommittedEditFailureReconcileCtx, reconcile_already_committed_after_edit_failure,
+        };
+        use crate::services::discord::health::test_support::MockDiscord;
+        use adk_test_support::test_support::wait::{WAIT_CAP, await_within};
+        let root = tempfile::tempdir().expect("runtime root");
+        let _root_guard = crate::config::set_agentdesk_root_for_test(root.path());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        for (index, delivered_elsewhere) in [(0u64, true), (1, false)] {
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let channel = ChannelId::new(4_508_100 + index);
+            let (placeholder, delivered) = (MessageId::new(4_508_200), 4_508_300);
+            let tmux = format!("committed-edit-failure-{index}");
+            let generation = crate::services::tmux_common::session_temp_path(&tmux, "generation");
+            std::fs::create_dir_all(std::path::Path::new(&generation).parent().unwrap()).unwrap();
+            std::fs::write(&generation, b"1").unwrap();
+            let transcript = root.path().join(format!("{tmux}.jsonl"));
+            std::fs::File::create(&transcript)
+                .and_then(|file| file.set_len(1_000))
+                .expect("transcript");
+            shared.tmux_watchers.insert(
+                channel,
+                crate::services::discord::TmuxWatcherHandle {
+                    tmux_session_name: tmux.clone(),
+                    output_path: transcript.to_string_lossy().into_owned(),
+                    paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    resume_offset: Arc::new(std::sync::Mutex::new(None)),
+                    cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                    turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
+                        crate::services::discord::tmux_watcher_now_ms(),
+                    )),
+                },
+            );
+            if delivered_elsewhere {
+                let identity = watcher_delivery_identity(
+                    dr::current_generation_mtime_ns(&tmux),
+                    shared.relay_frontier_token(channel).reset_incarnation,
+                    None,
+                );
+                let recorded = record_watcher_terminal_delivery(
+                    crate::services::discord::tmux::WatcherDeliveryTarget {
+                        shared: &shared,
+                        provider: &ProviderKind::Claude,
+                        channel_id: channel,
+                        tmux_session_name: &tmux,
+                    },
+                    identity,
+                    (100, 300),
+                    Some(delivered),
+                    "delivered body",
+                );
+                assert_eq!(recorded, GuardedWatcherDeliveryResult::Persisted);
+            }
+            let mut placeholder_msg_id = Some(placeholder);
+            let (mut direct_send_delivered, mut anchor_visible, mut restored) = (false, true, true);
+            let mut last_edit_text = String::new();
+            let calls = rt.block_on(async {
+                let discord = MockDiscord::start().await;
+                await_within(
+                    reconcile_already_committed_after_edit_failure(
+                        CommittedEditFailureReconcileCtx {
+                            http: &discord.http,
+                            shared: &shared,
+                            provider: &ProviderKind::Claude,
+                            channel_id: channel,
+                            tmux_session_name: &tmux,
+                            msg_id: placeholder,
+                            inflight_before_relay: None,
+                            range: (150, 300),
+                            response_sent_offset: 0,
+                            edit_error: "500 edit failed".to_string(),
+                            direct_send_delivered: &mut direct_send_delivered,
+                            tui_direct_anchor_terminal_body_visible: &mut anchor_visible,
+                            placeholder_msg_id: &mut placeholder_msg_id,
+                            placeholder_from_restored_inflight: &mut restored,
+                            last_edit_text: &mut last_edit_text,
+                            cleanup_source: "committed_edit_failure_test",
+                            record_source: "committed_edit_failure_test",
+                        },
+                    ),
+                    WAIT_CAP,
+                )
+                .await;
+                discord.calls_for(channel.get())
+            });
+
+            let deletes: Vec<&String> = calls.iter().filter(|c| c.starts_with("DELETE")).collect();
+            let expected_delete =
+                format!("DELETE /api/v10/channels/{channel}/messages/{placeholder}");
+            assert_eq!(
+                deletes,
+                if delivered_elsewhere {
+                    vec![&expected_delete]
+                } else {
+                    Vec::new()
+                },
+                "delivered_elsewhere={delivered_elsewhere}"
+            );
+            assert_eq!(
+                (placeholder_msg_id, restored),
+                if delivered_elsewhere {
+                    (None, false)
+                } else {
+                    (Some(placeholder), true)
+                },
+                "tracking clears only after the delete commits"
+            );
+        }
+    }
 }

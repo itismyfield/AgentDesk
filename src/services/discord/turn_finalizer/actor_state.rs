@@ -46,28 +46,29 @@ impl TurnFinalizer {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum Phase {
+pub(in crate::services::discord) enum Phase {
     Pending,
     Finalizing,
     Finalized,
 }
 
-pub(super) struct LedgerEntry {
+pub(in crate::services::discord) struct LedgerEntry {
     #[cfg(unix)]
-    pub(super) native_inputs: HashMap<String, super::terminal_handler::NativePrepared>,
+    pub(in crate::services::discord) native_inputs:
+        HashMap<String, super::terminal_handler::NativePrepared>,
     #[cfg(unix)]
     pub(super) native_boot_inputs: HashMap<String, super::native_prepare::RestoredInput>,
     pub(super) recovery_lease: Option<crate::services::agent_recovery::RecoveryLease>,
-    pub(super) phase: Phase,
+    pub(in crate::services::discord) phase: Phase,
     pub(super) relay_owner: RelayOwnerKind,
     pub(super) provider: ProviderKind,
     pub(super) turn_key: TurnKey,
-    pub(super) terminal_deadline: Option<Instant>,
-    pub(super) watcher_backstop_deadline: Option<Instant>,
+    pub(in crate::services::discord) terminal_deadline: Option<Instant>,
+    pub(in crate::services::discord) watcher_backstop_deadline: Option<Instant>,
     pub(super) watcher_backstop_probe_at: Option<Instant>,
     pub(super) watcher_backstop_terminal_streak: u8,
     pub(super) watcher_backstop_deadline_pulled: bool,
-    pub(super) completion_admission: CompletionAdmission,
+    pub(in crate::services::discord) completion_admission: CompletionAdmission,
     pub(super) finalized_at: Option<Instant>,
     /// The exact policy close this entry owns until it finalizes; never shared with another key.
     pub(super) pending_policy_commit: Option<Arc<super::terminal_handler::PolicyCommit>>,
@@ -86,7 +87,7 @@ impl LedgerEntry {
     }
 
     /// A fresh `Pending` entry, from `register_start` or a terminal that arrived first.
-    pub(super) fn registered(
+    pub(in crate::services::discord) fn registered(
         key: TurnKey,
         provider: ProviderKind,
         relay_owner: RelayOwnerKind,
@@ -117,12 +118,12 @@ impl LedgerEntry {
     }
 }
 
-pub(super) struct PendingCompletionAdmission {
+pub(in crate::services::discord) struct PendingCompletionAdmission {
     pub(super) completion_admission: CompletionAdmission,
     pub(super) updated_at: Instant,
 }
 
-pub(super) enum FinalizeMsg {
+pub(in crate::services::discord) enum FinalizeMsg {
     #[cfg(unix)]
     NativeBoot {
         inputs: Vec<super::native_prepare::RestoredInput>,
@@ -266,7 +267,7 @@ pub(super) enum FinalizeMsg {
 }
 
 /// Registers the exact start and applies only its pending admission edges.
-pub(super) fn handle_start(
+pub(in crate::services::discord) fn handle_start(
     msg: FinalizeMsg,
     ledger: &mut HashMap<LedgerKey, LedgerEntry>,
     pending_admission: &mut HashMap<LedgerKey, PendingCompletionAdmission>,
@@ -335,7 +336,7 @@ pub(super) fn handle_start(
 
 #[cfg(unix)]
 impl TurnFinalizer {
-    pub(super) async fn submit_native(
+    pub(in crate::services::discord) async fn submit_native(
         &self,
         work: super::terminal_handler::NativeCleanup,
         history: crate::services::tui_input::human_frame::history::v2::Registry,
@@ -400,7 +401,7 @@ pub(super) fn panic_payload_summary(payload: &(dyn std::any::Any + Send)) -> Str
     "non-string panic payload".to_string()
 }
 
-pub(super) async fn contain_panic<T>(
+pub(in crate::services::discord) async fn contain_panic<T>(
     future: impl std::future::Future<Output = T>,
 ) -> Result<T, String> {
     std::panic::AssertUnwindSafe(future).catch_unwind().await.map_err(|payload| {

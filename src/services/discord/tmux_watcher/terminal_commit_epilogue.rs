@@ -8,58 +8,60 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// restored watcher finalize / direct-terminal idle commit / queue kickoff /
 /// terminal stop decision), moved verbatim from tmux_watcher.rs L3746-4115.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum TerminalCommitEpilogueOutcome {
+pub(in crate::services::discord) enum TerminalCommitEpilogueOutcome {
     BreakWatcherLoop,
     Fallthrough,
 }
 
-pub(super) struct TerminalCommitEpilogueContext<'a> {
-    pub(super) shared: &'a Arc<SharedData>,
-    pub(super) channel_id: serenity::ChannelId,
-    pub(super) watcher_provider: &'a ProviderKind,
-    pub(super) provider_kind: &'a ProviderKind,
-    pub(super) tmux_session_name: &'a String,
-    pub(super) output_path: &'a String,
-    pub(super) relay_coord: &'a Arc<TmuxRelayCoord>,
-    pub(super) turn_delivered: &'a Arc<AtomicBool>,
-    pub(super) host: &'a HostSnapshot,
+pub(in crate::services::discord) struct TerminalCommitEpilogueContext<'a> {
+    pub(in crate::services::discord) shared: &'a Arc<SharedData>,
+    pub(in crate::services::discord) channel_id: serenity::ChannelId,
+    pub(in crate::services::discord) watcher_provider: &'a ProviderKind,
+    pub(in crate::services::discord) provider_kind: &'a ProviderKind,
+    pub(in crate::services::discord) tmux_session_name: &'a String,
+    pub(in crate::services::discord) output_path: &'a String,
+    pub(in crate::services::discord) relay_coord: &'a Arc<TmuxRelayCoord>,
+    pub(in crate::services::discord) turn_delivered: &'a Arc<AtomicBool>,
+    pub(in crate::services::discord) host: &'a HostSnapshot,
 }
 
-pub(super) struct TerminalCommitEpilogueLocals<'a> {
-    pub(super) terminal_output_committed: bool,
-    pub(super) lifecycle_stage_paused: bool,
-    pub(super) relay_suppressed: bool,
-    pub(super) has_assistant_response: bool,
-    pub(super) receipt_kept: bool,
-    pub(super) native_held: (bool, bool),
-    pub(super) completion_is_stale_for_newer_turn: bool,
-    pub(super) anchor_cleanup_is_stale_for_newer_turn: bool,
-    pub(super) inflight_state: &'a Option<InflightTurnState>,
-    pub(super) inflight_before_relay: &'a Option<InflightTurnState>,
-    pub(super) full_response: &'a String,
+pub(in crate::services::discord) struct TerminalCommitEpilogueLocals<'a> {
+    pub(in crate::services::discord) terminal_output_committed: bool,
+    pub(in crate::services::discord) lifecycle_stage_paused: bool,
+    pub(in crate::services::discord) relay_suppressed: bool,
+    pub(in crate::services::discord) has_assistant_response: bool,
+    pub(in crate::services::discord) receipt_kept: bool,
+    pub(in crate::services::discord) native_held: (bool, bool),
+    pub(in crate::services::discord) completion_is_stale_for_newer_turn: bool,
+    pub(in crate::services::discord) anchor_cleanup_is_stale_for_newer_turn: bool,
+    pub(in crate::services::discord) inflight_state: &'a Option<InflightTurnState>,
+    pub(in crate::services::discord) inflight_before_relay: &'a Option<InflightTurnState>,
+    pub(in crate::services::discord) full_response: &'a String,
     /// An isolated scheduled turn adds nothing to the channel history.
-    pub(super) channel_effects: crate::services::discord::scheduled_turn::ChannelEffects,
-    pub(super) watcher_turn_nonce: &'a Option<String>,
-    pub(super) resolved_did: &'a Option<String>,
-    pub(super) dispatch_ok: bool,
-    pub(super) terminal_delivery_committed: bool,
-    pub(super) watcher_tui_gate_outcome: TuiCompletionGateOutcome,
-    pub(super) tui_direct_anchor_terminal_body_visible: bool,
-    pub(super) terminal_kind: Option<WatcherTerminalKind>,
-    pub(super) terminal_evidence_offset: Option<u64>,
-    pub(super) finish_mailbox_on_completion: bool,
-    pub(super) pre_panel_release_drove_finalize: bool,
-    pub(super) current_offset: u64,
-    pub(super) data_start_offset: u64,
+    pub(in crate::services::discord) channel_effects:
+        crate::services::discord::scheduled_turn::ChannelEffects,
+    pub(in crate::services::discord) watcher_turn_nonce: &'a Option<String>,
+    pub(in crate::services::discord) resolved_did: &'a Option<String>,
+    pub(in crate::services::discord) dispatch_ok: bool,
+    pub(in crate::services::discord) terminal_delivery_committed: bool,
+    pub(in crate::services::discord) watcher_tui_gate_outcome: TuiCompletionGateOutcome,
+    pub(in crate::services::discord) tui_direct_anchor_terminal_body_visible: bool,
+    pub(in crate::services::discord) terminal_kind: Option<WatcherTerminalKind>,
+    pub(in crate::services::discord) terminal_evidence_offset: Option<u64>,
+    pub(in crate::services::discord) finish_mailbox_on_completion: bool,
+    pub(in crate::services::discord) pre_panel_release_drove_finalize: bool,
+    pub(in crate::services::discord) current_offset: u64,
+    pub(in crate::services::discord) data_start_offset: u64,
 }
 
-pub(super) struct TerminalCommitEpilogueState<'a> {
-    pub(super) turn_result_relayed: &'a mut bool,
-    pub(super) watcher_direct_terminal_idle_committed: &'a mut bool,
-    pub(super) monitor_auto_turn_claimed: &'a mut bool,
-    pub(super) monitor_auto_turn_finished: &'a mut bool,
-    pub(super) monitor_auto_turn_synthetic_msg_id: &'a mut Option<serenity::MessageId>,
-    pub(super) monitor_auto_turn_ledger_generation: &'a mut Option<u64>,
+pub(in crate::services::discord) struct TerminalCommitEpilogueState<'a> {
+    pub(in crate::services::discord) turn_result_relayed: &'a mut bool,
+    pub(in crate::services::discord) watcher_direct_terminal_idle_committed: &'a mut bool,
+    pub(in crate::services::discord) monitor_auto_turn_claimed: &'a mut bool,
+    pub(in crate::services::discord) monitor_auto_turn_finished: &'a mut bool,
+    pub(in crate::services::discord) monitor_auto_turn_synthetic_msg_id:
+        &'a mut Option<serenity::MessageId>,
+    pub(in crate::services::discord) monitor_auto_turn_ledger_generation: &'a mut Option<u64>,
 }
 
 /// #4370 (codex r3 #1): may THIS terminal-commit pass stamp the re-adopted
@@ -110,7 +112,7 @@ pub(super) fn committed_finalize_target<'a>(
     (0, inflight_before_relay)
 }
 
-pub(super) async fn run_terminal_commit_epilogue(
+pub(in crate::services::discord) async fn run_terminal_commit_epilogue(
     context: &TerminalCommitEpilogueContext<'_>,
     locals: TerminalCommitEpilogueLocals<'_>,
     state: &mut TerminalCommitEpilogueState<'_>,
@@ -624,8 +626,4 @@ pub(super) async fn run_terminal_commit_epilogue(
 
 #[cfg(test)]
 #[path = "terminal_commit_epilogue/continuation_marker_tests.rs"]
-mod continuation_marker_tests;
-
-#[cfg(test)]
-#[path = "terminal_commit_epilogue/synthetic_mailbox_release_tests.rs"]
-mod synthetic_mailbox_release_tests;
+pub(in crate::services::discord) mod continuation_marker_tests;

@@ -1,12 +1,12 @@
 use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::services::discord::tmux::tmux_watcher) struct WatcherSourceAuthority {
-    pub(in crate::services::discord::tmux::tmux_watcher) source_file:
+pub(in crate::services::discord) struct WatcherSourceAuthority {
+    pub(in crate::services::discord) source_file:
         crate::services::cluster::stream_relay::SourceFileIdentity,
-    pub(in crate::services::discord::tmux::tmux_watcher) generation_mtime_ns: i64,
-    pub(in crate::services::discord::tmux::tmux_watcher) reset_incarnation: u64,
-    pub(in crate::services::discord::tmux::tmux_watcher) source_stamp:
+    pub(in crate::services::discord) generation_mtime_ns: i64,
+    pub(in crate::services::discord) reset_incarnation: u64,
+    pub(in crate::services::discord) source_stamp:
         Option<crate::services::cluster::stream_relay::SourceStamp>,
 }
 

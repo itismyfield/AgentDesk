@@ -8,21 +8,21 @@ pub(in crate::services::discord) enum CompletionAdmissionPlan {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(super) struct CompletionAdmission {
+pub(in crate::services::discord) struct CompletionAdmission {
     #[cfg(unix)]
-    pub(super) native_input: Option<bool>,
+    pub(in crate::services::discord) native_input: Option<bool>,
     pub(super) plan: CompletionAdmissionPlan,
     pub(super) mailbox_released: bool,
-    pub(super) operator_released: bool,
+    pub(in crate::services::discord) operator_released: bool,
     pub(super) terminal_projection_settled: bool,
-    pub(super) terminal_projection_allows_queue: bool,
+    pub(in crate::services::discord) terminal_projection_allows_queue: bool,
     pub(super) terminal_disposition_settled: bool,
-    pub(super) terminal_disposition_allows_queue: bool,
+    pub(in crate::services::discord) terminal_disposition_allows_queue: bool,
     pub(super) queue_eligible_published: bool,
 }
 
 impl CompletionAdmission {
-    pub(super) fn new(plan: CompletionAdmissionPlan) -> Self {
+    pub(in crate::services::discord) fn new(plan: CompletionAdmissionPlan) -> Self {
         Self {
             #[cfg(unix)]
             native_input: None,
@@ -43,11 +43,14 @@ impl CompletionAdmission {
         }
     }
 
-    pub(super) fn note_mailbox_released(&mut self) {
+    pub(in crate::services::discord) fn note_mailbox_released(&mut self) {
         self.mailbox_released = true;
     }
 
-    pub(super) fn note_terminal_projection_settled(&mut self, allow_queue: bool) {
+    pub(in crate::services::discord) fn note_terminal_projection_settled(
+        &mut self,
+        allow_queue: bool,
+    ) {
         if self.terminal_projection_settled {
             return;
         }
@@ -55,7 +58,10 @@ impl CompletionAdmission {
         self.terminal_projection_allows_queue = allow_queue;
     }
 
-    pub(super) fn note_terminal_disposition_settled(&mut self, allow_queue: bool) {
+    pub(in crate::services::discord) fn note_terminal_disposition_settled(
+        &mut self,
+        allow_queue: bool,
+    ) {
         if self.terminal_disposition_settled {
             return;
         }
@@ -86,7 +92,7 @@ impl CompletionAdmission {
         (barrier_satisfied || authorized_release) && !self.queue_eligible_published
     }
 
-    pub(super) fn claim_queue_eligible(&mut self) -> bool {
+    pub(in crate::services::discord) fn claim_queue_eligible(&mut self) -> bool {
         if !self.claimable() {
             return false;
         }

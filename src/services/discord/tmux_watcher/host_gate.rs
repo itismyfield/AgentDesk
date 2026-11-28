@@ -85,7 +85,7 @@ pub(in crate::services::discord::tmux::tmux_watcher) async fn background_agent_p
 
 /// `probe` decides only off Herdr, which is never probed as tmux; a death it reports stands
 /// unless a re-read of an unverified sessions row names Herdr.
-pub(in crate::services::discord::tmux::tmux_watcher) async fn host_alive(
+pub(in crate::services::discord) async fn host_alive(
     shared: &SharedData,
     name: &str,
     channel_id: ChannelId,
