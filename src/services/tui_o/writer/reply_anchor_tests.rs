@@ -1,9 +1,16 @@
 use super::*;
+use crate::services::tui_o::shadow::{ShadowProvider, capture::renumber};
+use crate::services::tui_o::store::{InitSource, fault};
+use crate::services::tui_o::writer::actor::Actor;
+use crate::services::tui_o::writer::binding::{BindingCause, BindingRecord, BindingTarget};
 use crate::services::tui_o::writer::deliver::Step;
 use crate::services::tui_o::writer::input_facts::native::Projection;
 use crate::services::tui_o::writer::input_facts::native::tests::{Fixture, close, queue, user};
-use crate::services::tui_o::writer::pieces::{Derived, PieceWork};
-use crate::services::tui_o::writer::test_support::{Harness, unit};
+use crate::services::tui_o::writer::pieces::{Derived, PieceWork, UnitDeriver};
+use crate::services::tui_o::writer::rotation::Sources;
+use crate::services::tui_o::writer::test_support::{
+    FakeBindings, Harness, bound, startup_log, unit,
+};
 use serde_json::{Value, json};
 use sha2::Digest;
 
@@ -268,29 +275,218 @@ async fn untagged_opener_keeps_the_reply_when_its_answer_arrives_first() {
 /// and from the recorded binding even when the registrations no longer name it.
 #[tokio::test]
 async fn restart_recovers_the_same_anchor_before_and_after_its_record() {
-    let f = Fixture::new();
-    f.register("a1", "same");
-    f.register("a2", "same");
-    let at = append(&f, &[user("u1", "same"), answer("one")]);
-    let mut persisted = registrations(&f, &[("a1", A), ("a2", B)]);
-    persisted[0].receipts.push("u1".into());
-    let harness = Harness::new();
+    for interrupted in [
+        None,
+        Some(fault::Step::RefreshBeforeIntent),
+        Some(fault::Step::RefreshInstall),
+    ] {
+        let mut f = Fixture::new();
+        f.register("a1", "same");
+        f.register("a2", "same");
+        f.register("b", "joined");
+        let at = append(
+            &f,
+            &[
+                user("u1", "same"),
+                queue("enqueue", "joined"),
+                absorbed("joined"),
+                answer("one"),
+            ],
+        );
+        let mut persisted = registrations(&f, &[("a1", A), ("a2", 9003), ("b", B)]);
+        persisted[0].receipts.push("u1".into());
+        let harness = saved_source(&f);
+        let (mut writer, anchors) = (harness.writer(), Anchors::default());
+        writer.attach_reply_anchors(anchors.clone());
+        settle(&f, &anchors, &persisted);
+        assert_eq!(
+            writer.deliver(&piece(&f, "receipted", at.clone())).await,
+            Step::Done
+        );
+        assert_eq!(*harness.port.reply_to.lock().unwrap(), [Some(A)]);
+        assert_eq!(*harness.port.joined.lock().unwrap(), [B]);
+        let [binding] = writer
+            .store()
+            .anchor_bindings()
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let old = f.binding.source.clone();
+        let _device = renumber::shift(&old.path, 1 << 40);
+        f.binding.source.dev ^= 1 << 40;
+        let new = &f.binding.source;
+
+        let under = harness
+            ._runtime
+            .path()
+            .join(crate::services::tui_o::store::STORE_DIR_NAME)
+            .join(harness.channel_id.to_string());
+        let planted = interrupted.map(|step| {
+            let under = if step == fault::Step::RefreshInstall {
+                under.join(crate::services::tui_o::store::CURSOR_DIR)
+            } else {
+                under.clone()
+            };
+            fault::plant(&under, step, std::io::ErrorKind::StorageFull, Some(1))
+        });
+        let refresh = writer.store().refresh_source(&old, new);
+        assert_eq!(refresh.is_err(), interrupted.is_some(), "{refresh:?}");
+        drop(writer);
+        drop(planted);
+
+        let mut restarted = harness.writer();
+        if interrupted == Some(fault::Step::RefreshBeforeIntent) {
+            assert!(restarted.store().cursor(&old).is_some());
+            assert_eq!(
+                restarted.store().anchor_bindings().unwrap(),
+                [binding.clone()]
+            );
+            restarted.store().refresh_source(&old, new).unwrap();
+        }
+        assert!(restarted.store().cursor(new).is_some());
+        assert!(restarted.store().cursor(&old).is_none());
+        let anchors = Anchors::default();
+        restarted.attach_reply_anchors(anchors.clone());
+        settle(&f, &anchors, &[]);
+        assert_eq!(
+            restarted.deliver(&piece(&f, "recorded", at)).await,
+            Step::Done
+        );
+        assert_eq!(
+            *harness.port.reply_to.lock().unwrap(),
+            [Some(A), Some(A)],
+            "{interrupted:?}"
+        );
+        assert_eq!(
+            restarted.store().anchor_bindings().unwrap(),
+            [AnchorBinding {
+                source: new.clone(),
+                ..binding
+            }]
+        );
+        assert_eq!(*harness.port.joined.lock().unwrap(), [B]);
+    }
+}
+
+fn saved_source(f: &Fixture) -> Harness {
+    let source = f.binding.source.clone();
+    let bytes = std::fs::read(&source.path).unwrap();
+    let harness = Harness::build(|_| {
+        vec![InitSource {
+            source_id: source,
+            delivery_start: bytes.len() as u64,
+            prefix_hash: hex::encode(sha2::Sha256::digest(&bytes)),
+        }]
+    });
     harness.gate.acquired();
-    let (mut writer, anchors) = (harness.writer(), Anchors::default());
+    harness
+}
+
+fn commit_refresh(bindings: &FakeBindings, old: &SourceId, new: &SourceId) {
+    let mut event = bound(
+        2,
+        Some(old),
+        BindingTarget::Source(new.clone()),
+        BindingCause::SameSessionVerified,
+        None,
+    );
+    let BindingRecord::Bound { evidence, .. } = &mut event.record else {
+        unreachable!();
+    };
+    evidence.hook_event = "stop".into();
+    bindings.commit(event);
+}
+
+#[tokio::test]
+async fn source_rekey_keeps_the_loaded_anchor_without_registrations() {
+    let mut f = Fixture::new();
+    f.register("a", "hello A");
+    let at = append(&f, &[user("ua", "hello A"), answer("one")]);
+    let harness = saved_source(&f);
+    let mut writer = harness.writer();
+    let bindings = startup_log(&mut writer);
+    let provider = ShadowProvider::Claude;
+    let mut sources =
+        Sources::new(harness.channel_id, provider, bindings.clone()).with_native_inputs(true);
+    let anchors = sources.reply_anchors().unwrap();
     writer.attach_reply_anchors(anchors.clone());
-    settle(&f, &anchors, &persisted);
+    sources
+        .resume(
+            &mut writer,
+            &mut UnitDeriver::new(harness.channel_id, provider),
+            &mut std::collections::VecDeque::new(),
+        )
+        .unwrap();
+    sources.follow(&mut writer).unwrap();
+    settle(&f, &anchors, &registrations(&f, &[("a", A)]));
     assert_eq!(
-        writer.deliver(&piece(&f, "receipted", at.clone())).await,
+        writer.deliver(&piece(&f, "first", at.clone())).await,
         Step::Done
     );
     assert_eq!(*harness.port.reply_to.lock().unwrap(), [Some(A)]);
-    drop(writer);
-    let (mut restarted, anchors) = (harness.writer(), Anchors::default());
-    restarted.attach_reply_anchors(anchors.clone());
+
+    let old = f.binding.source.clone();
+    let _device = renumber::shift(&old.path, 1 << 40);
+    f.binding.source.dev ^= 1 << 40;
+    commit_refresh(&bindings, &old, &f.binding.source);
+    sources.follow(&mut writer).unwrap();
     settle(&f, &anchors, &[]);
-    assert_eq!(
-        restarted.deliver(&piece(&f, "recorded", at)).await,
-        Step::Done
-    );
+    assert_eq!(writer.deliver(&piece(&f, "second", at)).await, Step::Done);
     assert_eq!(*harness.port.reply_to.lock().unwrap(), [Some(A), Some(A)]);
+}
+
+#[tokio::test]
+async fn source_rekey_moves_the_owed_reply_coordinate() {
+    let mut f = Fixture::new();
+    let at = append(&f, &[user("ua", "hello A"), answer("one")]);
+    let harness = saved_source(&f);
+    let mut writer = harness.writer();
+    let bindings = startup_log(&mut writer);
+    let provider = ShadowProvider::Claude;
+    let sources =
+        Sources::new(harness.channel_id, provider, bindings.clone()).with_native_inputs(true);
+    let anchors = sources.reply_anchors().unwrap();
+    writer.attach_reply_anchors(anchors.clone());
+    let deriver = UnitDeriver::new(harness.channel_id, provider);
+    let mut actor = Actor::new_for_test(writer, deriver, sources, bindings.clone());
+    actor.refresh_for_test(provider).await.unwrap();
+    actor.resume_sources_for_test().unwrap();
+    actor.read_sources_for_test();
+    assert!(!actor.writer_for_test().is_stopped());
+    actor
+        .owed_mut_for_test()
+        .push_back(piece(&f, "owed", at.clone()));
+    let Derived::Piece(mut fixed) = piece(&f, "fixed", at.clone()) else {
+        unreachable!();
+    };
+    fixed.reply = Some(ReplyRef::Fixed(B));
+    actor.owed_mut_for_test().push_back(Derived::Piece(fixed));
+
+    let old = f.binding.source.clone();
+    let _device = renumber::shift(&old.path, 1 << 40);
+    f.binding.source.dev ^= 1 << 40;
+    commit_refresh(&bindings, &old, &f.binding.source);
+    actor.refresh_for_test(provider).await.unwrap();
+    actor.read_sources_for_test();
+    assert!(!actor.writer_for_test().is_stopped());
+    assert_eq!(
+        actor
+            .writer_mut_for_test()
+            .store()
+            .binding_checkpoint()
+            .unwrap(),
+        Some(2)
+    );
+    anchors.settle(&f.binding.source, (at.end, String::new()), || {
+        Ok(vec![RunAnchor {
+            opener: Some(A),
+            ..RunAnchor::opened(at.start)
+        }])
+    });
+    let works: Vec<_> = actor.owed_mut_for_test().drain(..).collect();
+    assert_eq!(works.len(), 2);
+    for work in works {
+        assert_eq!(actor.writer_mut_for_test().deliver(&work).await, Step::Done);
+    }
+    assert_eq!(*harness.port.reply_to.lock().unwrap(), [Some(A), Some(B)]);
 }
