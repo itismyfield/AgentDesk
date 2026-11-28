@@ -5,13 +5,13 @@ use std::{
     path::Path,
 };
 
-pub(in crate::services::discord) struct CheckpointLock {
+pub struct CheckpointLock {
     handle: Handle,
-    pub(in crate::services::discord) created: bool,
+    pub created: bool,
 }
 
 impl CheckpointLock {
-    pub(in crate::services::discord) fn acquire(path: &Path, blocking: bool) -> io::Result<Self> {
+    pub fn acquire(path: &Path, blocking: bool) -> io::Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }

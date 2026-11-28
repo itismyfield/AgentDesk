@@ -680,7 +680,7 @@ fn remove_link_or_path(path: &Path) -> Result<(), String> {
 }
 
 /// Accept the lowercase hexadecimal Git object names used by review markers.
-pub(crate) fn is_valid_commit_sha(commit: &str) -> bool {
+pub fn is_valid_commit_sha(commit: &str) -> bool {
     let len = commit.len();
     (7..=64).contains(&len)
         && commit
@@ -694,7 +694,7 @@ fn remove_file_idempotent(path: &Path) -> Result<(), String> {
         .map_err(|error| format!("Failed to remove '{}': {error}", path.display()))
 }
 
-pub(crate) fn remove_file_if_present(path: &Path) -> std::io::Result<bool> {
+pub fn remove_file_if_present(path: &Path) -> std::io::Result<bool> {
     match fs::remove_file(path) {
         Ok(()) => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -719,7 +719,7 @@ fn remove_dir_all_idempotent(path: &Path) -> Result<(), String> {
         .map_err(|error| format!("Failed to remove '{}': {error}", path.display()))
 }
 
-pub(crate) fn remove_dir_all_if_present(path: &Path) -> std::io::Result<bool> {
+pub fn remove_dir_all_if_present(path: &Path) -> std::io::Result<bool> {
     match fs::remove_dir_all(path) {
         Ok(()) => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),

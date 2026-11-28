@@ -5,7 +5,7 @@ pub use crate::domain::file_sync::{PARENT_DIR_FSYNC_FLUSHES, fsync_parent_dir};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub(in crate::services::discord) mod checkpoint_lock;
+pub mod checkpoint_lock;
 pub mod completed_turn_ledger_model;
 mod durable_ancestors;
 pub mod durable_publish;
