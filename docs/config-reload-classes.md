@@ -186,7 +186,7 @@ seconds with content comparison, independently of native filesystem notification
 | `memory.backend` | live | `src/runtime_layout/mod.rs` load_memory_backend (validated snapshot for the runtime root; disk only before publication or for another root) via services/discord/settings/memory.rs:configured_memory_backend_name |
 | `memory.file.sak_path` | live | `src/runtime_layout/mod.rs` load_memory_backend (validated snapshot for the runtime root; disk only before publication or for another root) via runtime_layout/mod.rs:shared_agent_knowledge_path |
 | `memory.file.sam_path` | live | `src/runtime_layout/mod.rs` memory_backend_from_config (no daemon reader) |
-| `memory.file.ltm_root` | live | `src/runtime_layout/mod.rs` load_memory_backend (validated snapshot for the runtime root; disk only before publication or for another root) via runtime_layout/mod.rs:long_term_memory_root |
+| `memory.file.ltm_root` | live | `src/runtime_layout/mod.rs` ensure_layout_dirs (load_memory_backend reads the validated snapshot for the runtime root; disk only before publication or for another root) |
 | `memory.file.auto_memory_root` | live | `src/runtime_layout/mod.rs` memory_backend_from_config (no daemon reader) |
 | `memory.mcp.endpoint` | live | `src/runtime_layout/mod.rs` load_memory_backend (validated snapshot for the runtime root; disk only before publication or for another root) via services/memory/memento.rs:runtime_config |
 | `memory.mcp.access_key_env` | live | `src/runtime_layout/mod.rs` load_memory_backend (validated snapshot for the runtime root; disk only before publication or for another root) via services/memory/memento.rs:runtime_config |

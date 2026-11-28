@@ -8,6 +8,9 @@
 use serde::{Deserialize, Serialize};
 
 use super::AbortedAnchorMarker;
+use crate::services::maintenance::runtime_retention;
+use crate::services::provider::ProviderKind;
+use std::{fs, io};
 
 // ---------------------------------------------------------------------------
 // Durable store (mirrors `tui_direct_pending_start`'s store + atomic writes)
@@ -127,6 +130,33 @@ pub(super) fn reload(marker: &AbortedAnchorMarker) -> Option<AbortedAnchorMarker
     let path = root.join(format!("{}.json", marker.file_stem()));
     let text = std::fs::read_to_string(&path).ok()?;
     serde_json::from_str(&text).ok()
+}
+
+pub(in crate::services::discord) fn holds_for_retention(
+    provider: &ProviderKind,
+    channel: u64,
+    anchor: u64,
+) -> io::Result<bool> {
+    let root = root().ok_or_else(|| io::Error::other("abort marker root unavailable"))?;
+    let provider = provider.as_str();
+    let path = root.join(format!("{provider}_{channel}_{anchor}.json"));
+    if runtime_retention::checked_owner_file(&path, |record: &AbortedAnchorMarker| {
+        record.provider == provider
+            && record.channel_id == channel
+            && record.anchor_message_id == anchor
+    })? {
+        return Ok(true);
+    }
+
+    // Check after the live path so a concurrent quarantine cannot hide evidence.
+    match fs::symlink_metadata(path.with_extension("json.bad")) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "quarantined abort marker",
+        )),
+    }
 }
 
 /// Markers scoped to one `(provider, channel)` — the terminal-commit drain's

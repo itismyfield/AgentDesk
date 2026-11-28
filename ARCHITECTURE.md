@@ -47,6 +47,7 @@ src/
 │   │   │   ├── config_dir_checks.rs
 │   │   │   ├── configuration_audit.rs
 │   │   │   ├── configuration_audit_tests.rs
+│   │   │   ├── disk_usage.rs
 │   │   │   ├── dispatch_outbox.rs
 │   │   │   ├── dispatch_outbox_tests.rs
 │   │   │   ├── fd_usage.rs
@@ -71,20 +72,6 @@ src/
 │   │   ├── orchestrator.rs
 │   │   ├── provider_cli_name.rs
 │   │   └── startup.rs
-│   ├── migrate/
-│   │   ├── apply/
-│   │   │   ├── agent_assets.rs
-│   │   │   ├── discord_auth.rs
-│   │   │   ├── fingerprint.rs
-│   │   │   ├── fs_write.rs
-│   │   │   ├── org_updates.rs
-│   │   │   ├── phase_state.rs
-│   │   │   ├── secrets.rs
-│   │   │   └── sessions.rs
-│   │   ├── apply.rs
-│   │   ├── apply_config_tests.rs
-│   │   ├── plan.rs
-│   │   └── source.rs
 │   ├── provider_cli/
 │   │   └── mod.rs
 │   ├── args.rs
@@ -115,7 +102,6 @@ src/
 │   ├── init.rs
 │   ├── intake_outbox.rs
 │   ├── json_output.rs
-│   ├── migrate.rs
 │   ├── mod.rs
 │   ├── monitoring.rs
 │   ├── o.rs
@@ -1643,6 +1629,7 @@ src/
 │   │   │   │   └── scanner_progress_tests.rs
 │   │   │   ├── absorbed_active_tests.rs
 │   │   │   ├── api.rs
+│   │   │   ├── checkpoint_retention.rs
 │   │   │   ├── claim_cas_tests.rs
 │   │   │   ├── classification.rs
 │   │   │   ├── classification_order_tests.rs
@@ -2144,6 +2131,8 @@ src/
 │   │   │   ├── stall_recovery_tests/
 │   │   │   │   ├── flake_isolation_4361.rs
 │   │   │   │   └── flake_isolation_4422.rs
+│   │   │   ├── store/
+│   │   │   │   └── response_offset_observation.rs
 │   │   │   ├── anchor_repost.rs
 │   │   │   ├── budget.rs
 │   │   │   ├── circuit_evidence_tests.rs
@@ -3008,6 +2997,7 @@ src/
 │   │   │   ├── spawns_tests.rs
 │   │   │   └── startup_doctor.rs
 │   │   ├── runtime_store/
+│   │   │   ├── checkpoint_lock.rs
 │   │   │   ├── completed_turn_ledger_model.rs
 │   │   │   ├── durable_ancestors.rs
 │   │   │   ├── durable_ancestors_tests.rs
@@ -3836,6 +3826,8 @@ src/
 │   │   │   ├── unknown_notice_store.rs
 │   │   │   └── unknown_notice_tests.rs
 │   │   ├── turn_view_reconciler/
+│   │   │   ├── orphan_sweep/
+│   │   │   │   └── intake.rs
 │   │   │   ├── anchor_completion.rs
 │   │   │   ├── api.rs
 │   │   │   ├── apply.rs
@@ -4248,6 +4240,9 @@ src/
 │   │   │   │   ├── queue_and_dispatch.rs
 │   │   │   │   ├── record_caps.rs
 │   │   │   │   └── record_caps_reader_pg_tests.rs
+│   │   │   ├── tmp_pipeline_sweep/
+│   │   │   │   ├── cgb2.rs
+│   │   │   │   └── runtime_results.rs
 │   │   │   ├── db_retention.rs
 │   │   │   ├── hang_dump_cleanup.rs
 │   │   │   ├── memento_consolidation.rs
@@ -4255,7 +4250,8 @@ src/
 │   │   │   ├── target_sweep.rs
 │   │   │   ├── tmp_pipeline_sweep.rs
 │   │   │   └── worktree_orphan_sweep.rs
-│   │   └── mod.rs
+│   │   ├── mod.rs
+│   │   └── runtime_retention.rs
 │   ├── manual_steer/
 │   │   ├── action_handle.rs
 │   │   ├── admission_intent.rs

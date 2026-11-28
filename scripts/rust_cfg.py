@@ -34,6 +34,7 @@ from __future__ import annotations
 import dataclasses
 import re
 from collections.abc import Callable, Iterable, Iterator
+from itertools import product
 from pathlib import Path
 
 try:
@@ -156,16 +157,24 @@ def _is_test_support_feature(node: _CfgNode) -> bool:
     return node.kind == "atom" and node.name == "feature" and node.value == TEST_SUPPORT_FEATURE
 
 
+def _cfg_atoms(node: _CfgNode) -> Iterator[_CfgNode]:
+    if node.kind == "atom":
+        yield node
+    for child in node.children:
+        yield from _cfg_atoms(child)
+
+
 def _cfg_eval(
-    node: _CfgNode, values: dict[int, bool], test_enabled: bool, feature_enabled: bool | None = False
+    node: _CfgNode, atom_value: Callable[[_CfgNode], bool],
+    test_enabled: bool, feature_enabled: bool | None = False,
 ) -> bool:
     if node.kind == "atom":
         if node.name == "test":
             return test_enabled
         if _is_test_support_feature(node) and feature_enabled is not None:
             return feature_enabled
-        return values[id(node)]
-    children = (_cfg_eval(child, values, test_enabled, feature_enabled) for child in node.children)
+        return atom_value(node)
+    children = (_cfg_eval(child, atom_value, test_enabled, feature_enabled) for child in node.children)
     if node.kind == "all":
         return all(children)
     if node.kind == "any":
@@ -180,29 +189,48 @@ def _can_be_true_without_test(node: _CfgNode, feature_aware: bool = True) -> boo
 
     With ``feature_aware`` off the feature is an ordinary atom: the old rule, kept under any join.
     """
-    unknowns: list[_CfgNode] = []
-
-    def collect(current: _CfgNode) -> None:
-        if current.kind == "atom":
-            if current.name != "test" and not (feature_aware and _is_test_support_feature(current)):
-                unknowns.append(current)
-            return
-        for child in current.children:
-            collect(child)
-
-    collect(node)
+    unknowns = [atom for atom in _cfg_atoms(node)
+                if atom.name != "test" and not (feature_aware and _is_test_support_feature(atom))]
     if len(unknowns) > 12:
         return True
     for mask in range(1 << len(unknowns)):
         values = {
             id(atom): bool(mask & (1 << bit)) for bit, atom in enumerate(unknowns)
         }
+
+        def atom_value(atom: _CfgNode) -> bool:
+            return values[id(atom)]
+
         feature = False if feature_aware else None
-        if _cfg_eval(node, values, False, feature):
+        if _cfg_eval(node, atom_value, False, feature):
             return True
-        if feature_aware and _cfg_eval(node, values, False, True) and not _cfg_eval(node, values, True):
+        if feature_aware and _cfg_eval(node, atom_value, False, True) and not _cfg_eval(node, atom_value, True):
             return True
     return False
+
+
+def _missing_from_dependency_test(node: _CfgNode) -> bool:
+    unknowns = tuple(dict.fromkeys(
+        (atom.name, atom.value) for atom in _cfg_atoms(node)
+        if atom.name != "test" and not _is_test_support_feature(atom)
+    ))
+    if len(unknowns) > 12:
+        return False
+    unit_test_reachable = False
+    for bits in product((False, True), repeat=len(unknowns)):
+        values = dict(zip(unknowns, bits))
+
+        def atom_value(atom: _CfgNode) -> bool:
+            return values[atom.name, atom.value]
+
+        if _cfg_eval(node, atom_value, test_enabled=False, feature_enabled=True):
+            return False
+        unit_test_reachable = (
+            unit_test_reachable
+            or _cfg_eval(node, atom_value, test_enabled=True, feature_enabled=False)
+            or _cfg_eval(node, atom_value, test_enabled=True, feature_enabled=True)
+        )
+    return unit_test_reachable
 
 
 def _feature_dependent(node: _CfgNode) -> bool:
@@ -232,14 +260,18 @@ def parse_cfg_condition(expression: str) -> _CfgNode | None:
     return _parse_cfg_expression(_strip_comments(expression))
 
 
-def cfg_requires_test(expression: str, *, strict: bool = False) -> bool:
+def cfg_requires_test(expression: str, *, strict: bool = False, dependency_test: bool = False) -> bool:
     """Return whether a raw cfg predicate cannot hold with ``test`` disabled.
 
     ``strict=True`` asks the narrower question a crate cut needs, whether the item
     is missing from a dependency build, where the test-support feature can be on.
+    ``dependency_test=True`` finds predicates reachable in a unit test but absent
+    with test-support on and ``test`` off, sharing values for repeated predicates.
     """
 
     parsed = parse_cfg_condition(expression)
+    if dependency_test:
+        return parsed is not None and _missing_from_dependency_test(parsed)
     return parsed is not None and not _can_be_true_without_test(parsed, feature_aware=not strict)
 
 

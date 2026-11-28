@@ -680,10 +680,6 @@ agentdesk api GET /api/health                    # Call any API endpoint
 agentdesk deploy                                 # Build workspace + promote to release
 ```
 
-`migrate postgres-cutover` was retired after the production cutover landed
-(2026-04-19); restore `src/cli/migrate/postgres_cutover.rs` (removed) from history only
-for an explicitly approved emergency re-cutover.
-
 ## API Overview
 
 AgentDesk exposes 270 REST API endpoints. Key groups:
