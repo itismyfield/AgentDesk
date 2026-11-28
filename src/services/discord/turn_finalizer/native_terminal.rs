@@ -48,7 +48,7 @@ fn read_tail(source: &Source, tail: &Tail) -> Result<(Vec<u8>, std::fs::File), S
 }
 
 #[cfg(any(test, feature = "test-support"))]
-#[path = "native_read_hook_tests.rs"]
+#[path = "native_read_hook_test_support.rs"]
 pub(in crate::services::discord) mod read_probe;
 
 pub(in crate::services::discord::turn_finalizer) fn read_tail_with(

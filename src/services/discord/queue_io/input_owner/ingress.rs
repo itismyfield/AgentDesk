@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 tokio::task_local! { static EXISTING_RETRY: bool; static NOTICE_CLAIMED: bool; }
 #[cfg(any(test, feature = "test-support"))]
-#[path = "ingress_hook_tests.rs"]
+#[path = "ingress_hook_test_support.rs"]
 mod ingress_hook_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use ingress_hook_tests::{ADOPTS, BEFORE_INGRESS_HOLD, BEFORE_RESUME};

@@ -202,9 +202,10 @@ mod dl_turn_bridge_test_host;
 #[cfg(all(test, unix))]
 mod dl_turn_bridge_unix_test_host;
 #[cfg(test)]
+#[path = "dl_turn_finalizer_test_host.rs"]
 mod dl_turn_finalizer_tests;
 #[cfg(all(test, unix))]
-mod dl_turn_finalizer_unix_tests;
+mod dl_turn_finalizer_unix_test_host;
 #[cfg(test)]
 mod dl_turn_presence_test_host;
 #[cfg(all(test, unix))]

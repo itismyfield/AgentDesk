@@ -7,5 +7,5 @@ mod decision_drain_tests;
 mod residue_tests;
 
 #[cfg(unix)]
-#[path = "queue_io/input_owner/claude_handoff_tests.rs"]
+#[path = "queue_io/input_owner/claude_handoff/tests/actual_close_tests.rs"]
 mod claude_handoff_tests;

@@ -623,7 +623,7 @@ fn busy_output_ready(channel: u64) -> bool {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-#[path = "claude_handoff_hook_tests.rs"]
+#[path = "claude_handoff_hook_test_support.rs"]
 pub(in crate::services::discord) mod hook_tests;
 
 #[cfg(any(test, feature = "test-support"))]

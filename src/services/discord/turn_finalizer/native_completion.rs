@@ -13,7 +13,7 @@ use poise::serenity_prelude::MessageId;
 use std::io::{Read, Seek, SeekFrom};
 
 #[cfg(any(test, feature = "test-support"))]
-#[path = "native_completion_hook_tests.rs"]
+#[path = "native_completion_hook_test_support.rs"]
 pub(in crate::services::discord) mod hook_tests;
 
 /// Records an executed primary's completion once its result is durable and before its row CAS.

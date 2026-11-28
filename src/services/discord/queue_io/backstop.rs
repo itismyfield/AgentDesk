@@ -1,5 +1,5 @@
 #[cfg(any(test, feature = "test-support"))]
-#[path = "backstop_hook_tests.rs"]
+#[path = "backstop_hook_test_support.rs"]
 pub(in crate::services::discord) mod hook_tests;
 
 use super::auto_queue_eligibility::{QueuedReach, queued_reach};

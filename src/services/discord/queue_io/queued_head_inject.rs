@@ -1,5 +1,5 @@
 #[cfg(all(unix, any(test, feature = "test-support")))]
-#[path = "queued_head_inject_hook_tests.rs"]
+#[path = "queued_head_inject_hook_test_support.rs"]
 pub(in crate::services::discord) mod hook_tests;
 
 use std::time::Duration;

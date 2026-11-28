@@ -46,7 +46,7 @@ tokio::task_local! {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-#[path = "queue_io/idle_queue_kick_hook_tests.rs"]
+#[path = "queue_io/idle_queue_kick_hook_test_support.rs"]
 mod idle_queue_kick_hook_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub(in crate::services::discord) use idle_queue_kick_hook_tests::{
