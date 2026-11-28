@@ -35,7 +35,7 @@ main에 이미 있는 canonical identity/alias·channel ID 기반 inflight 파�
 tmux에는 compact JSON **한 개 `AGENTDESK_IDENTITY` 세션 환경 변수**를 `new-session -e AGENTDESK_IDENTITY=<json>`으로 생성과 동시에 저장한다. owner_scope 해시·채널 ID는 비밀이 아니다. 예시는 fixture이며 운영 값이 아니다. layout 선택은 이 JSON에 의존하지 않는다.
 
 ```json
-{"v":1,"owner_scope":"<sha256(runtime-root|execution-node)>","provider":"claude","token_namespace":"<existing token_hash>","channel_id":"1479671298497183835","parent_channel_id":null,"thread_id":null,"identity_kind":"discord_channel","name_kind":"channel","session_record_id":null,"logical_key":"<current primary key>","spawn_nonce":"<32hex>","display_name":"스마트홈-cc"}
+{"v":1,"owner_scope":"<sha256(runtime-root|execution-node)>","provider":"claude","token_namespace":"<existing token_hash>","channel_id":"example-id-19d-04","parent_channel_id":null,"thread_id":null,"identity_kind":"discord_channel","name_kind":"channel","session_record_id":null,"logical_key":"<current primary key>","spawn_nonce":"<32hex>","display_name":"스마트홈-cc"}
 ```
 
 DB `identity_kind`는 현 `discord_channel`/`scheduled_snapshot`을 유지한다(`db/dispatched_sessions/canonical_identity.rs:4-27`). `name_kind`는 이름 입력/metadata의 분류이며 DB enum 확장이 아니다. row ID는 기존 launch/hook 순서상 optional이고, 기존 launch admission·binding context/nonce로 최초 소유를 입증한다.
@@ -400,7 +400,7 @@ Rust 밖 시험 후보: dashboard `AgentDesk-` fixture **7행 / 2파일**, polic
 | `src/services/discord/inflight/store.rs:576`; `native_stop_pin.rs:49`, `:102`, `:125`; `managed_submission.rs:287`; `managed_submission/evidence.rs:40`; `status_panel_orphan_store.rs:120` | turn re-save / stop pin / admitted input / orphan panel의 actual name 동일성 | name alias를 무조건 허용하면 다른 pane/후속 turn stop·삭제 | 실제 name 유지, 기존 nonce/offset/name conjunction 유지. 신규 descriptor alias를 이 비교 함수로 주입하지 않음 |
 | `src/services/discord/inflight/host_locator.rs:19`, `:32`, `:72` | explicit host kind/session ID/pane/execution_node. unknown JSON은 원문 보존 | unknown/present-null을 absent로 해석하면 tmux fallback 확대 | 이미 존재하는 Known/Unknown/Absent 의미 보존. #8119에서 hosted locator schema나 downgrade 정책 수정 불필요 |
 | `src/services/tmux_common.rs:1113`, `:1134`, `:1153`, `:1167`, `:1233`, `:1278`, `:1283` | canonical persistent/legacy tmp 경로 prefix가 `<runtime hash>-<host>-<actual name>`; 확장자 jsonl/input/prompt/owner/sh/generation/auth_profile/auth_session/spawn_nonce/exit_reason/runtime_kind/channel/dead/hook settings/launch script/rollout/codex home | rename하면 open FD와 새 path가 갈라져 output·FIFO·auth·nonce 분실; cleanup도 옛 파일 누락 | 살아 있는 모든 path는 기존 actual name으로 계속 읽고 쓰기. 이미 canonical persistent + legacy tmp dual-location reader 있음; **이름의 migration과 위치 migration을 혼동하지 않음**. 새 이름은 신규 wrapper만. NFC normalize는 신규 name 생성에만, 과거 path/key는 byte 그대로 유지 |
-| `src/services/tmux_common/session_markers.rs:9`, `:24`, `:37`, `:58`, `:86`, `:157`; `tmux_common/host_marker.rs:12` | auth/profile/native session/runtime/host sidecar가 이름으로 조회 | rename 또는 name-based 추정만으로 auth evidence 약화 | old actual name으로 읽고 새 spawn에서만 새 marker. missing/unreadable/foreign를 success로 바꾸지 않음; existing marker는 ownership 판정의 legacy 증거로 사용 가능 |
+| `src/services/tmux_common/session_markers.rs:9`, `:21`, `:31`, `:52`, `:80`, `:144`; `tmux_common/host_marker.rs:12` | auth/profile/native session/runtime/host sidecar가 이름으로 조회 | rename 또는 name-based 추정만으로 auth evidence 약화 | old actual name으로 읽고 새 spawn에서만 새 marker. missing/unreadable/foreign를 success로 바꾸지 않음; existing marker는 ownership 판정의 legacy 증거로 사용 가능 |
 | `src/services/tmux_common/runtime_hint_fence.rs` (name keyed fence); `src/services/provider/cancel_token_cleanup/authority.rs:8`, `:46`, `:90` | source authority·runtime file fence·cancel generation slot `(provider, name)` | rename하면 두 슬롯/두 fence로 분열, stale cancel 허용 가능 | live name 변경 금지. 새 ownership 표식 검사 후 **실제 target name**으로 기존 fence를 잡음. provider parse 비교는 metadata 공급으로 교체하되 generation checks는 유지 |
 | `src/services/tui_prompt_dedupe.rs:233`~`:291`, `:328`; `runtime_binding/binding_access.rs:71`, `:97`, `:150`; `state.rs:89` | name keyed pending/observation/channel/runtime/anchor/native-turn/relay lease/steer/handoff/restore maps; provider-session→name reverse map | rename은 pending·relay lease·binding·dedup를 분리, hook context mismatch | 모든 map은 actual name을 유지. new preferred→actual resolver는 map 진입 **앞**에서만; map 자체에 두 키로 복제 금지. 중복 전달·stale capability 방지 |
 | `src/services/tui_prompt_dedupe/binding_context.rs:21`, `:68`, `:98`; `runtime_binding/binding_access.rs:71` | immutable context JSON path는 `<provider>/<nonce>.json` (name 불포함), 내용 tmux_session/owner root/channel/provider/host/expected native ID | live rename은 immutable context.tmux_session과 authority.session 불일치 | context 불변 유지. 새 name은 새 nonce context로만. provider/channel/ownership metadata의 좋은 대체 근거이나 context를 mutable alias registry로 변형하지 않음 |
@@ -566,7 +566,7 @@ S2 거절 경계 델타: registration CAS 거절은 name-only cleanup과 분리�
 | `dashboard/src/components/session-panel/SessionPanelModel.ts:41`, `:47-49` | name 우선. name 없으면 `Session ${key.slice(0,8)}`로 축약, full에는 key. | 실제 name/label 제공; React 문자열 그대로 표시. emoji supplementary char 포함 byte/UTF-16 절단 fixture 검토. |
 | `dashboard/src/components/session-panel/SessionInfoCard.tsx:33` | 전체 세션 키 문자열 표시. | escape는 React 기본 적용. 한글 문자열 UI fixture 검증. |
 | `dashboard/src/components/cluster/ClusterNodesPanel.tsx:81,84-86,96` | name/key 표시, 중지 호출에는 전체 session_key 그대로 사용. | S9에서 legacy→신규 primary 승격 뒤 중지를 호출해 **새 이름 세션이 없음**을 단언. 단순 key 전달 동일성은 성공 기준이 아님. |
-| `src/server/routes/docs/inventory/endpoints/part_01.rs:357`, `part_05.rs:458,465`, `part_06.rs:131` | API 예제의 AgentDesk-* 이름. | 새 예제와 legacy 호환 예제 구분; 생성 문서 경로로 반영. |
+| `docs/data/api-endpoints.json` | API 예제의 AgentDesk-* 이름. | 새 예제와 legacy 호환 예제 구분; 생성 문서 경로로 반영. |
 
 API·UI는 코드 조사만 수행했다. 실제 빌드/운영 API 접근을 했다고 주장하지 않는다. 부모의 격리 fixture 렌더와 함께 증거 수준을 구분해야 한다.
 
@@ -744,20 +744,20 @@ $5|𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀�
 $6|𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀-1570308839910412348
 $7|𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀-pppppppppppppppppppppppppppppppp-11111111111111111111-aaaaaaaaaaaa-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-22222222222222222222
 stderr=
-$ tmux -L i8119-probe -f /dev/null set-option -t '$0' @agentdesk_identity '{"v": 1, "provider": "claude", "channel_id": "1479671298497183835", "thread_id": null}'
+$ tmux -L i8119-probe -f /dev/null set-option -t '$0' @agentdesk_identity '{"v": 1, "provider": "claude", "channel_id": "example-id-19d-04", "thread_id": null}'
 rc=0
 stdout=
 stderr=
 $ tmux -L i8119-probe -f /dev/null show-options -qv -t '$0' @agentdesk_identity
 rc=0
-stdout={"v": 1, "provider": "claude", "channel_id": "1479671298497183835", "thread_id": null}
+stdout={"v": 1, "provider": "claude", "channel_id": "example-id-19d-04", "thread_id": null}
 stderr=
 $ tmux -L i8119-probe -f /dev/null list-sessions -F '#{session_id}|#{session_name}|#{session_name}|#{@agentdesk_identity}'
 rc=0
 stdout=$2|AgentDesk-claude-가가가가가가가가가가가가가가|AgentDesk-claude-가가가가가가가가가가가가가가|
 $3|가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가|가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가|
 $4|가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가-1570308839910412348|가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가-1570308839910412348|
-$0|스마트홈-cc|스마트홈-cc|{"v": 1, "provider": "claude", "channel_id": "1479671298497183835", "thread_id": null}
+$0|스마트홈-cc|스마트홈-cc|{"v": 1, "provider": "claude", "channel_id": "example-id-19d-04", "thread_id": null}
 $1|스마트홈-cc-1570308839910412348|스마트홈-cc-1570308839910412348|
 $5|𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀|𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀|
 $6|𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀-1570308839910412348|𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀-1570308839910412348|

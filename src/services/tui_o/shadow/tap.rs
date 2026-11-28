@@ -13,7 +13,7 @@ pub struct TuiOConfig {
 
 impl TuiOConfig {
     /// The section as configured, or its defaults when the config has none.
-    pub(crate) fn or_default(section: Option<&TuiOConfig>) -> &TuiOConfig {
+    pub fn or_default(section: Option<&TuiOConfig>) -> &TuiOConfig {
         static DEFAULT: std::sync::LazyLock<TuiOConfig> =
             std::sync::LazyLock::new(Default::default);
         section.unwrap_or(&DEFAULT)
@@ -62,7 +62,7 @@ impl WriterChannelsConfig {
         self.all_tui.unwrap_or(self.channels.is_empty())
     }
 
-    pub(crate) fn late_adopt(&self) -> bool {
+    pub fn late_adopt(&self) -> bool {
         self.late_adopt.unwrap_or(true)
     }
 }

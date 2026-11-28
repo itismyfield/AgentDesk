@@ -32,7 +32,7 @@ mod retry_state;
 mod runtime_handoff_loop;
 mod single_message_footer;
 mod skill_usage;
-pub(in crate::services::discord) mod stale_resume;
+pub(in crate::services::discord) use adk_runtime::services::discord::turn_bridge::stale_resume;
 
 pub(in crate::services::discord) mod native_input;
 mod status_panel;

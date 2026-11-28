@@ -71,7 +71,7 @@ async fn hosted(
     row: &InflightTurnState,
     (nonce, state): (&str, HostedState),
 ) {
-    use crate::db::dispatched_sessions::hosted_execution::tests::{record, wire};
+    use crate::db::dispatched_sessions::hosted_execution::test_support::{record, wire};
     let (provider, channel) = (row.provider.as_str(), row.channel_id.to_string());
     let owner = owner(provider, &channel, token_hash);
     let mut record = record(&owner, nonce, state);
@@ -232,7 +232,7 @@ async fn cold_start_file_is_pinned_at_its_first_own_record_pg() {
         assert!(state.record_turn_start(HerdrTurnStart::at_end_of(nonce, &path, Some(at))));
         let unpinned = load_inflight_state(&provider, channel).unwrap();
         std::fs::write(&path, &prompt).unwrap();
-        state.source_observed(identity(&path));
+        state.source_observed_for_test(identity(&path));
         // A stale unpinned snapshot and one naming another file both keep the first pin.
         let mut other = load_inflight_state(&provider, channel).unwrap();
         other.herdr_turn_start.as_mut().unwrap().start.file = Some((0, 0));

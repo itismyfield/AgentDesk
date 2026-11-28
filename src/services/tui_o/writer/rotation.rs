@@ -87,6 +87,9 @@ struct Validation {
 }
 
 pub struct Sources<B> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub replayed: super::ReplaySummary,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) replayed: super::ReplaySummary,
     native: Option<owe::NativeSources>,
     channel: u64,
@@ -243,7 +246,7 @@ fn hop<'a>(
     (old != new).then_some((old, new))
 }
 
-pub(super) fn bound_source(event: &BindingEvent) -> Option<&SourceId> {
+pub fn bound_source(event: &BindingEvent) -> Option<&SourceId> {
     match &event.record {
         BindingRecord::Bound {
             new: BindingTarget::Source(source),
@@ -255,7 +258,7 @@ pub(super) fn bound_source(event: &BindingEvent) -> Option<&SourceId> {
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn bound_source_for_test(event: &BindingEvent) -> Option<&SourceId> {
+pub fn bound_source_for_test(event: &BindingEvent) -> Option<&SourceId> {
     bound_source(event)
 }
 
@@ -875,7 +878,7 @@ impl<B: BindingEvents> Sources<B> {
     }
 }
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod probe {
+pub mod probe {
     //! Reads a live reader's rotation start, which no store row or alarm shows.
     use super::{Instant, SourceId, Sources};
 
@@ -886,7 +889,7 @@ pub(crate) mod probe {
         let reader = sources.readers.iter().find(|r| r.source == *source);
         reader.map(|r| r.rotated_at)
     }
-    pub(crate) fn reading<B>(sources: &Sources<B>, source: &SourceId) -> bool {
+    pub fn reading<B>(sources: &Sources<B>, source: &SourceId) -> bool {
         sources
             .readers
             .iter()
@@ -912,16 +915,16 @@ pub(crate) mod probe {
             .quiet
             .is_some()
     }
-    pub(crate) fn validating<B>(sources: &Sources<B>) -> bool {
+    pub fn validating<B>(sources: &Sources<B>) -> bool {
         sources.validation.is_some()
     }
-    pub(crate) fn jobs_started<B>(sources: &Sources<B>) -> usize {
+    pub fn jobs_started<B>(sources: &Sources<B>) -> usize {
         sources.jobs_started
     }
     pub(crate) fn hold_validation<B>(sources: &mut Sources<B>, hold: bool) {
         sources.hold_validation = hold;
     }
-    pub(crate) fn ready<B>(sources: &Sources<B>) -> bool {
+    pub fn ready<B>(sources: &Sources<B>) -> bool {
         sources
             .validation
             .as_ref()

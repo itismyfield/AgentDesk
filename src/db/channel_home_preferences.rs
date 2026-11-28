@@ -7,7 +7,7 @@ use crate::domain::cluster_policy::AgentExecutionNode;
 use crate::domain::intake_identity::OwnerIdentity;
 
 #[derive(Clone, Debug, PartialEq, Eq, sqlx::FromRow)]
-pub(crate) struct Preference {
+pub struct Preference {
     pub mode: String,
     pub home_instance_id: Option<String>,
     pub revision: i64,
@@ -15,14 +15,14 @@ pub(crate) struct Preference {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum WriteOutcome {
+pub enum WriteOutcome {
     Applied(Preference),
     Reused(Preference),
     Conflict(Option<Preference>),
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum WriteError {
+pub enum WriteError {
     #[error("invalid home preference: {0}")]
     Invalid(&'static str),
     #[error("operation id was reused for a different home write")]
@@ -31,7 +31,7 @@ pub(crate) enum WriteError {
     Storage(#[from] sqlx::Error),
 }
 
-pub(crate) async fn read(
+pub async fn read(
     pool: &PgPool,
     identity: &OwnerIdentity,
 ) -> Result<Option<Preference>, sqlx::Error> {
@@ -40,8 +40,8 @@ pub(crate) async fn read(
 }
 
 /// Revision zero means no row. A reset writes inherit rather than deleting the row.
-#[cfg(test)]
-pub(crate) async fn write(
+#[cfg(any(test, feature = "test-support"))]
+pub async fn write(
     pool: &PgPool,
     identity: &OwnerIdentity,
     expected_revision: i64,
@@ -55,7 +55,7 @@ pub(crate) async fn write(
 }
 
 /// Uses the caller's connection, including when it already holds the channel owner lock.
-pub(crate) async fn write_on_tx(
+pub async fn write_on_tx(
     tx: &mut Transaction<'_, Postgres>,
     identity: &OwnerIdentity,
     expected_revision: i64,

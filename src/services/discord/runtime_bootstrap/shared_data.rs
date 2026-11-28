@@ -468,13 +468,11 @@ mod tests {
         let original_size = pool.size();
         for configured in [None, Some(pool.clone())] {
             let policy = configured.as_ref().map(|_| {
-                let config = crate::config::Config {
-                    policies: crate::config::PoliciesConfig {
-                        dir: root.path().join("empty-policies"),
-                        hot_reload: false,
-                        ..crate::config::PoliciesConfig::default()
-                    },
-                    ..crate::config::Config::default()
+                let mut config = crate::config::Config::default();
+                config.policies = crate::config::PoliciesConfig {
+                    dir: root.path().join("empty-policies"),
+                    hot_reload: false,
+                    ..crate::config::PoliciesConfig::default()
                 };
                 crate::engine::PolicyEngine::new(&config).unwrap()
             });
@@ -625,7 +623,10 @@ mod tests {
         let canonical: &crate::services::engine_runtime::session::EngineSession = session;
         assert_eq!(canonical.session_id.as_deref(), Some("retained-session"));
         assert_eq!(canonical.pending_uploads.as_ptr(), upload_storage);
-        assert_eq!(canonical.pending_uploads[0], "retained-upload");
+        assert_eq!(
+            canonical.pending_uploads[0],
+            crate::services::cluster::attachment_transfer::uploads::Upload::from("retained-upload")
+        );
         assert_eq!(canonical.born_generation, 81);
         drop(core);
         assert!(through_engine.hard_stop().await.removed_token.is_some());

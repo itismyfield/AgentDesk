@@ -26,12 +26,19 @@ pub(crate) const CLAUDE_AUTO_COMPACT_WINDOW_ENV: &str = "CLAUDE_CODE_AUTO_COMPAC
 static LAUNCH_PROVENANCE: LazyLock<Mutex<HashMap<String, Instant>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct CompactThreshold {
-    pub actual_window_tokens: u64,
-    pub effective_tokens: u64,
-    pub rearm_floor_tokens: u64,
+mod threshold {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct CompactThreshold {
+        pub actual_window_tokens: u64,
+        pub effective_tokens: u64,
+        pub rearm_floor_tokens: u64,
+    }
 }
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use threshold::CompactThreshold;
+#[cfg(any(test, feature = "test-support"))]
+pub use threshold::CompactThreshold;
 
 /// Mark this tmux session as an AgentDesk-launched Claude pane before it can
 /// receive its first prompt. A same-name relaunch overwrites the old entry.
@@ -64,7 +71,7 @@ pub(crate) fn clear_launch_provenance_for_tmux(tmux_session_name: &str) {
 /// plus a non-empty model therefore permits only the conservative
 /// maximum-window trigger bound. `None` remains reserved for panes without
 /// managed launch provenance or usable model evidence.
-pub(crate) fn context_window_for_turn(
+pub fn context_window_for_turn(
     tmux_session_name: &str,
     current_model: Option<&str>,
 ) -> Option<u64> {

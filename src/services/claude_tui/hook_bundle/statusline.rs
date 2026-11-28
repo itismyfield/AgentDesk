@@ -47,11 +47,11 @@ if original is not None:
     sys.exit(subprocess.run(original, shell=True, input=raw).returncode)
 "#;
 
-pub(crate) fn record_dir() -> PathBuf {
+pub fn record_dir() -> PathBuf {
     std::env::temp_dir().join("agentdesk-claude-rate-limits")
 }
 
-pub(crate) fn record_path(root: &Path, session: &str) -> PathBuf {
+pub fn record_path(root: &Path, session: &str) -> PathBuf {
     root.join(format!("{:x}.json", Sha256::digest(session.as_bytes())))
 }
 

@@ -7,16 +7,19 @@ use sqlx::PgPool;
 use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum SessionRef {
+pub enum SessionRef {
     Fresh,
     Bound(Value),
 }
 
 pub struct OwnerPermit {
-    pub(crate) pool: PgPool,
-    pub(crate) identity: OwnerIdentity,
-    pub(crate) executor: String,
-    pub(crate) generation: i64,
+    pub pool: PgPool,
+    pub identity: OwnerIdentity,
+    pub executor: String,
+    pub generation: i64,
+    #[cfg(any(test, feature = "test-support"))]
+    pub session_ref: SessionRef,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) session_ref: SessionRef,
     gate: Arc<OwnershipGate>,
 }
@@ -33,7 +36,7 @@ impl std::fmt::Debug for OwnerPermit {
 }
 
 impl OwnerPermit {
-    pub(crate) fn gate(&self) -> Arc<OwnershipGate> {
+    pub fn gate(&self) -> Arc<OwnershipGate> {
         Arc::clone(&self.gate)
     }
     pub(crate) fn first_binding(&self, other: &Self) -> Option<Arc<Self>> {
@@ -54,6 +57,11 @@ impl OwnerPermit {
             gate: self.gate(),
         }))
     }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn same_execution_for_test(&self, other: &Self) -> bool {
+        self.same_execution(other)
+    }
+
     pub(crate) fn same_execution(&self, other: &Self) -> bool {
         self.identity == other.identity
             && self.executor == other.executor
@@ -63,8 +71,11 @@ impl OwnerPermit {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct View {
-    pub(crate) permit: Result<Arc<OwnerPermit>, String>,
+pub struct View {
+    pub permit: Result<Arc<OwnerPermit>, String>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub candidate: Candidate,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) candidate: Candidate,
     pub(crate) retained: Option<Arc<OwnerPermit>>,
 }
@@ -77,7 +88,7 @@ impl View {
             retained: None,
         }
     }
-    pub(crate) fn verified(&self) -> Option<Arc<OwnerPermit>> {
+    pub fn verified(&self) -> Option<Arc<OwnerPermit>> {
         self.permit
             .as_ref()
             .ok()
@@ -86,12 +97,12 @@ impl View {
     }
 }
 
-pub(crate) struct ReadError {
-    pub(crate) reason: String,
-    pub(crate) temporary: bool,
+pub struct ReadError {
+    pub reason: String,
+    pub temporary: bool,
 }
 impl ReadError {
-    pub(crate) fn temporary(reason: impl ToString) -> Self {
+    pub fn temporary(reason: impl ToString) -> Self {
         Self {
             reason: reason.to_string(),
             temporary: true,
@@ -106,7 +117,7 @@ impl ReadError {
 }
 
 /// None denotes an unmanaged channel; errors must install a held view, never Legacy.
-pub(crate) async fn read(
+pub async fn read(
     pool: &PgPool,
     provider: &str,
     channel: u64,
@@ -118,7 +129,7 @@ pub(crate) async fn read(
         .map_err(|e| e.reason)
 }
 
-pub(crate) async fn read_observation(
+pub async fn read_observation(
     pool: &PgPool,
     provider: &str,
     channel: u64,
@@ -178,13 +189,13 @@ pub(crate) async fn read_observation(
 }
 
 #[derive(Debug)]
-pub(crate) enum NativeRefFailure {
+pub enum NativeRefFailure {
     Malformed,
     Unavailable,
     Changed,
 }
 
-pub(crate) fn validate_local(
+pub fn validate_local(
     provider: &str,
     channel: u64,
     local: &str,
@@ -222,5 +233,5 @@ pub(crate) fn validate_local(
     Ok(())
 }
 
-#[cfg(test)]
-pub(crate) mod tests;
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests;

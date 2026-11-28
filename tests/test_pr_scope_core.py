@@ -13,6 +13,7 @@ def write_contracts(tmp_path):
     (scripts / "ci").mkdir(parents=True)
     (scripts / "ci/targeted-test-selectors.txt").write_text("[core]\nmod::prefix_\n=mod::exact\n")
     (scripts / "ci/pg15_required_ids.txt").write_text("mod::pg15\n")
+    (scripts / "ci/pg15_required_runtime_ids.txt").write_text("mod::pg15_runtime\n")
     (scripts / "relay_authority_contract_targets.json").write_text(json.dumps({
         "schema_version": 1,
         "lanes": [
@@ -35,7 +36,7 @@ def write_contracts(tmp_path):
     core = {("agentdesk", f"mod::{name}") for name in (
         "prefix_hit", "exact", "pg15", "relay_a", "relay_b", "mutation", "entry", "recording",
         "verified", "transport", "claim",
-    )} | {("adk-core", "mod::prefix_hit")}
+    )} | {("adk-core", "mod::prefix_hit"), ("adk-runtime", "mod::pg15_runtime")}
     return core
 
 

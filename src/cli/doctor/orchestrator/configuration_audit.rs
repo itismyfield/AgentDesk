@@ -26,7 +26,7 @@ fn prompt_api_routes_check_with_timeout(
     prompts: &Path,
     timeout: std::time::Duration,
 ) -> Check {
-    // Invoke deploy staging's checker from the same checkout as its inventory.
+    // Use the checkout's JSON inventory through the same checker as deploy staging.
     let output = std::process::Command::new("python3")
         .arg(repo.join("scripts/check_prompt_api_routes.py"))
         .arg("--repo")
@@ -99,7 +99,7 @@ fn prompt_result(code: Option<i32>, output: String) -> Check {
             CheckGroup::Core,
             "Prompt API Routes",
             detail,
-            "Inspect the runtime config/agents mirror and workspaces/agentdesk endpoint inventory; doctor only diagnoses.",
+            "Inspect the runtime config/agents mirror and the workspaces/agentdesk API endpoint JSON catalog.",
         )
     };
     check.with_subsystem("config_audit")

@@ -157,7 +157,7 @@ export function OnboardingWizardLayout(props: OnboardingWizardLayoutProps) {
               type="button"
               onClick={resetDraft}
               className={btnSmall}
-              style={{ borderColor: "rgba(248,113,113,0.3)", color: "var(--th-accent-danger)" }}
+              style={{ borderColor: "color-mix(in oklch, var(--err) 38%, var(--line))", color: "var(--th-accent-danger)" }}
             >
               {tr("임시 저장 비우기", "Clear draft")}
             </button>
@@ -169,12 +169,8 @@ export function OnboardingWizardLayout(props: OnboardingWizardLayoutProps) {
 
       {error && (
         <div
-          className="rounded-xl px-4 py-3 text-sm border"
-          style={{
-            borderColor: "rgba(248,113,113,0.4)",
-            color: "var(--th-accent-danger)",
-            backgroundColor: "rgba(127,29,29,0.2)",
-          }}
+          role="alert"
+          className="rounded-xl border border-[color-mix(in_oklch,var(--err)_42%,var(--line))] bg-[var(--err-soft)] px-4 py-3 text-sm text-[var(--err-fg)]"
         >
           {error}
         </div>

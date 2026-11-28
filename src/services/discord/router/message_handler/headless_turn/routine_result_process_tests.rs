@@ -82,7 +82,7 @@ fn assert_deferred(kind: RuntimeHandoffKind) {
         .child(THREAD.get())
         .expect("recorded child")
         .expect("verified child");
-    assert_eq!(child.parent, PRIMARY.get());
+    assert_eq!(boot.policy_channel(THREAD.get()), PRIMARY.get());
     assert_eq!(boot.kind(THREAD.get()), Some(kind));
     assert!(child.candidate.late_adopt_origin());
     assert_eq!(child.candidate.peek(), Adoption::Deferred);

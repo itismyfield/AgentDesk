@@ -4,8 +4,10 @@ use crate::services::claude_tui::host_input::{InputRefusal, InputRun};
 use crate::services::tui_prompt_dedupe::binding_events as events;
 use std::cell::Cell;
 use std::os::unix::fs::MetadataExt;
+#[cfg(test)]
 use std::rc::Rc;
 
+#[cfg(test)]
 use super::super::test_support::AFTER_RESERVE;
 
 struct ClearRig {

@@ -116,7 +116,7 @@ async fn i8372_process_claim_preserves_other_channel_and_turn_kind_decisions() {
         assert_eq!(peek(channel + 100, unproved), Ok(false));
         assert_eq!(deferred.sends(), (0, 0));
 
-        assert!(deferred.confirm_store());
+        assert!(deferred.confirm_store_for_test());
         assert!(
             peek(channel, verified).is_err(),
             "O cannot ACK a process result"
@@ -143,7 +143,7 @@ async fn i8372_process_claim_rechecks_o_adoption_and_counts_legacy_transport() {
             .await,
             Err::<BodySend<()>, _>(IdentityError::ChildDeliveryHeld),
         );
-        assert!(winner.confirm_store());
+        assert!(winner.confirm_store_for_test());
         assert_eq!(
             claim_then_send_at(BodySite::BridgeHeadless, Some(first_claim), || async {
                 panic!("O committed first")

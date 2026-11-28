@@ -1,7 +1,7 @@
 use super::*;
 use crate::services::discord::codex_absence::InflightObs;
 
-pub(crate) struct CommandStreamingRequest<'a> {
+pub struct CommandStreamingRequest<'a> {
     pub prompt: &'a str,
     pub session_id: Option<&'a str>,
     pub working_dir: &'a str,
@@ -23,7 +23,7 @@ pub(crate) struct CommandStreamingRequest<'a> {
     pub force_fresh_provider_session: bool,
 }
 
-pub(crate) fn execute_command_streaming_observed(
+pub fn execute_command_streaming_observed(
     request: CommandStreamingRequest<'_>,
     observation: Option<&InflightObs>,
 ) -> Result<(), String> {

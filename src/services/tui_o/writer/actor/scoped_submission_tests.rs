@@ -6,7 +6,7 @@ use crate::services::tui_o::shadow::capture::SourceCapture;
 use crate::services::tui_o::shadow::{CaptureOutcome, CaptureSource};
 use crate::services::tui_o::store::codex_provenance::submit_floor::tests as native;
 use crate::services::tui_o::store::{Initialized, OStore, STORE_DIR_NAME, StoreConfig};
-use crate::services::tui_o::writer::owed::tests::{Alarms, Lease, Port as Discord};
+use crate::services::tui_o::writer::owed::test_support::{Alarms, Lease, Port as Discord};
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
 

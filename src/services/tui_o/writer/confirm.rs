@@ -14,9 +14,9 @@ pub const LAST_LOOK: Duration = Duration::from_secs(30);
 pub const HISTORY_PAGE: usize = 100;
 pub const MAX_PAGES: usize = 10;
 /// Bounds each read, rate-limit wait and body decode included.
-pub(crate) const READ_TIMEOUT: Duration = Duration::from_secs(5);
+pub const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// Bounds a whole settlement, so it ends inside the delivery lease held over the POST.
-pub(crate) const SETTLE_DEADLINE: Duration = Duration::from_secs(110);
+pub const SETTLE_DEADLINE: Duration = Duration::from_secs(110);
 /// How many of this bot's latest posts an empty history may be checked against.
 pub(crate) const PROOF_IDS: usize = 3;
 
@@ -39,7 +39,7 @@ pub fn judge(candidates: &[u64], earlier_same_payload: bool) -> Option<Verdict> 
 }
 
 /// A read that fails or outlasts `READ_TIMEOUT` is an error, never an empty answer.
-pub(crate) async fn bounded<T>(read: impl Future<Output = Result<T, String>>) -> Result<T, String> {
+pub async fn bounded<T>(read: impl Future<Output = Result<T, String>>) -> Result<T, String> {
     let late = |_| Err(format!("read exceeded {READ_TIMEOUT:?}"));
     tokio::time::timeout(READ_TIMEOUT, read)
         .await

@@ -1,6 +1,8 @@
 import { useCallback, useMemo, useSyncExternalStore } from "react";
 import type { Node } from "@xyflow/react";
 import type { CampaignNode, CampaignNodeLive } from "../../api/campaigns";
+import { GRAPH_DIM_OPACITY } from "../common/graph/GraphChrome";
+import type { CampaignCriticalPath } from "./campaignCriticalPath";
 import CampaignGroupInspector from "./CampaignGroupInspector";
 import { NO_TIES, campaignRawEdges, routeEdges, type GraphViewSettings } from "./campaignGraphRouting";
 import { layoutGroups, placeLines } from "./campaignGroupLayout";
@@ -59,9 +61,9 @@ export const groupCycleText = (overview: GroupOverview, path: string[], tr: Tr) 
  * Every group and the dependencies between them, with the chosen group (or the whole campaign) summed up beside it.
  * Ties saved for this graph are drawn and never changed here: ties are made in the relations editor, on tasks.
  */
-export default function CampaignGroupOverview({ campaignId, nodes, live, chosen, onChoose, onOpenGroup, onOpenTask, canvasHeight, tr }: {
+export default function CampaignGroupOverview({ campaignId, nodes, live, chosen, onChoose, onOpenGroup, onOpenTask, canvasHeight, criticalPath = null, tr }: {
   campaignId: string; nodes: CampaignNode[]; live?: Record<string, CampaignNodeLive>; chosen: string | null; onChoose: (group: string | null) => void;
-  onOpenGroup: (group: string) => void; onOpenTask: (id: string) => void; canvasHeight?: string; tr: Tr;
+  onOpenGroup: (group: string) => void; onOpenTask: (id: string) => void; canvasHeight?: string; criticalPath?: CampaignCriticalPath | null; tr: Tr;
 }) {
   const scope = useMemo(() => groupViewScope(campaignId), [campaignId]);
   const raw = useSyncExternalStore((listener) => subscribeCampaignView(scope, listener), () => readStoredRaw(scope));
@@ -77,6 +79,8 @@ export default function CampaignGroupOverview({ campaignId, nodes, live, chosen,
       const { counts, percent, total } = group.progress;
       const finished = total > 0 && counts.completed + counts.skipped === total;
       const isolated = !connectedIds.has(group.id);
+      const critCount = criticalPath ? group.nodes.filter((n) => criticalPath.criticalNodeIds.has(n.id)).length : 0;
+      const isCrit = criticalPath ? criticalPath.criticalGroups.has(group.key) || critCount > 0 : false;
       const statusLabel = finished
         ? tr("완료", "Done")
         : counts.blocked
@@ -91,11 +95,16 @@ export default function CampaignGroupOverview({ campaignId, nodes, live, chosen,
         statusLabel,
         tone: finished ? "done" : counts.blocked ? "warn" : counts.running ? "progress" : "open",
         ratio: percent / 100,
-        summary: tr(`진행 ${counts.running} · 그룹 안 연결 ${group.internalDependencies}`, `${counts.running} running · ${group.internalDependencies} inside`),
+        summary: criticalPath
+          ? [isCrit ? tr(`병목 ${critCount}개`, `${critCount} critical`) : tr("여유 경로", "Has slack"), tr(`진행 ${counts.running}`, `${counts.running} running`)].join(" · ")
+          : tr(`진행 ${counts.running} · 그룹 안 연결 ${group.internalDependencies}`, `${counts.running} running · ${group.internalDependencies} inside`),
         blocked: counts.blocked ? tr(`막힌 작업 ${counts.blocked}개`, `${counts.blocked} blocked tasks`) : null,
         far: [`${percent}%`, counts.blocked > 0 && tr(`막힘 ${counts.blocked}`, `${counts.blocked} blocked`)].filter(Boolean).join(" · "),
         openLabel: tr("열기 →", "Open →"),
         onOpen: () => onOpenGroup(group.key),
+        critical: isCrit,
+        criticalCount: critCount,
+        criticalLabel: isCrit ? tr(`병목 ${critCount}`, `${critCount} crit`) : undefined,
       };
       return {
         id: group.id,
@@ -104,17 +113,19 @@ export default function CampaignGroupOverview({ campaignId, nodes, live, chosen,
         data,
         draggable: false,
         selected: group.key === chosen,
+        style: criticalPath && !isCrit ? { opacity: GRAPH_DIM_OPACITY } : undefined,
         className: isolated
           ? "[&_.react-flow__handle]:!opacity-0 [&_.react-flow__handle]:!pointer-events-none [&>div>i]:!opacity-0 [&>div>i]:!pointer-events-none"
           : undefined,
         ariaLabel: tr(`${data.title}, 작업 ${total}개, 완료 ${percent}%, 진행 ${counts.running}, 막힘 ${counts.blocked}`, `${data.title}, ${total} tasks, ${percent}% completed, ${counts.running} running, ${counts.blocked} blocked`),
       };
     });
-  }, [overview, chosen, onOpenGroup, tr]);
+  }, [overview, chosen, onOpenGroup, criticalPath, tr]);
   const cycleText = useCallback((path: string[]) => groupCycleText(overview, path, tr), [overview, tr]);
   const lineLabel = useCallback((line: ViewLine) => tr(`그룹 간 의존성 ${line.count}개`, `${line.count} dependencies between groups`), [tr]);
   return <RelationsViewCanvas label={tr("그룹별 전체 관계", "All campaign group relationships")} nodes={graphNodes} lines={overview.connections} ties={overview.ties}
     cycles={overview.cycles} components={overview.components} cycleText={cycleText} lineLabel={lineLabel} height={canvasHeight}
+    criticalEdgeKeys={criticalPath?.criticalEdgeKeys} showCriticalLegend={!!criticalPath}
     onSelect={(id) => onChoose(id === null ? null : keyOf(id) ?? null)} onOpen={(id) => { const key = keyOf(id); if (key !== undefined) onOpenGroup(key); }} tr={tr}
     inspector={<CampaignGroupInspector overview={overview} nodes={nodes} live={live} chosen={chosen} cycleText={cycleText} onChoose={onChoose} onOpenGroup={onOpenGroup} onOpenTask={onOpenTask} tr={tr} />} />;
 }

@@ -415,13 +415,13 @@ RED(P2-C/D/H): N3에서 failure1/2/3 non-turn P만·4 Announce1·5추가turn0, N
 
 review 제안 순서 B+C1→A→H→D0+D→E0→F→G+C2→E를 유지하되 **D0+D의 기존 +1650은 PR3a/3b로, G+C2의 +1650(상세화 전 약1450)도 PR6a/6b로 분할**했다. UI가 약속하는 C2가 먼저 착지하도록 PR6 그룹 안에서 C2→G로 둔다. 파일 겹침만으로 NET이 줄었다고 꾸미지 않는다. PJ를 스택 밖 후속으로 빼 A는+700, H는 전역 author_is_bot 수리를 빼+1100이다(incident transport 포함, 상향1180 전 H1/H2로 분할; H2 전에는 N+1 미완료 기능을 노출하지 않음). E는 표시/O 편집 제거로+1050→+850이다. PJ UI 제거로 G는 일단+1000이고 PR1에서 뺀 run-detail API/문서 약+100을 G에 합쳐13–16파일/+1100으로 잡았다. 최대 계획+1100이며 구현 중 상향되면 추가 분할한다. F의 shutdown이 기존 helper 재사용 범위를 넘으면 lifecycle child를 별도 PR로 떼고 cap을 올리지 않는다. E가 #8114를 기다려도 PR1의 기존7 소음 제거는 지연되지 않는다.
 
-PR1의 알림 이력 링크는 현 `/routines` 화면(`dashboard/src/app/AppShellRoutes.tsx:116`)과 기존 runs API를 사용하며 존재하지 않는 run-detail endpoint/자동 drawer 선택을 약속하지 않는다. G에서 exact run deep-link를 추가한다.
+PR1의 알림 이력 링크는 현 `/routines` 화면(`dashboard/src/app/AppShellRoutes.tsx` `RoutinesPageView` 라우트)과 기존 runs API를 사용하며 존재하지 않는 run-detail endpoint/자동 drawer 선택을 약속하지 않는다. G에서 exact run deep-link를 추가한다.
 
 PR1은 `valid_routine_metadata`와 기존 execution_mode process를 presentation 함수 한 곳에서 읽으며 schema/run_spec을 기다리지 않는다. A가 착지하면 같은 함수가 run_spec 우선·legacy metadata fallback으로 흡수한다. PR3a/b와 PR6a/b는 부모/선행 head에서 검증한 스택이고 활성화는 구현된 capability만 자동 적용한다. 운영자 수동 switch는 없다.
 
 ### giant 배치와 검증
 
-새 독립 책임 순증0 대상: `agent_executor.rs`2326, runtime1144, store4207, discord_log2101, session_control1157, loader3266 외에 **headless_turn.rs1545, terminal_outcome_delivery.rs1016, inflight.rs6314, message_outbox.rs1459, intake_gate.rs1388**도 포함한다(현재 source 실측; 과거 baseline 숫자를 현재 줄수로 쓰지 않음). parent에는 필드/mod/호출 교체만 두고 정책·분류·새 branch는 child에 둔다. 각 PR의 maintainability/giant ratchet을 통과해야 하며 giant를 예산 회피용으로 키우지 않는다. API 문서 경로는 `src/server/routes/docs/inventory/endpoints/part_06.rs:405-648`, taxonomy, `routes/domains/ops.rs`다.
+새 독립 책임 순증0 대상: `agent_executor.rs`2326, runtime1144, store4207, discord_log2101, session_control1157, loader3266 외에 **headless_turn.rs1545, terminal_outcome_delivery.rs1016, inflight.rs6314, message_outbox.rs1459, intake_gate.rs1388**도 포함한다(현재 source 실측; 과거 baseline 숫자를 현재 줄수로 쓰지 않음). parent에는 필드/mod/호출 교체만 두고 정책·분류·새 branch는 child에 둔다. 각 PR의 maintainability/giant ratchet을 통과해야 하며 giant를 예산 회피용으로 키우지 않는다. API 문서 경로는 `docs/data/api-endpoints.json`, taxonomy, `routes/domains/ops.rs`다.
 
 H의 새 독립 책임은 `src/services/routines/discord_log/failure_escalation.rs`, `src/services/message_outbox/routine_incident.rs`, `src/server/outbox_actionable_delivery/routine_incident.rs`, `src/services/discord/outbound/manual_delivery/routine_incident_nonce.rs`로 분리한다. 기존 parent에는 mod/typed 호출만 둔다. H의 +1100은 정책/이력 child2개+250, snapshot/API/result4개+135(선행 A와 겹쳐도 상쇄하지 않은 상한), 같은 outbox row migration/helper3개+330, delivery/worker/typed result3개+205, 기존 writer nonce2개+180의 보수 합계다. N+1을 예약하는 producer는 terminal 저장 경계 한 곳이며 logger 재진입은 동일 사건 키를 읽기만 한다. H1/H2로 나눌 경우 H2가 준비될 때 자동 capability로 함께 노출하며 운영자 수동 스위치는 없다.
 

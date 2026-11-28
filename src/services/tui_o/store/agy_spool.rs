@@ -19,7 +19,7 @@ pub(crate) const CHECKPOINT: &str = "committed.json";
 // JSON escaping can expand a single input byte to six bytes.
 const TEXT_BYTES: usize = 4096;
 
-pub(crate) struct AgyReservation<'a> {
+pub struct AgyReservation<'a> {
     pub destination: u64,
     pub logical_channel: u64,
     pub message: u64,
@@ -30,10 +30,10 @@ pub(crate) struct AgyReservation<'a> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ImessageSource(String);
+pub struct ImessageSource(String);
 
 impl ImessageSource {
-    pub(crate) fn from_guid(guid: &str) -> Option<Self> {
+    pub fn from_guid(guid: &str) -> Option<Self> {
         if guid.is_empty()
             || guid.len() > 256
             || guid.trim() != guid
@@ -51,7 +51,7 @@ impl ImessageSource {
         format!("imsg-{}", self.0)
     }
 
-    pub(crate) fn digest(&self) -> &str {
+    pub fn digest(&self) -> &str {
         &self.0
     }
 }
@@ -66,7 +66,7 @@ pub(crate) enum Failure {
     Cancelled,
 }
 
-pub(crate) struct AgySpool {
+pub struct AgySpool {
     reservation: Value,
     turn_dir: PathBuf,
     segment: File,
@@ -79,11 +79,11 @@ pub(crate) struct AgySpool {
 }
 
 impl AgySpool {
-    pub(crate) fn reserve(root: &Path, input: AgyReservation<'_>) -> io::Result<Self> {
+    pub fn reserve(root: &Path, input: AgyReservation<'_>) -> io::Result<Self> {
         Self::reserve_source(root, input, None)
     }
 
-    pub(crate) fn reserve_imessage(
+    pub fn reserve_imessage(
         root: &Path,
         input: AgyReservation<'_>,
         source: &ImessageSource,
@@ -228,7 +228,7 @@ impl AgySpool {
     }
 
     fn sync_segment(&self) -> io::Result<()> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         durable::fault::strike(&self.turn_dir, durable::fault::Step::AgySegmentSync)?;
         self.segment.sync_data()
     }

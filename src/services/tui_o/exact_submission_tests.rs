@@ -46,8 +46,8 @@ async fn exact_submission_pg_executor_classifies_no_attempt_and_typed_refusal() 
             assert!(crate::services::provider::herdr_provider_terminal_only(None).is_some());
             let result = dispatch(|| {
                 if scenario > 0 {
-                    begin_input()?;
-                    observe_untouched(scenario == 1);
+                    begin_input_for_test()?;
+                    observe_untouched_for_test(scenario == 1);
                 }
                 Err::<(), _>("executor exit after gate or launch".into())
             });
@@ -90,7 +90,7 @@ async fn exact_submission_pg_reopen_process_resolves_policy_without_source() {
             Authority::Policy
         );
         assert!(
-            logical_key().is_none(),
+            logical_key_for_test().is_none(),
             "no process-local capability survives"
         );
         return;
@@ -190,7 +190,7 @@ async fn exact_submission_pg_closed_admission_rejects_late_attempt() {
     let copy = pin.clone();
     tokio::task::spawn_blocking(move || {
         let _installed = install(p, copy);
-        assert!(begin_input().is_err());
+        assert!(begin_input_for_test().is_err());
         assert_eq!(
             dispatch(|| Err::<(), _>("input blocked".into())),
             Err("input blocked".into())

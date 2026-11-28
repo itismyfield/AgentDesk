@@ -1,7 +1,7 @@
 use super::injected_prompt_policy::slash_command_control_kind;
-use super::observed_prompt_decision::is_local_only_slash_command_prompt;
 use super::*;
 use crate::services::discord::gateway::TurnGateway;
+use crate::services::discord::session_notice::observed_prompt_decision::is_local_only_slash_command_prompt;
 
 #[cfg(unix)]
 mod absent_tmux_host_tests;

@@ -25,7 +25,7 @@ pub(super) async fn run_retention_sweep(runtime: &Arc<ObservabilityRuntime>) {
     }
 }
 
-pub(crate) async fn sweep_pool(pool: &PgPool) {
+pub async fn sweep_pool(pool: &PgPool) {
     let event_days = env_retention_days(
         "ADK_OBSERVABILITY_EVENT_RETENTION_DAYS",
         DEFAULT_OBSERVABILITY_EVENT_RETENTION_DAYS,
@@ -60,7 +60,7 @@ pub(crate) async fn sweep_pool(pool: &PgPool) {
 
 /// Deletes aged quality events and adds the deleted `turn_*` events to their month in
 /// `turn_analytics_monthly_aggregate`, in one statement: a row counts only for the sweep that removed it.
-pub(crate) async fn prune_quality_events_with_turn_rollup(
+pub async fn prune_quality_events_with_turn_rollup(
     pool: &PgPool,
     days: i64,
 ) -> Result<u64, sqlx::Error> {

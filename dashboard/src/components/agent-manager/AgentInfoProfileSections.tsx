@@ -1,20 +1,41 @@
 import { useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Square } from "lucide-react";
+import type * as api from "../../api";
 import type { AgentWarning } from "../../agent-insights";
+import { getProviderMeta } from "../../app/providerTheme";
+import { isThreadSession } from "../../contexts/session-overlay";
+import { formatLoopSummary, formatPromptCacheLabel, type PromptCacheStatus } from "../../lib/agentObservability";
+import { Badge, type BadgeTone } from "../../kit/free/badge-clean";
 import { Button } from "../../kit/free/button-clean";
 import { AgentMonitor, type AgentMonitorStep } from "../../kit/pro/agent-monitor";
-import type { Agent, Department } from "../../types";
+import type { Agent, Department, DispatchedSession } from "../../types";
 import { Select } from "../../kit/free/select-clean";
-import AgentPersona from "../AgentPersona";
 import { Cap, Chip } from "../common/KitPrimitives";
 import { monitorLabels } from "../home/HomeSummaryCards";
 import { agentStateLabel, type HomeAgentState, type MonitorView } from "../home/homeModel";
 import type { AttentionReason } from "./agentsAttention";
+import { describeDispatchedSession } from "./discord-routing";
 import type { Translator } from "./types";
-import { AgentDetailSection, SectionWell, type DetailFold } from "./AgentInfoCardSections";
+import { AgentDetailSection, DiscordDeepLinkChip, DiscordSummaryLabel, SectionWell, type DetailFold } from "./AgentInfoCardSections";
 import { AgentStatusBadge } from "./AgentRow";
 
 const WARNING_TONE = { error: "err", warning: "warn", info: "info" } as const;
+
+function nowSessionStatusMeta(
+  status: DispatchedSession["status"],
+  tr: Translator,
+): { label: string; tone: BadgeTone; live: boolean } {
+  if (status === "turn_active" || status === "working") {
+    return { label: tr("작업 중", "Working"), tone: "success", live: true };
+  }
+  if (status === "awaiting_bg") {
+    return { label: tr("백그라운드 대기", "Background wait"), tone: "warning", live: true };
+  }
+  if (status === "awaiting_user") {
+    return { label: tr("입력 대기", "Awaiting input"), tone: "info", live: true };
+  }
+  return { label: tr("스레드 대기", "Idle"), tone: "neutral", live: false };
+}
 
 /** Long free text: four lines, then a "show all" toggle (always offered past 140 characters). */
 export function ClampedText({ text, tr }: { text: string; tr: Translator }) {
@@ -47,10 +68,14 @@ export function ClampedText({ text, tr }: { text: string; tr: Translator }) {
 
 /** "Now": live turn state, kit `AgentMonitor` with tool `steps` and `onCancel -> POST /api/agents/{id}/turn/stop`. */
 export function AgentNowSection({
-  agent, state, tr, isKo, summary, monitor, steps, onOpenLog, onStopTurn, stoppingTurn, stopFeedback, reasons, warnings,
+  agent, state, tr, isKo, summary, monitor, steps, nowSessions, resolveChannel, resolveParent, promptCache, onOpenLog, onStopTurn, stoppingTurn, stopFeedback, reasons, warnings,
 }: {
   agent: Agent; state?: HomeAgentState; tr: Translator; isKo: boolean; summary: string | null;
-  monitor: MonitorView | null; steps?: AgentMonitorStep[]; onOpenLog: () => void;
+  monitor: MonitorView | null; steps?: AgentMonitorStep[];
+  nowSessions?: DispatchedSession[];
+  resolveChannel?: (channelId: string | null | undefined) => api.DiscordChannelInfo | null;
+  resolveParent?: (channelInfo: api.DiscordChannelInfo | null | undefined) => api.DiscordChannelInfo | null;
+  promptCache?: PromptCacheStatus | null; onOpenLog: () => void;
   onStopTurn?: () => void; stoppingTurn?: boolean; stopFeedback?: { ok: boolean; text: string } | null;
   reasons: AttentionReason[]; warnings: AgentWarning[];
 }) {
@@ -92,19 +117,86 @@ export function AgentNowSection({
       {monitor ? (
         <AgentMonitor
           status="running"
-          agent={{ name: agentStateLabel("working", tr), role: monitor.role ?? undefined, mark: <AgentPersona agent={agent} state="working" size={28} /> }}
+          agent={{ name: agentStateLabel("working", tr), role: monitor.role ?? undefined }}
           steps={steps && steps.length > 0 ? steps : undefined}
           current={steps && steps.length > 0 ? undefined : { label: monitor.label, kind: monitor.kind }}
           started={monitor.started ?? undefined}
           onCancel={onStopTurn && !stoppingTurn ? onStopTurn : undefined}
           onOpenLog={onOpenLog}
           labels={labels}
+          className="[&_.aui-agent-monitor-mark]:hidden"
           style={{ width: "100%" }}
         />
+      ) : null}
+      {nowSessions && nowSessions.length > 0 ? (
+        <div className="flex min-w-0 flex-col gap-1.5" data-testid="agent-now-sessions">
+          <Cap className="font-medium">
+            {tr(`진행·스레드 세션 ${nowSessions.length}`, `Active & thread sessions (${nowSessions.length})`)}
+          </Cap>
+          <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
+            {nowSessions.map((session) => {
+              const targetChannelId =
+                session.thread_channel_id ?? session.resolved_thread_channel_id ?? session.thread_id ?? session.channel_id ?? null;
+              const channelInfo = resolveChannel ? resolveChannel(targetChannelId) : null;
+              const target = describeDispatchedSession(
+                { ...session, thread_channel_id: session.thread_channel_id ?? session.resolved_thread_channel_id ?? null },
+                channelInfo,
+                resolveParent ? resolveParent(channelInfo) : null,
+              );
+              const isThread = isThreadSession(session);
+              const infoLine = session.session_info?.split("\n")[0]?.trim() || null;
+              const statusMeta = nowSessionStatusMeta(session.status, tr);
+              return (
+                <li
+                  key={session.session_key || session.id}
+                  data-testid="agent-now-session-row"
+                  className="flex min-w-0 items-start gap-2.5 rounded-(--r-md) px-3 py-2 shadow-[inset_0_0_0_1px_var(--line-soft)]"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                      <DiscordSummaryLabel summary={target} />
+                      {isThread ? <Chip>{tr("스레드", "Thread")}</Chip> : null}
+                      <DiscordDeepLinkChip deepLink={target.deepLink} label={tr("앱", "App")} />
+                    </div>
+                    {infoLine ? (
+                      <div className="mt-0.5 truncate text-xs text-(--fg-muted)" title={infoLine}>
+                        {infoLine}
+                      </div>
+                    ) : null}
+                  </div>
+                  <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
+                    <Badge tone="neutral">{getProviderMeta(session.provider).label}</Badge>
+                    <Badge tone={statusMeta.tone} dot live={statusMeta.live}>
+                      {statusMeta.label}
+                    </Badge>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      ) : null}
+      {monitor?.loop ? (
+        <SectionWell className="flex flex-col gap-1" data-testid="agent-now-loop">
+          <span className="flex flex-wrap items-center gap-1.5 text-xs">
+            <Chip tone={monitor.loop.pattern === "contract" ? "err" : "warn"}>{tr("루프 의심", "Looping")}</Chip>
+            <span className="font-medium text-(--fg)">{formatLoopSummary(monitor.loop, tr)}</span>
+          </span>
+          {monitor.loop.evidence.length > 0 ? (
+            <Cap className="truncate font-mono" title={monitor.loop.evidence.join(" → ")}>
+              {monitor.loop.evidence.slice(-3).join(" → ")}
+            </Cap>
+          ) : null}
+        </SectionWell>
       ) : null}
       {stopFeedback ? <Cap role="status" className={stopFeedback.ok ? "text-(--ok)" : "text-(--warn)"} data-testid="agent-stop-feedback">{stopFeedback.text}</Cap> : null}
       <div className="flex flex-wrap items-center gap-1.5">
         <Chip className="tabular-nums">{tr(`완료 ${agent.stats_tasks_done.toLocaleString()}건`, `${agent.stats_tasks_done.toLocaleString()} done`)}</Chip>
+        {promptCache && promptCache.phase !== "cold" ? (
+          <Chip tone={promptCache.phase === "expiring" ? "warn" : "info"} className="tabular-nums" data-testid="agent-now-cache">
+            {formatPromptCacheLabel(promptCache, tr)}
+          </Chip>
+        ) : null}
         {warnings.map((warning) => <Chip key={warning.code} tone={WARNING_TONE[warning.severity]} dot>{isKo ? warning.ko : warning.en}</Chip>)}
       </div>
     </AgentDetailSection>

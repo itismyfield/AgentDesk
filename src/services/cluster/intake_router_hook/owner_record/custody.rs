@@ -31,14 +31,14 @@ fn canonical(
     }
 }
 
-pub(crate) struct StageRequest<'a> {
+pub struct StageRequest<'a> {
     pub payload: &'a InsertPendingPayload,
     pub home_revision: i64,
     pub wait_generation: Option<i64>,
     pub grace_seconds: i32,
 }
 
-pub(crate) async fn stage(pool: &PgPool, request: StageRequest<'_>) -> Result<i64, sqlx::Error> {
+pub async fn stage(pool: &PgPool, request: StageRequest<'_>) -> Result<i64, sqlx::Error> {
     let p = request.payload;
     let id = OwnerIdentity::new(&p.provider, &p.channel_id);
     if request.grace_seconds < 0 {
@@ -120,17 +120,17 @@ pub(crate) async fn stage(pool: &PgPool, request: StageRequest<'_>) -> Result<i6
     Ok(outbox_id)
 }
 
-pub(crate) use crate::db::channel_custody_lock::lock;
+pub use crate::db::channel_custody_lock::lock;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SwitchReadiness {
+pub enum SwitchReadiness {
     Wait,
     NormalEnd,
     Unavailable,
 }
 
 /// Readiness comes from the control plane; unavailable requires the stored deadline and old stamp.
-pub(crate) async fn promote(
+pub async fn promote(
     pool: &PgPool,
     delivery: i64,
     target: &str,
@@ -286,7 +286,7 @@ async fn announce_on_tx(
 }
 
 #[derive(sqlx::FromRow)]
-pub(crate) struct StoredDelivery {
+pub struct StoredDelivery {
     pub id: i64,
     pub routing_state: String,
     pub target_instance_id: String,
@@ -294,7 +294,7 @@ pub(crate) struct StoredDelivery {
 }
 
 /// Read prior custody even while new routing producers are disabled.
-pub(crate) async fn lookup_source(
+pub async fn lookup_source(
     pool: &PgPool,
     input: &write::CanonicalInput,
 ) -> Result<Option<StoredDelivery>, sqlx::Error> {
@@ -396,7 +396,7 @@ async fn retire_open_on_tx(
 }
 
 /// Refreshes only unstarted held custody. The caller commits; repeat observations never extend a deadline.
-pub(crate) async fn refresh_stage_on_tx(
+pub async fn refresh_stage_on_tx(
     tx: &mut Transaction<'_, Postgres>,
     delivery: i64,
     target: &str,

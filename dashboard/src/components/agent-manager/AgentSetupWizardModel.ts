@@ -21,7 +21,7 @@ export interface AgentSetupWizardProps {
   open: boolean;
   mode: WizardMode;
   sourceAgent?: Agent | null;
-  departments: Department[];
+  departments?: Department[];
   locale: string;
   tr: Translator;
   onClose: () => void;
@@ -251,7 +251,6 @@ export function useAgentSetupWizardState({
         await api.updateAgent(draft.agentId.trim(), {
           name: draft.name.trim(),
           name_ko: draft.nameKo.trim() || draft.name.trim(),
-          department_id: draft.departmentId || null,
           cli_provider: draft.provider,
           prompt_content: draft.promptContent,
           auto_commit: false,

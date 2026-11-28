@@ -448,7 +448,7 @@ async fn recover_before(
 /// Boot recovery; returns how many unsettled rows it read. It runs beside the first deliveries:
 /// the run's start is fixed by whichever asks first, so it never ends a row this process moved.
 pub async fn recover_boot(pool: &PgPool) -> Result<usize, sqlx::Error> {
-    let boot = run(pool).await?.boot;
+    let boot = run(pool).await?.boot();
     recover_before(pool, boot, global_mailbox).await
 }
 

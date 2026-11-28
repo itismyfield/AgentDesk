@@ -139,7 +139,7 @@ async fn public_health_proves_the_tui_gateway_reason_to_the_readiness_predicate(
     }
 
     let router = AlarmRouter::for_process(None, None);
-    router.raise_at(
+    router.raise_at_for_test(
         WRITER_CHANNEL,
         &WriterAlarm::PausedNoGateway,
         Instant::now(),
@@ -156,7 +156,7 @@ async fn public_health_proves_the_tui_gateway_reason_to_the_readiness_predicate(
         true,
     );
     let blocked = WriterAlarm::Blocked { status: 403 };
-    router.raise_at(WRITER_CHANNEL, &blocked, Instant::now());
+    router.raise_at_for_test(WRITER_CHANNEL, &blocked, Instant::now());
     alarm::gateway_resumed(WRITER_CHANNEL);
     assert_ready(
         "blocked writer",

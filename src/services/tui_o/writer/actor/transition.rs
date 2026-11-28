@@ -44,7 +44,7 @@ pub(super) struct Transitions {
 }
 
 impl Transitions {
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     pub(super) fn has_job(&self) -> bool {
         self.job.is_some()
     }
@@ -156,7 +156,7 @@ fn conflicts<'a>(mut cursors: impl Iterator<Item = &'a Cursor>, request: &Reques
 /// The actor's clock; a test may move it on just as a worker's probes are taken.
 fn now() -> Instant {
     let now = Instant::now();
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let now = now + test_hooks::skew();
     now
 }
@@ -231,7 +231,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         } = envelope;
         let (apply, request, expected, automatic) = match operation {
             Operation::Inspect(request) => (false, request, None, None),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             Operation::Apply(request, digest) => (true, request, Some(digest), None),
             Operation::AutomaticApply(request, digest, idle) => {
                 (true, request, Some(digest), Some(idle))
@@ -401,7 +401,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             return true;
         }
         if let Some(worker) = &job.worker {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             test_hooks::receiving();
             let seen = match worker.try_recv() {
                 Ok(seen) => seen,
@@ -478,7 +478,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             }
             _ => None,
         };
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let done = test_hooks::worker_started();
         tokio::task::spawn_blocking(move || {
             let seen = batch.into_iter().map(|(key, cursor)| {
@@ -490,7 +490,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                 (key, observe(&cursor, wall()), age)
             });
             let _ = send.send(seen.collect());
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             done.store(true, std::sync::atomic::Ordering::Release);
         });
         job.worker = Some(worker);
@@ -593,7 +593,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         if *self.transitions.stop.borrow() || *job.stopping.borrow() {
             return Outcome::Held(Hold::Stopping);
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         test_hooks::at_retire();
         unsettled.send_replace(None);
         match self
@@ -676,12 +676,15 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
     }
 }
 
+#[cfg(all(any(test, feature = "test-support"), unix))]
+#[path = "scoped_transition_support.rs"]
+pub(super) mod scoped_support;
 #[cfg(all(test, unix))]
 #[path = "scoped_transition_tests.rs"]
 pub(super) mod scoped_tests;
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_hooks {
+pub mod test_hooks {
     //! Lets a test wait for the probe workers, count the snapshots, and look in just before a
     //! retirement is written.
     use std::cell::{Cell, RefCell};
@@ -690,11 +693,11 @@ pub(crate) mod test_hooks {
     }
 
     #[cfg(unix)]
-    pub(crate) fn snapshot_authority_held() -> bool {
+    pub fn snapshot_authority_held() -> bool {
         SNAPSHOT_AUTHORITY.with(Cell::get)
     }
 
-    pub(crate) fn snapshot_authority_scope(held: bool) -> impl Drop {
+    pub fn snapshot_authority_scope(held: bool) -> impl Drop {
         struct Restore(bool);
         impl Drop for Restore {
             fn drop(&mut self) {
@@ -727,7 +730,7 @@ pub(crate) mod test_hooks {
 
     /// Moves the actors' clock on this thread by `by` just as one next takes a worker's probes,
     /// until the guard drops.
-    pub(crate) fn skew_at_receipt(by: Duration) -> impl Drop {
+    pub fn skew_at_receipt(by: Duration) -> impl Drop {
         struct Clear;
         impl Drop for Clear {
             fn drop(&mut self) {
@@ -745,12 +748,12 @@ pub(crate) mod test_hooks {
     }
 
     /// Probe workers the actors on this thread started so far.
-    pub(crate) fn started() -> usize {
+    pub fn started() -> usize {
         WORKERS.with(|workers| workers.borrow().len())
     }
 
     /// Blocks this thread until every probe worker its actors started has sent its probes.
-    pub(crate) fn settle_workers() {
+    pub fn settle_workers() {
         let pending = || WORKERS.with(|w| w.borrow().iter().any(|d| !d.load(Ordering::Acquire)));
         while pending() {
             std::thread::sleep(std::time::Duration::from_millis(1));
@@ -762,7 +765,7 @@ pub(crate) mod test_hooks {
     }
 
     /// Snapshots the actors on this thread built so far, each one a read of the store and history.
-    pub(crate) fn snapshots() -> usize {
+    pub fn snapshots() -> usize {
         SNAPSHOTS.with(Cell::get)
     }
 
@@ -771,7 +774,7 @@ pub(crate) mod test_hooks {
     }
 
     /// Runs `hook` just before each retirement write on this thread until the guard drops.
-    pub(crate) fn on_retire(hook: impl FnMut() + 'static) -> impl Drop {
+    pub fn on_retire(hook: impl FnMut() + 'static) -> impl Drop {
         struct Clear;
         impl Drop for Clear {
             fn drop(&mut self) {

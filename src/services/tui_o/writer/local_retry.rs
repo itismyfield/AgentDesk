@@ -11,15 +11,15 @@ use crate::services::tui_o::store::ledger::{LedgerState, LocalRetryMark, PieceOu
 
 mod notice_selection;
 
-pub(crate) const LOCAL_RETRY_DELAY: Duration = Duration::from_secs(30);
+pub const LOCAL_RETRY_DELAY: Duration = Duration::from_secs(30);
 
-pub(crate) struct Pending {
+pub struct Pending {
     pub root_serial: u64,
     pub piece: PieceWork,
     pub due: DateTime<Utc>,
 }
 
-pub(crate) fn pending(ledger: &LedgerState) -> Option<Pending> {
+pub fn pending(ledger: &LedgerState) -> Option<Pending> {
     ledger.budget_roots(0).find_map(|serial| {
         let root = ledger.piece(serial)?;
         if ledger.excluded(&root.unit_key).is_some()
@@ -40,6 +40,9 @@ pub(crate) fn pending(ledger: &LedgerState) -> Option<Pending> {
                 index: root.piece_index,
                 payload: root.payload.clone(),
                 notice_origin: root.notice_origin.clone(),
+                reply: ledger
+                    .reply_to(serial)
+                    .map(super::reply_anchor::ReplyRef::Fixed),
             },
             due,
         })
@@ -62,9 +65,19 @@ pub(super) fn may_prepare(
 }
 
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn has_local_retry_for_test(&mut self) -> bool {
+        self.has_local_retry()
+    }
+
     pub(crate) fn has_local_retry(&mut self) -> bool {
         notice_selection::candidates(self.store().ledger())
             .any(|root| !notice_selection::is_notice(&root.piece))
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn retry_local_for_test(&mut self, now: DateTime<Utc>) -> Step {
+        self.retry_local(now).await
     }
 
     pub(crate) async fn retry_local(&mut self, now: DateTime<Utc>) -> Step {

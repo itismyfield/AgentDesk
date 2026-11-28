@@ -1,6 +1,6 @@
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::db::dispatched_sessions::hosted_execution::tests::{owner, record, wire};
+use crate::db::dispatched_sessions::hosted_execution::test_support::{owner, record, wire};
 use crate::db::dispatched_sessions::hosted_execution::{HostedState, http_force};
 
 fn fixture(channel: &str) -> HostedOwner {

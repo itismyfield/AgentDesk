@@ -17,6 +17,9 @@ BUILD = ["cargo", "test", "--locked", "--lib", "--no-run",
 NEXTEST_BUILD = ["cargo", "nextest", "archive", "--lib", "--workspace"]
 FILES = ("lib-tests", "plain.list", "ignored.list")
 ROOT = Path(__file__).resolve().parents[2]
+ROOT_PACKAGE = "agentdesk"
+# Member lib binaries sit under packages/<name>/ beside the root package's top-level files.
+PACKAGE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
 
 
 def _capture(argv, root, env=None):
@@ -112,19 +115,35 @@ def prepare(directory, root=ROOT):
     print("lib-test artifact: prepared one lib build", file=sys.stderr)
 
 
-def _package(directory, executable, metadata, root, inventory=None):
+def _files(metadata):
+    packages = metadata.get("packages", [])
+    if (not isinstance(packages, list) or packages != sorted(set(packages))
+            or not all(isinstance(name, str) and PACKAGE_NAME.fullmatch(name)
+                       and name != ROOT_PACKAGE for name in packages)):
+        raise ValueError("invalid artifact package list")
+    return [*FILES, *(f"packages/{package}/{name}" for package in packages for name in FILES)]
+
+
+def _package(directory, executable, metadata, root, inventory=None, members=None):
+    """Copy the root binary and each member binary with their inventories, then seal the checksums."""
     directory.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(executable, directory / "lib-tests")
-    plain = _capture([str((directory / "lib-tests").resolve()), "--list"], root)
-    ignored = _capture([str((directory / "lib-tests").resolve()),
-                        "--list", "--ignored"], root)
-    if not _inventory(plain) or not _inventory(ignored) <= _inventory(plain):
-        raise ValueError("empty or inconsistent compiled inventory")
-    if inventory is not None and (_inventory(plain), _inventory(ignored)) != inventory:
-        raise ValueError("binary inventory differs from the nextest plan")
-    (directory / "plain.list").write_text(plain)
-    (directory / "ignored.list").write_text(ignored)
-    metadata["checksums"] = {name: _checksum(directory / name) for name in FILES}
+    binaries = [(directory, executable, inventory)]
+    binaries += [(directory / "packages" / name, path, expected)
+                 for name, (path, expected) in sorted((members or {}).items())]
+    for target, source, expected in binaries:
+        target.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target / "lib-tests")
+        plain = _capture([str((target / "lib-tests").resolve()), "--list"], root)
+        ignored = _capture([str((target / "lib-tests").resolve()),
+                            "--list", "--ignored"], root)
+        if not _inventory(plain) or not _inventory(ignored) <= _inventory(plain):
+            raise ValueError("empty or inconsistent compiled inventory")
+        if expected is not None and (_inventory(plain), _inventory(ignored)) != expected:
+            raise ValueError("binary inventory differs from the nextest plan")
+        (target / "plain.list").write_text(plain)
+        (target / "ignored.list").write_text(ignored)
+    metadata["packages"] = sorted(members or {})
+    metadata["checksums"] = {name: _checksum(directory / name) for name in _files(metadata)}
     (directory / "metadata.json").write_text(json.dumps(metadata, sort_keys=True) + "\n")
 
 
@@ -168,18 +187,22 @@ def prepare_nextest(directory, source, root=ROOT):
         if not binary.is_relative_to(extract) or not binary.is_file():
             raise ValueError("nextest binary must be inside the extracted archive")
         binaries[suite["binary-id"]] = binary
-    if "agentdesk" not in binaries:
+    if ROOT_PACKAGE not in binaries:
         raise ValueError("nextest archive lacks the agentdesk lib binary")
-    # The direct cargo test --lib consumer runs the root package's harness.
+
+    def expected(package):
+        return ({name for lib, name in runnable | ignored if lib == package},
+                {name for lib, name in ignored if lib == package})
+
+    # `cargo test --lib` runs the root package's harness; `-p <member>` runs that member's.
     metadata["build"] = NEXTEST_BUILD
-    _package(directory, binaries["agentdesk"], metadata, root,
-             ({name for lib, name in runnable | ignored if lib == "agentdesk"},
-              {name for lib, name in ignored if lib == "agentdesk"}))
+    _package(directory, binaries.pop(ROOT_PACKAGE), metadata, root, expected(ROOT_PACKAGE),
+             {name: (path, expected(name)) for name, path in binaries.items()})
     print("lib-test artifact: reused validated nextest archive (no build)", file=sys.stderr)
 
 
-def validate(directory, root=ROOT):
-    """Validate provenance and executable inventory before sharing any input."""
+def validate(directory, root=ROOT, package=None):
+    """Validate provenance and every packaged binary's inventory, then return the requested binary."""
     root = root.resolve()
     metadata = json.loads((directory / "metadata.json").read_text())
     expected = _contract(root)
@@ -189,23 +212,27 @@ def validate(directory, root=ROOT):
     expected.pop("run_attempt")
     if {key: metadata.get(key) for key in expected} != expected:
         raise ValueError("artifact checkout/build/run contract mismatch")
-    if metadata.get("checksums") != {name: _checksum(directory / name) for name in FILES}:
+    if metadata.get("checksums") != {name: _checksum(directory / name) for name in _files(metadata)}:
         raise ValueError("artifact checksum mismatch")
-    binary = (directory / "lib-tests").resolve()
-    if not os.access(binary, os.X_OK):
-        raise ValueError("artifact binary is not executable")
-    inventories = []
-    for name, args in (("plain.list", ["--list"]),
-                       ("ignored.list", ["--list", "--ignored"])):
-        stored = (directory / name).read_text()
-        ids = _inventory(stored)
-        actual = _capture([str(binary), *args], root)
-        if actual != stored:
-            raise ValueError("live binary inventory differs from artifact")
-        inventories.append(ids)
-    if not inventories[0] or not inventories[1] <= inventories[0]:
-        raise ValueError("empty or inconsistent compiled inventory")
-    return binary
+    folders = {ROOT_PACKAGE: directory, **{name: directory / "packages" / name for name in metadata.get("packages", [])}}
+    for folder in folders.values():
+        binary = (folder / "lib-tests").resolve()
+        if not os.access(binary, os.X_OK):
+            raise ValueError("artifact binary is not executable")
+        inventories = []
+        for name, args in (("plain.list", ["--list"]),
+                           ("ignored.list", ["--list", "--ignored"])):
+            stored = (folder / name).read_text()
+            ids = _inventory(stored)
+            actual = _capture([str(binary), *args], root)
+            if actual != stored:
+                raise ValueError("live binary inventory differs from artifact")
+            inventories.append(ids)
+        if not inventories[0] or not inventories[1] <= inventories[0]:
+            raise ValueError("empty or inconsistent compiled inventory")
+    if (package or ROOT_PACKAGE) not in folders:
+        raise ValueError(f"artifact lacks the {package} lib binary")
+    return (folders[package or ROOT_PACKAGE] / "lib-tests").resolve()
 
 
 def validated_inventory(root, ignored=False):
@@ -234,11 +261,17 @@ def _libtest_args(command, root):
             before.append(word)
     filters = []
     has_lib = False
+    package = None
     index = 0
     while index < len(before):
         word = before[index]
         if word == "--lib":
             has_lib = True
+        elif word in ("-p", "--package") and package is None:
+            index += 1
+            if index == len(before) or not PACKAGE_NAME.fullmatch(before[index]):
+                raise ValueError("package option needs one package name")
+            package = before[index]
         elif word == "--locked":
             pass
         elif word == "--manifest-path":
@@ -252,7 +285,19 @@ def _libtest_args(command, root):
         index += 1
     if not has_lib or len(filters) > 1:
         raise ValueError("shared libtest supports only default lib test commands")
-    return filters + after
+    return package, filters + after
+
+
+def _package_dir(root, package):
+    """Cargo runs a package's lib tests from its manifest directory."""
+    if package in (None, ROOT_PACKAGE):
+        return root
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from rust_test_sources import workspace_lib_roots
+    try:
+        return workspace_lib_roots(root)[package][0].parent
+    except KeyError:
+        raise ValueError(f"{package} is not a workspace lib package") from None
 
 
 def run(command, root=ROOT, require_artifact=False):
@@ -262,10 +307,11 @@ def run(command, root=ROOT, require_artifact=False):
         return 1
     directory = os.environ.get("ADK_LIB_TEST_ARTIFACT")
     try:
-        args = _libtest_args(command, root)
+        package, args = _libtest_args(command, root)
         if not directory:
             raise ValueError("artifact input absent")
-        binary = validate(Path(directory), root)
+        binary = validate(Path(directory), root, package)
+        _package_dir(root, package)
     except (OSError, ValueError, TypeError, KeyError) as error:
         if require_artifact:
             print(f"lib-test artifact: required artifact invalid: {error}", file=sys.stderr)
@@ -275,7 +321,7 @@ def run(command, root=ROOT, require_artifact=False):
     print("lib-test artifact: using validated binary", file=sys.stderr)
     # An executed test failure is final; only validation failure permits Cargo.
     try:
-        return subprocess.call([str(binary), *args], cwd=root)
+        return subprocess.call([str(binary), *args], cwd=_package_dir(root, package))
     except OSError as error:
         print(f"lib-test artifact: execution failed: {error}", file=sys.stderr)
         return 1

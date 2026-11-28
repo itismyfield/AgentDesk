@@ -238,7 +238,7 @@ export function RoutineDetailBody({ routine, threadUrl, runs, runsLoading, runsE
       </Section>
 
       <Section title={t({ ko: "설정", en: "Settings", ja: "設定", zh: "设置" })}>
-        <dl className={cx(card, "m-0 grid grid-cols-2 [&>div:nth-child(n+3)]:border-t [&>div:nth-child(n+3)]:border-[var(--line-soft)]")}>
+        <dl className={cx(card, "m-0 grid grid-cols-1 max-[359px]:[&>div:nth-child(n+2)]:border-t max-[359px]:[&>div:nth-child(n+2)]:border-[var(--line-soft)] min-[360px]:grid-cols-2 min-[360px]:[&>div:nth-child(n+3)]:border-t min-[360px]:[&>div:nth-child(n+3)]:border-[var(--line-soft)]")}>
           <DetailField label={t({ ko: "최근 실행", en: "Last run", ja: "前回実行", zh: "上次运行" })} value={formatDateTime(routine.last_run_at, localeTag)} />
           <DetailField label={t({ ko: "담당", en: "Agent", ja: "担当", zh: "负责" })} value={routine.agent_id ?? "-"} />
           <DetailField label={t({ ko: "대체 담당", en: "Backup agent", ja: "代替担当", zh: "备用负责" })} value={routine.fallback_agent_id ?? "-"} />

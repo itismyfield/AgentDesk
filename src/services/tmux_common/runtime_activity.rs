@@ -12,7 +12,7 @@
 /// before it force-cleans a `desynced` channel — a self-paced loop session that
 /// is mid-write touches its jsonl even while the inflight row reads stale, so a
 /// fresh probe here means the "desync" is a loop mid-write, not a hang.
-pub(crate) fn latest_runtime_activity_unix_nanos(tmux_session_name: &str) -> i64 {
+pub fn latest_runtime_activity_unix_nanos(tmux_session_name: &str) -> i64 {
     fn mtime_nanos(path: &str) -> i64 {
         std::fs::metadata(path)
             .and_then(|meta| meta.modified())

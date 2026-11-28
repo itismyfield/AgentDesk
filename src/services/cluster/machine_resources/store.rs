@@ -8,10 +8,10 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 use tokio::sync::mpsc;
 
-pub(crate) const HISTORY_WINDOW_MS: i64 = 15 * 60 * 1_000;
-pub(crate) const HISTORY_DEFAULT_LIMIT: i64 = 120;
-pub(crate) const HISTORY_MAX_LIMIT: i64 = 240;
-pub(crate) const HISTORY_RETENTION_DAYS: i64 = 90;
+pub const HISTORY_WINDOW_MS: i64 = 15 * 60 * 1_000;
+pub const HISTORY_DEFAULT_LIMIT: i64 = 120;
+pub const HISTORY_MAX_LIMIT: i64 = 240;
+pub const HISTORY_RETENTION_DAYS: i64 = 90;
 pub(crate) const HISTORY_CLEANUP_BATCH: i64 = 1_000;
 const HISTORY_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -101,7 +101,7 @@ pub(crate) async fn record(
     Ok(())
 }
 
-pub(crate) async fn history(
+pub async fn history(
     pool: &PgPool,
     instance_id: &str,
     from_ms: i64,
@@ -145,7 +145,7 @@ pub(crate) async fn purge_expired(pool: &PgPool) -> Result<u64, sqlx::Error> {
     .map(|result| result.rows_affected())
 }
 
-pub(crate) fn history_response(instance_id: &str, samples: Vec<Value>) -> Value {
+pub fn history_response(instance_id: &str, samples: Vec<Value>) -> Value {
     json!({"instance_id": instance_id, "samples": samples})
 }
 

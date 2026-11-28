@@ -1,11 +1,13 @@
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::services::cluster::intake_router_hook::owner_record::{self, output};
+#[cfg(test)]
+use crate::services::cluster::intake_router_hook::owner_record;
+use crate::services::cluster::intake_router_hook::owner_record::output;
 use crate::services::tui_o::ownership::execution;
 
-pub(crate) struct Fixture {
+pub struct Fixture {
     _db: TestPostgresDb,
-    pub(crate) pool: PgPool,
+    pub pool: PgPool,
     id: OwnerIdentity,
     generation: i64,
     pending: i64,
@@ -14,17 +16,13 @@ impl Fixture {
     async fn new(channel: u64) -> Self {
         Self::with_native(channel, None).await
     }
-    pub(crate) async fn with_native(channel: u64, native: Option<Value>) -> Self {
+    pub async fn with_native(channel: u64, native: Option<Value>) -> Self {
         Self::with_native_provider(channel, "claude", native).await
     }
-    pub(crate) async fn with_native_provider(
-        channel: u64,
-        provider: &str,
-        native: Option<Value>,
-    ) -> Self {
+    pub async fn with_native_provider(channel: u64, provider: &str, native: Option<Value>) -> Self {
         Self::on_executor(channel, provider, native, "mac-a").await
     }
-    pub(crate) async fn on_executor(
+    pub async fn on_executor(
         channel: u64,
         provider: &str,
         native: Option<Value>,
@@ -112,10 +110,10 @@ impl Fixture {
             pending,
         }
     }
-    pub(crate) async fn row(&self) -> Record {
+    pub async fn row(&self) -> Record {
         sqlx::query_as("SELECT * FROM intake_session_owners WHERE provider=$1 AND raw_channel_id=$2 AND generation=$3").bind(self.id.provider()).bind(self.id.raw_channel_id()).bind(self.generation).fetch_one(&self.pool).await.unwrap()
     }
-    pub(crate) async fn wake(&self) {
+    pub async fn wake(&self) {
         sqlx::query("UPDATE intake_session_owners SET routing_cleanup_next=NOW()-INTERVAL '1 second' WHERE provider=$1 AND raw_channel_id=$2").bind(self.id.provider()).bind(self.id.raw_channel_id()).execute(&self.pool).await.unwrap();
     }
 }

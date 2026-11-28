@@ -1,7 +1,7 @@
 //! The retired Herdr canary over its real fixture (old pin, no marker, blocked writer, Retired row):
 //! placement, the turn host and a held front's watch judge it alike.
 use super::*;
-use crate::db::dispatched_sessions::hosted_execution::tests::record;
+use crate::db::dispatched_sessions::hosted_execution::test_support::record;
 use crate::db::dispatched_sessions::hosted_execution::{HostedOwner, HostedState};
 use crate::services::agent_protocol::RuntimeHandoffKind::CodexTui;
 use crate::services::codex::CodexSourceMode;
