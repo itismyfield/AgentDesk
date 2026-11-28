@@ -13,16 +13,13 @@ use serenity::{ChannelId, MessageId};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::SourceMessageQueuedGeneration;
 
+use super::shared_state::PortFuture;
+#[cfg(test)]
+use super::shared_state::catch_up_retry::take_catch_up_retry_checkpoint_after_queue_drain;
+use super::shared_state::catch_up_retry::{
+    CATCH_UP_RETRY_DEFERRED_REARM_LIMIT, CATCH_UP_RETRY_FETCH_FAILURE_LIMIT, CatchUpRetryState,
+};
 use super::*;
-
-const CATCH_UP_RETRY_QUEUE_THRESHOLD: usize = MAX_INTERVENTIONS_PER_CHANNEL / 2;
-const CATCH_UP_RETRY_FETCH_FAILURE_LIMIT: u8 = 4;
-// #4156: a channel whose fetch keeps SUCCEEDING but whose messages keep being
-// Deferred (persistently busy / repeated ActorUnreachable) re-arms the catch-up
-// retry every scan. Without a bound that cycle is unbounded and unlogged. Cap
-// the consecutive Deferred re-arms (independently of the fetch-failure budget)
-// and emit a giving-up WARN at the cap, mirroring the fetch-failure path.
-const CATCH_UP_RETRY_DEFERRED_REARM_LIMIT: u8 = 8;
 
 fn catch_up_source_generation(
     message_id: MessageId,
@@ -57,18 +54,6 @@ fn catch_up_intervention_text(text: &str, author_is_bot: bool) -> String {
     let (without_operational_alert_origin, _) =
         crate::domain::outbound::alert_origin::strip_operational_alert_origin(text);
     without_operational_alert_origin.trim().to_string()
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::services) struct CatchUpRetryState {
-    checkpoint: u64,
-    fetch_failures: u8,
-    // #4156: consecutive Deferred re-arms (fetch succeeded, enqueue deferred).
-    // Tracked separately from `fetch_failures` because a Deferred re-arm is not
-    // a fetch error; both budgets share the merge's most-exhausted semantics.
-    // A value beyond the retry limit retains the exhausted arm for periodic sweeps.
-    deferred_rearms: u8,
-    armed_at: Instant,
 }
 
 mod api;
@@ -121,15 +106,14 @@ use retry_state::{
 };
 use settled_frontier::{RetainedBarrier, SettledFrontier};
 
-pub(in crate::services::discord) fn should_trigger_catch_up_retry(queue_len: usize) -> bool {
-    queue_len <= CATCH_UP_RETRY_QUEUE_THRESHOLD
+#[cfg(test)]
+fn new_retry_state(checkpoint: u64) -> CatchUpRetryState {
+    CatchUpRetryState::new_at(checkpoint, Instant::now())
 }
-
-pub(in crate::services::discord) use retry_state::take_catch_up_retry_checkpoint_after_queue_drain;
 
 #[cfg(test)]
 fn arm_catch_up_retry_pending(shared: &SharedData, channel_id: ChannelId, retry_after: u64) -> u64 {
-    arm_catch_up_retry_state(shared, channel_id, CatchUpRetryState::new(retry_after)).checkpoint
+    arm_catch_up_retry_state(shared, channel_id, new_retry_state(retry_after)).checkpoint
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -474,17 +458,19 @@ async fn catch_up_missed_messages_with_api<A: CatchUpDiscordApi + ?Sized>(
 /// #4165 queue-drain retry entry: the same sweep as [`catch_up_missed_messages`]
 /// but seeded with caller-owned retry checkpoints (and no pending-channel
 /// collection) so a single channel can be re-scanned after its queue drains.
-pub(in crate::services::discord) async fn catch_up_missed_messages_for_retry(
-    http: &Arc<serenity::Http>,
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    retry_checkpoints: &HashMap<ChannelId, CatchUpRetryState>,
-) {
-    let api = SerenityCatchUpDiscordApi { http };
-    run_catch_up_sweep(
-        CatchUpDeps::new(&api, shared, provider).with_retry_checkpoints(retry_checkpoints),
-    )
-    .await;
+pub(in crate::services::discord) fn catch_up_missed_messages_for_retry<'a>(
+    http: &'a Arc<serenity::Http>,
+    shared: &'a Arc<SharedData>,
+    provider: &'a ProviderKind,
+    retry_checkpoints: &'a HashMap<ChannelId, CatchUpRetryState>,
+) -> PortFuture<'a, ()> {
+    Box::pin(async move {
+        let api = SerenityCatchUpDiscordApi { http };
+        run_catch_up_sweep(
+            CatchUpDeps::new(&api, shared, provider).with_retry_checkpoints(retry_checkpoints),
+        )
+        .await;
+    })
 }
 
 struct SweepContext<'a, A: CatchUpDiscordApi + ?Sized> {

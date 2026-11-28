@@ -39,6 +39,7 @@ pub(in crate::services::discord) mod reaction_control;
 pub(in crate::services::discord) mod raw_output;
 #[cfg(unix)]
 pub(in crate::services::discord) mod receipt_index;
+pub(in crate::services::discord) mod restart_report_types;
 pub(crate) mod result;
 pub(crate) mod send_api;
 pub(crate) mod send_gate;

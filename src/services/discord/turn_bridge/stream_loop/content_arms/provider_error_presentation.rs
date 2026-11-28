@@ -36,7 +36,7 @@ pub(super) fn provider_error_presentation(
             crate::services::discord::turn_bridge::status_panel::provider_failure::PROVIDER_FAILURE_SUMMARY
         );
         ProviderErrorPresentation::Failure(
-            crate::services::discord::commands::owner_error_response(&summary, &detail),
+            crate::services::discord::formatting::owner_error_response(&summary, &detail),
         )
     }
 }

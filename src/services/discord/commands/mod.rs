@@ -52,21 +52,8 @@ pub(super) const HOST_REFUSED_STOP_RESPONSE: &str =
     "이 세션의 호스트를 확인하지 못해 중지하지 않았어요. 턴은 계속 진행돼요.";
 pub(super) const SESSION_CLEARED_RESPONSE: &str = "세션을 초기화했어요.";
 
-pub(in crate::services::discord) fn owner_error_response(summary: &str, detail: &str) -> String {
-    const DETAIL_PREVIEW_CHARS: usize = 1_400;
-
-    let detail = detail.trim();
-    let truncated = detail.chars().count() > DETAIL_PREVIEW_CHARS;
-    let preview: String = detail.chars().take(DETAIL_PREVIEW_CHARS).collect();
-    let preview = super::formatting::escape_for_code_fence(&preview).replace("||", "|\u{200b}|");
-    let suffix = if truncated {
-        "\n…(이하 생략)"
-    } else {
-        ""
-    };
-
-    format!("⚠️ {summary}\n||**상세**\n```text\n{preview}{suffix}\n```||")
-}
+#[cfg(test)]
+pub(in crate::services::discord) use super::formatting::owner_error_response;
 
 #[allow(unused_imports)]
 pub(in crate::services::discord) use command_policy::{CommandRisk, PolicyDecision};

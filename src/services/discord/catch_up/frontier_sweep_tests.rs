@@ -4,7 +4,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 
-use super::super::CatchUpRetryState;
+use super::super::{
+    CatchUpRetryState, new_retry_state, take_catch_up_retry_checkpoint_after_queue_drain,
+};
 use super::*;
 use crate::services::discord::outbound::completed_turn_ledger;
 use crate::services::discord::queue_io::mailbox_enqueue_observed_intervention as observed_enqueue;
@@ -680,7 +682,7 @@ async fn t6b_phase2_scan_checkpoint_is_clamped_without_lowering_the_live_one() {
     let (checkpoint, m, n, live) = (id(1, 400), id(2, 120), id(3, 30), id(4, 5));
     write_checkpoint(fx.root.path(), &fx.provider, channel_id, checkpoint.get());
     fx.shared.last_message_ids.insert(channel_id, live.get());
-    let consumed = CatchUpRetryState::new(checkpoint.get());
+    let consumed = new_retry_state(checkpoint.get());
     fx.shared
         .catch_up_retry_pending
         .insert(channel_id, consumed);
@@ -920,7 +922,7 @@ async fn t9c_clear_that_fails_to_persist_drops_the_retry_and_advances_the_checkp
     let token = Arc::new(crate::services::provider::CancelToken::new());
     let owner = serenity::UserId::new(HUMAN_ID);
     assert!(discord::mailbox_try_start_turn(&fx.shared, channel_id, token, owner, active).await);
-    let retry = CatchUpRetryState::new(checkpoint.get());
+    let retry = new_retry_state(checkpoint.get());
     fx.shared.catch_up_retry_pending.insert(channel_id, retry);
     // A directory in the queue file's place fails both the removal and the publish, twice.
     let queue_file = crate::services::discord::runtime_store::discord_pending_queue_root()
@@ -1080,7 +1082,7 @@ async fn t11_exhausted_budget_is_not_reset_by_the_barrier_arm() {
     let (checkpoint, m, n) = (id(1, 600), id(2, 120), id(3, 30));
     fx.seed_checkpoint(channel_id, checkpoint);
     fx.queue(channel_id, m).await;
-    let mut exhausted = CatchUpRetryState::new(checkpoint.get());
+    let mut exhausted = new_retry_state(checkpoint.get());
     exhausted.deferred_rearms = super::CATCH_UP_RETRY_DEFERRED_REARM_LIMIT;
     fx.shared
         .catch_up_retry_pending
@@ -1121,7 +1123,7 @@ async fn t11b_exhausted_barrier_after_a_settled_predecessor_is_not_logged_as_ret
     let channel_id = ChannelId::new(4_603_523);
     let (checkpoint, a, m) = (id(1, 600), id(2, 300), id(3, 120));
     fx.seed_checkpoint(channel_id, checkpoint);
-    let mut last_budget = CatchUpRetryState::new(checkpoint.get());
+    let mut last_budget = new_retry_state(checkpoint.get());
     last_budget.deferred_rearms = super::CATCH_UP_RETRY_DEFERRED_REARM_LIMIT;
     (fx.shared.catch_up_retry_pending).insert(channel_id, last_budget);
     let history = vec![
@@ -1629,10 +1631,7 @@ pub(super) mod exhausted_recovery_tests {
                 .contains(&channel_id)
         );
         assert!(
-            super::super::super::take_catch_up_retry_checkpoint_after_queue_drain(
-                &fx.shared, channel_id, 0
-            )
-            .is_none()
+            take_catch_up_retry_checkpoint_after_queue_drain(&fx.shared, channel_id, 0).is_none()
         );
         assert_eq!(
             fx.pending(channel_id),
@@ -2148,10 +2147,8 @@ pub(super) mod exhausted_recovery_tests {
         let (a, b) = (clock.message_id(1, 600), clock.message_id(2, 30));
         let path = fail_actual_queue_writes(&fx, &clock, channel_id, a, &[b], phase2, 8).await;
         let armed = fx.pending(channel_id).unwrap();
-        let drained = super::super::super::take_catch_up_retry_checkpoint_after_queue_drain(
-            &fx.shared, channel_id, 0,
-        )
-        .expect("the real drain consumes the bounded eighth arm");
+        let drained = take_catch_up_retry_checkpoint_after_queue_drain(&fx.shared, channel_id, 0)
+            .expect("the real drain consumes the bounded eighth arm");
         assert_eq!(drained, armed);
         assert_eq!(drained.deferred_rearms, 8);
         assert!(fx.pending(channel_id).is_none());

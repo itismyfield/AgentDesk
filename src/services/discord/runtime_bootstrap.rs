@@ -71,6 +71,8 @@ pub(in crate::services::discord) use self::queued_placeholders::{
 pub(in crate::services::discord) use self::restored_state::{
     restore_model_overrides, restored_model_overrides,
 };
+#[cfg(test)]
+pub(in crate::services::discord) use self::shared_data::RUNTIME_PORTS;
 use self::shared_data::{
     ProcessLifecycleCounters, RestoredSessionState, RuntimeServices, UiFeatureFlags,
     run_bot_build_shared_data,

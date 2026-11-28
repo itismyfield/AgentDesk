@@ -44,7 +44,7 @@
 | 32 | `src/services/discord/turn_bridge/headless_delivery.rs:315,503,588`; `src/services/discord/turn_bridge/terminal_outcome_delivery.rs:909,914` | W17 outbox/direct 및 복구. 기존 루틴과 인증된 HTTP는 `AgyHeadlessAnswer`. 인증된 HTTP의 W17 경계는 조각 1b 설계 보강이 필요하다. |
 | 33 | `src/services/discord/outbound/body_census.rs:133,175,176,201,213`; `src/services/discord/turn_bridge/stream_tick/output.rs:193,305,462` | provider·origin·W14/W14a-c·W17 원본 분류. 관측은 `AgyLegacyRace`와 `AgyHeadlessAnswer`를 구별한다. |
 | 34 | `src/services/legacy_body_census/transport.rs:10,32`; `src/services/legacy_body_census/collector.rs:28`; `src/services/legacy_body_census/evaluation.rs:5,279,444,459`; `src/services/routines/legacy_body_census.rs:30` | Legacy 시도·결과와 O 수신증 수집 및 24시간 평가. `AgyLegacyRace`, `AgyReceipt`, `AgyHeadlessAnswer`. |
-| 35 | `src/services/discord/commands/control.rs:548,598,620`, `src/services/turn_orchestrator/clear_channel.rs:146,150`, `src/services/discord/catch_up/retry_state.rs:533,543` | clear·stop·cancel의 정확한 턴 처분을 기존 anchor 해제와 catch-up 전진보다 먼저 내구 기록한다. `AgyDiscard`. |
+| 35 | `src/services/discord/commands/control.rs:548,598,620`, `src/services/turn_orchestrator/clear_channel.rs:146,150`, `src/services/discord/catch_up/retry_state.rs`의 `clear_channel_discarding_catch_up_backlog`와 `discard_cleared_backlog` | clear·stop·cancel의 정확한 턴 처분을 기존 anchor 해제와 catch-up 전진보다 먼저 내구 기록한다. `AgyDiscard`. |
 
 ## 2. 스풀 형식과 기록 경계
 

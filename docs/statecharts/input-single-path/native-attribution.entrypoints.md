@@ -35,7 +35,7 @@ main `984d802d9f`에서 아래 4개 시험 파일이 삭제됐다. 이 파일의
 | 코드 좌표 | 포함 함수/진입점 | 모델 행동 |
 |---|---|---|
 | `src/services/discord/admin_host_guard.rs:236` | `apply` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
-| `src/services/discord/catch_up/retry_state.rs:538` | `clear_channel_discarding_catch_up_backlog` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
+| `src/services/discord/catch_up/retry_state.rs` | `clear_channel_discarding_catch_up_backlog` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
 | `src/services/discord/health/recovery.rs:285` | `clear_provider_channel_runtime` | BootRestore / Reconstruct |
 | `src/services/discord/health/recovery/inflight_repair.rs:188` | `clear_idle_tmux_stale_turn` | BootRestore / Reconstruct |
 | `src/services/discord/health/recovery/runtime_lookup.rs:211` | `finish_cancelled_provider_channel_mailbox` | BootRestore / Reconstruct |

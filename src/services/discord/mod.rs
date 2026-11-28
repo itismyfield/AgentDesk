@@ -256,13 +256,8 @@ pub(in crate::services::discord) use {
     delivery_lease_key::DeliveryLeaseKey,
     relay_health::{RelayFrontierMutationGuard, RelayFrontierToken},
 };
-// #3479 item-2: re-export the catch-up subsystem entry points referenced
-// outside the extracted cluster (`maybe_schedule_catch_up_retry_after_queue_drain`
-// here in mod.rs and `catch_up_missed_messages` in runtime_bootstrap recovery).
-pub(in crate::services::discord) use catch_up::{
-    CatchUpRetryState, catch_up_missed_messages, catch_up_missed_messages_for_retry,
-    should_trigger_catch_up_retry, take_catch_up_retry_checkpoint_after_queue_drain,
-};
+// Bootstrap uses this entry point for the startup sweep.
+pub(in crate::services::discord) use catch_up::catch_up_missed_messages;
 #[cfg(test)]
 pub(in crate::services::discord) use mailbox_finish::mailbox_finish_cancelled_turn;
 pub(in crate::services::discord) use mailbox_finish::{
@@ -403,8 +398,7 @@ use crate::services::turn_orchestrator::{
     warn_legacy_pending_queue_files,
 };
 pub(super) use crate::services::turn_orchestrator::{
-    ChannelMailboxRegistry, Intervention, InterventionMode, MAX_INTERVENTIONS_PER_CHANNEL,
-    PendingQueueItem,
+    ChannelMailboxRegistry, Intervention, InterventionMode, PendingQueueItem,
 };
 pub use discord_io::{
     retry_failed_dm_notifications, send_file_to_channel, send_message_to_channel,

@@ -3,6 +3,7 @@
 //! fields, keeping `SharedData`'s public surface and every call site
 //! unchanged.
 
+pub(super) mod catch_up_retry;
 mod g7_host;
 #[path = "gateway_lease_diagnostics.rs"]
 pub(in crate::services::discord) mod gateway_lease_diagnostics;
@@ -21,10 +22,27 @@ use poise::serenity_prelude::{ChannelId, MessageId};
 
 use crate::services::provider::ProviderKind;
 
+use super::outbound::restart_report_types::{RestartAttempt, RestartReportContext};
 use super::{
     ModelPickerPendingState, QueueExitVisibleCard, SharedData, placeholder_cleanup,
     placeholder_controller, placeholder_live_events,
 };
+
+type CatchUpRetrySweep = for<'a> fn(
+    &'a Arc<serenity::Http>,
+    &'a Arc<SharedData>,
+    &'a ProviderKind,
+    &'a std::collections::HashMap<ChannelId, catch_up_retry::CatchUpRetryState>,
+) -> PortFuture<'a, ()>;
+
+/// Catch-up and restart operations installed by the runtime bootstrap.
+pub(in crate::services::discord) struct RuntimePorts {
+    pub(in crate::services::discord) catch_up_retry_sweep: CatchUpRetrySweep,
+    pub(in crate::services::discord) announce_restart:
+        fn(&RestartReportContext) -> Result<RestartAttempt, String>,
+    pub(in crate::services::discord) clear_restart_report: fn(&ProviderKind, u64, &RestartAttempt),
+    pub(in crate::services::discord) clear_restart_report_for_orphan: fn(&ProviderKind, u64),
+}
 
 /// #3038 cluster F — live-placeholder/status-panel state: cleanup
 /// tombstones, serialized placeholder edits, the recent live-event/

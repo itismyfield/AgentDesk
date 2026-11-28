@@ -1,4 +1,13 @@
 use super::*;
+use crate::services::discord::shared_state::RuntimePorts;
+
+pub(in crate::services::discord) const RUNTIME_PORTS: RuntimePorts = RuntimePorts {
+    catch_up_retry_sweep: crate::services::discord::catch_up::catch_up_missed_messages_for_retry,
+    announce_restart: crate::services::discord::restart_report::announce_restart,
+    clear_restart_report: crate::services::discord::restart_report::clear_restart_report,
+    clear_restart_report_for_orphan:
+        crate::services::discord::restart_report::clear_restart_report_for_orphan,
+};
 
 /// #3479 Item 3: runtime services/handles/backends consumed by the SharedData
 /// builder. Field names match the original arguments so the builder body stays
@@ -268,6 +277,7 @@ pub(super) fn run_bot_build_shared_data(
         readopted_mailbox_ledger:
             crate::services::discord::readopted_mailbox_ledger::ReadoptedMailboxLedger::default(),
         router_ports: crate::services::discord::router::ROUTER_PORTS,
+        runtime_ports: RUNTIME_PORTS,
     })
 }
 

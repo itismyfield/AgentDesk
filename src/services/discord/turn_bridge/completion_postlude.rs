@@ -782,7 +782,7 @@ pub(super) async fn run_completion_postlude(
     if completion_r3.permits_channel_effects()
         && let Some(attempt) = restart_followup_pending.as_ref()
     {
-        clear_restart_report(&provider, channel_id.get(), attempt);
+        (shared_owned.runtime_ports.clear_restart_report)(&provider, channel_id.get(), attempt);
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!(
             "  [{ts}] ✓ Cleared restart report for channel {} (turn completed normally)",

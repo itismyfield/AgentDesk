@@ -193,6 +193,30 @@ pub(super) use {
     crate::domain::tool_text::{ALL_TOOLS, canonical_tool_name},
 };
 
+pub(in crate::services::discord) fn owner_error_response(summary: &str, detail: &str) -> String {
+    const DETAIL_PREVIEW_CHARS: usize = 1_400;
+
+    let detail = detail.trim();
+    let truncated = detail.chars().count() > DETAIL_PREVIEW_CHARS;
+    let preview: String = detail.chars().take(DETAIL_PREVIEW_CHARS).collect();
+    let preview = escape_for_code_fence(&preview).replace("||", "|\u{200b}|");
+    let suffix = if truncated {
+        "\n…(이하 생략)"
+    } else {
+        ""
+    };
+
+    [
+        "⚠️ ",
+        summary,
+        "\n||**상세**\n```text\n",
+        &preview,
+        suffix,
+        "\n```||",
+    ]
+    .concat()
+}
+
 #[path = "formatting/streaming_status.rs"]
 mod streaming_status;
 

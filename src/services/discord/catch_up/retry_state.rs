@@ -19,8 +19,6 @@ use super::{
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::ClearChannelResult;
 
-const HOLD_TTL: std::time::Duration = std::time::Duration::from_secs(86_400);
-
 pub(super) fn arm_catch_up_retry_state(
     shared: &SharedData,
     channel_id: ChannelId,
@@ -177,52 +175,6 @@ pub(super) fn catch_up_message_age_reference_time(
         return scan_wall_time;
     };
     scan_wall_time - elapsed_since_arm
-}
-
-impl CatchUpRetryState {
-    pub(super) fn is_exhausted_hold(self) -> bool {
-        self.deferred_rearms > CATCH_UP_RETRY_DEFERRED_REARM_LIMIT
-    }
-
-    pub(super) fn hold_expired_at(self, now: Instant) -> bool {
-        self.is_exhausted_hold() && now.saturating_duration_since(self.armed_at) >= HOLD_TTL
-    }
-
-    #[cfg(test)]
-    pub(super) fn new(checkpoint: u64) -> Self {
-        Self::new_at(checkpoint, Instant::now())
-    }
-
-    pub(super) fn new_at(checkpoint: u64, armed_at: Instant) -> Self {
-        Self {
-            checkpoint,
-            fetch_failures: 0,
-            deferred_rearms: 0,
-            armed_at,
-        }
-    }
-
-    pub(super) fn after_fetch_failure(self) -> Option<Self> {
-        let fetch_failures = self.fetch_failures.saturating_add(1);
-        (fetch_failures <= CATCH_UP_RETRY_FETCH_FAILURE_LIMIT).then_some(Self {
-            checkpoint: self.checkpoint,
-            fetch_failures,
-            deferred_rearms: self.deferred_rearms,
-            armed_at: self.armed_at,
-        })
-    }
-
-    // An exhausted arm is retained separately from the bounded retry budget.
-    pub(super) fn after_deferred_rearm(self, checkpoint: u64) -> Option<Self> {
-        let deferred_rearms = self.deferred_rearms.saturating_add(1);
-        (deferred_rearms <= CATCH_UP_RETRY_DEFERRED_REARM_LIMIT).then_some(Self {
-            checkpoint,
-            fetch_failures: self.fetch_failures,
-            deferred_rearms,
-            // Preserve the original arm-time age window across retries.
-            armed_at: self.armed_at,
-        })
-    }
 }
 
 pub(super) fn merge_catch_up_retry_state(
@@ -447,43 +399,6 @@ pub(super) fn hold_utility_resolution(
     }
 }
 
-// Reserve a drained retry before releasing the map entry so periodic scans retain its origin.
-pub(in crate::services::discord) fn take_catch_up_retry_checkpoint_after_queue_drain(
-    shared: &SharedData,
-    channel_id: ChannelId,
-    queue_len_after: usize,
-) -> Option<CatchUpRetryState> {
-    if !super::should_trigger_catch_up_retry(queue_len_after) {
-        return None;
-    }
-    if !shared
-        .catch_up_retry_pending
-        .get(&channel_id)
-        .is_some_and(|state| !state.is_exhausted_hold())
-    {
-        return None;
-    }
-    let mut slot = shared
-        .catch_up_scan_in_progress
-        .entry(channel_id)
-        .or_insert((false, None));
-    if slot.0 || slot.1.is_some() {
-        return None;
-    }
-    let retry = shared
-        .catch_up_retry_pending
-        .remove_if(&channel_id, |_, state| !state.is_exhausted_hold())
-        .map(|(_, state)| state);
-    slot.1 = retry;
-    drop(slot);
-    if retry.is_none() {
-        shared
-            .catch_up_scan_in_progress
-            .remove_if(&channel_id, |_, slot| !slot.0 && slot.1.is_none());
-    }
-    retry
-}
-
 pub(super) async fn record_exhausted_hold_expiry<A: super::api::CatchUpDiscordApi + ?Sized>(
     api: &A,
     shared: &SharedData,
@@ -573,6 +488,6 @@ pub(in crate::services::discord) fn arm_catch_up_retry_for_tests(
     channel_id: ChannelId,
     checkpoint: u64,
 ) {
-    let state = CatchUpRetryState::new(checkpoint);
+    let state = super::new_retry_state(checkpoint);
     shared.catch_up_retry_pending.insert(channel_id, state);
 }

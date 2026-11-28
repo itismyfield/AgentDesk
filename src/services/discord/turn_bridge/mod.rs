@@ -59,9 +59,7 @@ mod two_message_panel;
 mod watcher_handoff;
 mod watcher_orphan_cleanup;
 use super::gateway::TurnGateway;
-use super::restart_report::{
-    RestartAttempt, RestartReportContext, announce_restart, clear_restart_report,
-};
+use super::outbound::restart_report_types::{RestartAttempt, RestartReportContext};
 use super::turn_view_reconciler::{
     note_intake_turn_cleared_via_shared as tv_clear,
     note_intake_turn_completed_via_shared as tv_done,

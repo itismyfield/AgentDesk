@@ -1,5 +1,8 @@
 //! Mailbox and idle-queue operations the Discord runtime runs against a channel's actor.
 
+use super::shared_state::catch_up_retry::{
+    should_trigger_catch_up_retry, take_catch_up_retry_checkpoint_after_queue_drain,
+};
 #[cfg(unix)]
 use super::tmux;
 use super::{
@@ -8,11 +11,10 @@ use super::{
     MailboxEnqueueOutcome, MailboxTakeNextSoftOutcome, MessageId,
     PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER, ProviderKind, SharedData, UserId,
     VALVE_CLEARED_DISPATCH_MARKER_GRACE, apply_queue_exit_feedback, automatic_queue_progression,
-    catch_up_missed_messages_for_retry, inflight, load_channel_pending_dispatch_marker,
-    mailbox_finish, mailbox_has_blocking_active_turn, mailbox_take_next_automatic_intervention,
-    queue_io, queue_persistence_context, schedule_deferred_idle_queue_kickoff,
-    schedule_deferred_idle_queue_kickoff_immediate, should_trigger_catch_up_retry,
-    take_catch_up_retry_checkpoint_after_queue_drain, task_supervisor, tui_direct_pending_start,
+    inflight, load_channel_pending_dispatch_marker, mailbox_finish,
+    mailbox_has_blocking_active_turn, mailbox_take_next_automatic_intervention, queue_io,
+    queue_persistence_context, schedule_deferred_idle_queue_kickoff,
+    schedule_deferred_idle_queue_kickoff_immediate, task_supervisor, tui_direct_pending_start,
     turn_bridge,
 };
 
@@ -283,7 +285,8 @@ pub(super) fn maybe_schedule_catch_up_retry_after_queue_drain(
             channel_id,
             queue_len_after
         );
-        catch_up_missed_messages_for_retry(&http, &shared, &provider, &retry_checkpoints).await;
+        (shared.runtime_ports.catch_up_retry_sweep)(&http, &shared, &provider, &retry_checkpoints)
+            .await;
         schedule_deferred_idle_queue_kickoff(
             shared,
             provider,
@@ -493,4 +496,24 @@ pub(super) async fn mailbox_queue_snapshots(
             }
         })
         .collect()
+}
+
+/// codex review round-6 P2 (#1332): snapshot every mailbox in `shared` and
+/// collect the union of `intervention.message_id` + every
+/// `intervention.source_message_ids` entry per channel. The result is the
+/// set of user message ids the queued-placeholder filter accepts as
+/// "still live" on this channel.
+pub(in crate::services::discord) async fn collect_live_queue_message_ids(
+    shared: &SharedData,
+) -> std::collections::HashMap<ChannelId, std::collections::HashSet<u64>> {
+    let mut by_channel: std::collections::HashMap<ChannelId, std::collections::HashSet<u64>> =
+        std::collections::HashMap::new();
+    let snapshots = shared.mailboxes.snapshot_all().await;
+    for (channel_id, snapshot) in snapshots {
+        let ids = crate::services::discord::queued_message_ids(&snapshot);
+        if !ids.is_empty() {
+            by_channel.insert(channel_id, ids);
+        }
+    }
+    by_channel
 }

@@ -279,7 +279,7 @@ pub(super) async fn handle_stream_tool_message(
                     adk_session_name.clone(),
                 );
                 // Reporting is best-effort and does not gate the restart handoff.
-                restart_followup_pending = announce_restart(&context).ok();
+                restart_followup_pending = (shared_owned.runtime_ports.announce_restart)(&context).ok();
                 inflight_state.set_restart_mode(
                     crate::services::discord::InflightRestartMode::DrainRestart,
                 );

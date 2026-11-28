@@ -35,7 +35,7 @@ pub(in crate::services::discord) fn stream_body_ownership_peek(
 }
 
 pub(super) fn prompt_too_long_guidance(detail: &str) -> String {
-    crate::services::discord::commands::owner_error_response(
+    crate::services::discord::formatting::owner_error_response(
         "현재 대화가 provider의 컨텍스트 한도를 넘었어요.\n`/compact`로 대화를 압축하거나 요청을 짧게 줄여 다시 보내 주세요.",
         &format!("{PROMPT_TOO_LONG_DETAIL_MARKER}\n{}", detail.trim()),
     )

@@ -1,3 +1,4 @@
+pub(crate) use super::outbound::restart_report_types::{RestartAttempt, RestartReportContext};
 use super::runtime_store::{atomic_write, discord_restart_reports_root, fsync_parent_dir};
 use super::settings::{BotChannelRoutingGuardFailure, validate_bot_channel_routing};
 use super::{SharedData, mailbox_snapshot};
@@ -20,38 +21,6 @@ const AWAITING_REPORT_MAX_AGE: chrono::Duration = chrono::Duration::minutes(5);
 use crate::services::provider::restart_report_env::{
     RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
 };
-#[derive(Debug, Clone)]
-pub(crate) struct RestartReportContext {
-    pub provider: ProviderKind,
-    pub channel_id: u64,
-    pub current_msg_id: Option<u64>,
-    pub channel_name: Option<String>,
-}
-impl RestartReportContext {
-    pub(crate) fn from_bridge(
-        provider: ProviderKind,
-        channel_id: u64,
-        current_msg_id: Option<u64>,
-        channel_name: Option<String>,
-    ) -> Self {
-        Self {
-            provider,
-            channel_id,
-            current_msg_id,
-            channel_name,
-        }
-    }
-}
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub(crate) struct RestartAttempt(String);
-impl RestartAttempt {
-    pub(crate) fn new() -> Self {
-        Self(uuid::Uuid::new_v4().to_string())
-    }
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
-    }
-}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RestartFailure {
@@ -371,6 +340,13 @@ pub(crate) fn clear_loaded_restart_report(report: Option<&RestartCompletionRepor
         return;
     };
     clear_restart_report(&provider, report.channel_id, &report.attempt);
+}
+pub(in crate::services::discord) fn clear_restart_report_for_orphan(
+    provider: &ProviderKind,
+    channel_id: u64,
+) {
+    let restart_report = load_restart_report(provider, channel_id);
+    clear_loaded_restart_report(restart_report.as_ref());
 }
 pub(super) fn compare_delete(
     path: &Path,

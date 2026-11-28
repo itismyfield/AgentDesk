@@ -186,25 +186,7 @@ pub(in crate::services::discord) async fn delete_stale_queued_placeholder_cards_
     );
 }
 
-/// codex review round-6 P2 (#1332): snapshot every mailbox in `shared` and
-/// collect the union of `intervention.message_id` + every
-/// `intervention.source_message_ids` entry per channel. The result is the
-/// set of user message ids the queued-placeholder filter accepts as
-/// "still live" on this channel.
-pub(in crate::services::discord) async fn collect_live_queue_message_ids(
-    shared: &SharedData,
-) -> std::collections::HashMap<ChannelId, std::collections::HashSet<u64>> {
-    let mut by_channel: std::collections::HashMap<ChannelId, std::collections::HashSet<u64>> =
-        std::collections::HashMap::new();
-    let snapshots = shared.mailboxes.snapshot_all().await;
-    for (channel_id, snapshot) in snapshots {
-        let ids = crate::services::discord::queued_message_ids(&snapshot);
-        if !ids.is_empty() {
-            by_channel.insert(channel_id, ids);
-        }
-    }
-    by_channel
-}
+pub(in crate::services::discord) use super::super::mailbox_ops::collect_live_queue_message_ids;
 
 /// Queued ids of every channel whose actor answered, and the channels whose actor never did.
 pub(in crate::services::discord) struct LiveQueueObservation {

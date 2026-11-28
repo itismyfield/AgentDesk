@@ -1,13 +1,14 @@
 //! The Discord bot's shared runtime state and its test fixtures.
 
+use super::shared_state::catch_up_retry::CatchUpRetryState;
 use super::shared_state::health_ports::{RuntimeHealth, WeakRuntimeHealth};
 use super::{
-    Arc, CHANNEL_ROSTER_MAX_USERS, CatchUpRetryState, ChannelId, ChannelMailboxHandle,
-    DiscordBotSettings, DispatchRoutingState, EngineRuntime, Ordering, PlaceholderState,
-    QueuedPlaceholderState, RestartLifecycle, RuntimeHttpCache, SessionOverrideState,
-    TmuxRelayCoord, TmuxWatcherRegistry, UserId, UserRecord, answer_flush_barrier,
-    delivery_lease_cell, inflight, readopted_mailbox_ledger, shared_state, turn_completion_events,
-    turn_finalizer, turn_view_reconciler,
+    Arc, CHANNEL_ROSTER_MAX_USERS, ChannelId, ChannelMailboxHandle, DiscordBotSettings,
+    DispatchRoutingState, EngineRuntime, Ordering, PlaceholderState, QueuedPlaceholderState,
+    RestartLifecycle, RuntimeHttpCache, SessionOverrideState, TmuxRelayCoord, TmuxWatcherRegistry,
+    UserId, UserRecord, answer_flush_barrier, delivery_lease_cell, inflight,
+    readopted_mailbox_ledger, shared_state, turn_completion_events, turn_finalizer,
+    turn_view_reconciler,
 };
 #[cfg(test)]
 use super::{
@@ -132,6 +133,7 @@ pub(crate) struct SharedData {
     pub(in crate::services::discord) turn_view_reconciler: turn_view_reconciler::TurnViewReconciler,
     pub(super) readopted_mailbox_ledger: readopted_mailbox_ledger::ReadoptedMailboxLedger, // #4370
     pub(in crate::services::discord) router_ports: shared_state::RouterPorts,
+    pub(in crate::services::discord) runtime_ports: shared_state::RuntimePorts,
 }
 
 impl std::ops::Deref for SharedData {
@@ -461,5 +463,6 @@ pub(in crate::services) fn make_shared_data_for_tests_with_barrier(
         turn_view_reconciler: turn_view_reconciler::TurnViewReconciler::default(),
         readopted_mailbox_ledger: readopted_mailbox_ledger::ReadoptedMailboxLedger::default(),
         router_ports: router::ROUTER_PORTS,
+        runtime_ports: super::runtime_bootstrap::RUNTIME_PORTS,
     })
 }

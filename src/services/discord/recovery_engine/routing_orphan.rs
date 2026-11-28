@@ -159,9 +159,7 @@ async fn cleanup_routing_orphaned_inflight(
     // actionable once the row is being finalized — clear it so a later boot does
     // not re-enter the restart path for a channel this bot no longer routes.
     // Idempotent when none exists.
-    let restart_report =
-        crate::services::discord::restart_report::load_restart_report(provider, state.channel_id);
-    crate::services::discord::restart_report::clear_loaded_restart_report(restart_report.as_ref());
+    (shared.runtime_ports.clear_restart_report_for_orphan)(provider, state.channel_id);
     let text = super::interrupted_recovery_message(state, &state.full_response);
     let outcome = super::relay_recovery_body_notice(http, shared, provider, state, &text).await;
     dispose_recovery_relay_outcome(
