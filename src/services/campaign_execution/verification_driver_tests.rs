@@ -7,14 +7,14 @@ use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::campaign_execution::{
     adk_resources::AdkResources,
     adk_workspace,
-    control::tests as domain,
+    control::test_support as domain,
     evidence::{EvidenceEnvelope, TuiPayload, TuiSubmission},
     execution_pin::IssueObservation,
     host_identity,
     pipeline_rules::MinimalPipelineScope,
     profile::Observation,
     runtime_profile::tests::{rule_files, witness},
-    stage_fsm::tests as fsm,
+    stage_fsm::test_support as fsm,
     verification_run::PhaseOutput,
     verification_spec::ADK_NON_PG,
 };

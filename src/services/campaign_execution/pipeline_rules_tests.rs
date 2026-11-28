@@ -3,7 +3,7 @@ use crate::services::campaign_execution::{
     adk_profile::{ObservedModel, ProviderCapability, ResolvedAdkProfile, RoleSettingObservation},
     control::{
         self,
-        tests::{envelope, now, prepared, running},
+        test_support::{envelope, now, prepared, running},
     },
     execution_pin::{ExecutionPin, IssueObservation, PinError, RequirementsSnapshot},
     model::{CampaignControl, Command, ExecutionReadiness, RejectionCode, Repository},

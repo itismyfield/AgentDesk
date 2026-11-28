@@ -953,6 +953,10 @@ fn grants_for(
     grants
 }
 
+#[cfg(any(test, feature = "test-support"))]
+#[path = "stage_fsm_test_support.rs"]
+pub mod test_support;
+
 #[cfg(test)]
 #[path = "stage_fsm_tests.rs"]
 pub(crate) mod tests;

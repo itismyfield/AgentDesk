@@ -1,10 +1,14 @@
 use super::*;
 use crate::services::campaign_execution::{
-    control::tests as domain,
-    evidence_gate::tests::{OUTPUT, collected, seal},
-    model::{AttemptOutcome, NodeRuntime, Stage},
+    control::test_support as domain,
+    evidence_gate::{
+        GateReason,
+        tests::{OUTPUT, collected, seal},
+    },
+    model::{AttemptOutcome, CampaignState, NodeRuntime, Role, Stage},
     profile::TestOutcome,
     review_gate::StagePrerequisite,
+    verification_run::{VerificationCollection, VerificationRun},
 };
 use serde_json::json;
 

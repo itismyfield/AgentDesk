@@ -1097,6 +1097,7 @@ src/
 │   │   ├── ci_exception_tests.rs
 │   │   ├── commands.rs
 │   │   ├── control.rs
+│   │   ├── control_test_support.rs
 │   │   ├── control_tests.rs
 │   │   ├── decision_commands.rs
 │   │   ├── decision_commands_tests.rs
@@ -1111,6 +1112,7 @@ src/
 │   │   ├── effect_envelope.rs
 │   │   ├── evidence.rs
 │   │   ├── evidence_gate.rs
+│   │   ├── evidence_gate_test_support.rs
 │   │   ├── evidence_gate_tests.rs
 │   │   ├── evidence_tests.rs
 │   │   ├── execution_pin.rs
@@ -1155,11 +1157,13 @@ src/
 │   │   ├── scheduler.rs
 │   │   ├── scheduler_tests.rs
 │   │   ├── stage_fsm.rs
+│   │   ├── stage_fsm_test_support.rs
 │   │   ├── stage_fsm_tests.rs
 │   │   ├── verification_commands.rs
 │   │   ├── verification_driver.rs
 │   │   ├── verification_driver_tests.rs
 │   │   ├── verification_run.rs
+│   │   ├── verification_run_test_support.rs
 │   │   ├── verification_run_tests.rs
 │   │   ├── verification_runner.rs
 │   │   ├── verification_runner_tests.rs
