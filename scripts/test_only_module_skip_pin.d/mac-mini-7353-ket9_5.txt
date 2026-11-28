@@ -1,0 +1,3 @@
+resolver | src/ke_assembly_test_host.rs
+resolver | src/ke_auto_queue_test_host.rs
+resolver | src/ke_auto_queue_unix_test_host.rs

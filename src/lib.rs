@@ -305,9 +305,9 @@ include!("config/runtime_root_guard/test_process.rs");
 #[cfg(test)]
 mod ke_assembly_test_host;
 #[cfg(test)]
-mod ke_auto_queue_tests;
+mod ke_auto_queue_test_host;
 #[cfg(all(test, unix))]
-mod ke_auto_queue_unix_tests;
+mod ke_auto_queue_unix_test_host;
 #[cfg(test)]
 mod ke_routines_tests;
 #[cfg(test)]
