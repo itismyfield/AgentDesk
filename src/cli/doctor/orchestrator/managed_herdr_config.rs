@@ -200,7 +200,7 @@ pub(super) fn checks_for(
     }
     guidance.dedup();
     let detail = lines.join("; ");
-    let mut checks = vec![
+    let checks = vec![
         if guidance.is_empty() {
             Check::ok(ID, CheckGroup::Core, NAME, detail)
         } else {
@@ -209,7 +209,11 @@ pub(super) fn checks_for(
         .with_subsystem("herdr"),
     ];
     #[cfg(target_os = "macos")]
-    checks.push(job_check(&targets, job));
+    let checks = {
+        let mut checks = checks;
+        checks.push(job_check(&targets, job));
+        checks
+    };
     #[cfg(not(target_os = "macos"))]
     let _ = job;
     checks

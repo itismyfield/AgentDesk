@@ -2,15 +2,12 @@
 use super::super::runtime_store;
 use super::row::ReplayRow;
 use crate::domain::replay_evidence::recovery::{root::OwnedRuntimeRoot, snapshot::issuer};
-pub(crate) use crate::domain::replay_evidence::{SnapshotIdentity, recovery::LocalSnapshot};
+pub use crate::domain::replay_evidence::{SnapshotIdentity, recovery::LocalSnapshot};
 
 pub(crate) mod issuer_key;
 
 impl LocalSnapshot {
-    pub(in crate::services::discord) fn load<S: ReplayRow>(
-        root: Option<&OwnedRuntimeRoot>,
-        state: &S,
-    ) -> Option<Self> {
+    pub fn load<S: ReplayRow>(root: Option<&OwnedRuntimeRoot>, state: &S) -> Option<Self> {
         let root = root?;
         if !root.covers(&runtime_store::agentdesk_root()?) {
             return None;
@@ -49,4 +46,14 @@ impl LocalSnapshot {
             crate::domain::process_incarnation::incarnation(),
         ))
     }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn assert_snapshot_identity_for_test(
+    snapshot: &LocalSnapshot,
+    user_text: &str,
+    incarnation: &str,
+) {
+    assert_eq!(snapshot.state().user_text, user_text);
+    assert_eq!(snapshot.incarnation(), incarnation);
 }

@@ -6,13 +6,13 @@ use super::{ProcessBackend, SessionBackend, SessionHandle, process_sessions};
 
 const MAX_OUTPUT_BYTES: u64 = 256 * 1024;
 
-pub(crate) struct ProcessOutput {
+pub struct ProcessOutput {
     pub text: String,
     pub alive: bool,
     pub truncated: bool,
 }
 
-pub(crate) fn capture_process_output(
+pub fn capture_process_output(
     session_name: &str,
     lines: usize,
 ) -> Option<Result<ProcessOutput, &'static str>> {
@@ -24,7 +24,7 @@ pub(crate) fn capture_process_output(
                 output.clone(),
                 ProcessBackend::new().is_alive(&entry.handle),
             ),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             SessionHandle::TestProcess { .. } => return Some(Err("process_output_not_bound")),
         }
     };

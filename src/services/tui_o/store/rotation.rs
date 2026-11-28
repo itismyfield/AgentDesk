@@ -23,10 +23,10 @@ pub(crate) const TAKEOVER_END_FILE: &str = "takeover_end";
 /// The end of the execution a late takeover took; its source and nonce tie it to that init.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct TakeoverEnd {
-    pub(crate) source: SourceId,
-    pub(crate) nonce: String,
-    pub(crate) basis: String,
+pub struct TakeoverEnd {
+    pub source: SourceId,
+    pub nonce: String,
+    pub basis: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -39,6 +39,12 @@ pub(crate) struct FreshSelection {
 }
 
 impl ChannelStore {
+    /// The stored fresh selection's nonce, for upper-crate tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fresh_selection_nonce_for_test(&self) -> Result<Option<String>, StoreError> {
+        Ok(self.fresh_selection()?.map(|selection| selection.nonce))
+    }
+
     pub(crate) fn fresh_selection(&self) -> Result<Option<FreshSelection>, StoreError> {
         let read: Option<FreshSelection> =
             durable::read_json(&self.dir.join(FRESH_SELECTION_FILE))?;
@@ -227,6 +233,15 @@ impl ChannelStore {
         }
         let bytes = serde_json::to_vec(next)?;
         self.mutate(|store| Ok(durable::replace(&store.dir.join(BOUNDARY_FILE), &bytes)?))
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn refine_provisional_hot_link_for_test(
+        &mut self,
+        expected: &SourceLink,
+        event: &BindingEvent,
+    ) -> Result<Option<Rotation>, StoreError> {
+        self.refine_provisional_hot_link(expected, event)
     }
 
     /// Refines only a later explicit re-pin of this exact provisional Unknown attachment.
@@ -479,16 +494,12 @@ impl OStore {
         Ok(read.unwrap_or_default())
     }
 
-    pub(crate) fn takeover_end(&self, channel: u64) -> Result<Option<TakeoverEnd>, StoreError> {
+    pub fn takeover_end(&self, channel: u64) -> Result<Option<TakeoverEnd>, StoreError> {
         durable::read_json(&self.channel_dir(channel).join(TAKEOVER_END_FILE))
     }
 
     /// Kept beside the init, so neither a later execution nor a restart loses it.
-    pub(crate) fn keep_takeover_end(
-        &self,
-        channel: u64,
-        end: &TakeoverEnd,
-    ) -> Result<(), StoreError> {
+    pub fn keep_takeover_end(&self, channel: u64, end: &TakeoverEnd) -> Result<(), StoreError> {
         let bytes = serde_json::to_vec(end)?;
         let path = self.channel_dir(channel).join(TAKEOVER_END_FILE);
         Ok(durable::replace(&path, &bytes)?)

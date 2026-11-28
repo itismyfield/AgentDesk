@@ -1,7 +1,7 @@
 use super::*;
 
 impl BindingEvent {
-    pub(crate) fn source_refresh(&self) -> Option<(&SourceId, &SourceId)> {
+    pub fn source_refresh(&self) -> Option<(&SourceId, &SourceId)> {
         match &self.record {
             BindingRecord::Bound {
                 old,

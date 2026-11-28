@@ -52,7 +52,7 @@ async fn backfill_legacy_thread_channel_ids_pg(pool: &PgPool) -> usize {
     updated
 }
 
-pub(crate) async fn load_stale_thread_cleanup_rows_pg(
+pub async fn load_stale_thread_cleanup_rows_pg(
     pool: &PgPool,
 ) -> Result<Vec<CleanupRow>, sqlx::Error> {
     let _ = backfill_legacy_thread_channel_ids_pg(pool).await;
@@ -79,7 +79,7 @@ pub(crate) async fn load_stale_thread_cleanup_rows_pg(
 
 /// Whether any session row still names `thread_channel_id`: a successor or another provider's
 /// session of the same thread.
-pub(crate) async fn thread_session_exists_pg(
+pub async fn thread_session_exists_pg(
     pool: &PgPool,
     thread_channel_id: &str,
 ) -> Result<bool, sqlx::Error> {
@@ -89,7 +89,7 @@ pub(crate) async fn thread_session_exists_pg(
         .await
 }
 
-pub(crate) async fn delete_stale_thread_cleanup_row_pg(
+pub async fn delete_stale_thread_cleanup_row_pg(
     pool: &PgPool,
     row: &CleanupRow,
 ) -> Result<bool, sqlx::Error> {

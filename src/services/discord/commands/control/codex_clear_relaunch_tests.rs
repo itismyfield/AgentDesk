@@ -15,7 +15,7 @@ use crate::services::codex::{CodexSourceMode, SOURCE_MODE_TEST};
 use crate::services::codex_tui::canary::{CANARY_CHANNEL, CANARY_TMUX};
 use crate::services::discord::session_banner::relays_body;
 use crate::services::discord::turn_presence::activity::{self, Activity};
-use crate::services::provider_teardown::tests::test_support::FakeTmux;
+use crate::services::provider_teardown::test_support::FakeTmux;
 use crate::services::tui_o::turn_mode::TestConfirmation;
 use crate::services::tui_prompt_dedupe::binding_context::{
     BINDING_HEADER, BindingContext, CapturedContext, HookBindingEnvelope, ObservedHookProcess,

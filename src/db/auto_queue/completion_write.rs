@@ -6,7 +6,7 @@ use sqlx::Row as SqlxRow;
 use super::runs::RunCompletionOutcome;
 
 /// Result of the DB half of one completion attempt.
-pub(crate) enum RunCompletionPrepared<'borrow, 'conn> {
+pub enum RunCompletionPrepared<'borrow, 'conn> {
     /// Nothing was written; the outcome is final.
     Unchanged(RunCompletionOutcome),
     /// The run row is `completed` and its slots are released on the borrowed tx.
@@ -15,7 +15,7 @@ pub(crate) enum RunCompletionPrepared<'borrow, 'conn> {
 
 /// A run the borrowed tx just completed. Only the completion writer builds it, and the
 /// notice can only be staged through this borrow; the tx owner still commits or rolls back.
-pub(crate) struct PreparedCompletion<'borrow, 'conn> {
+pub struct PreparedCompletion<'borrow, 'conn> {
     tx: &'borrow mut sqlx::Transaction<'conn, sqlx::Postgres>,
     run_id: String,
     has_entries: bool,
@@ -34,36 +34,34 @@ impl<'borrow, 'conn> PreparedCompletion<'borrow, 'conn> {
         }
     }
 
-    pub(crate) fn run_id(&self) -> &str {
+    pub fn run_id(&self) -> &str {
         &self.run_id
     }
 
     /// A run that never held an entry has nothing to announce.
-    pub(crate) fn has_entries(&self) -> bool {
+    pub fn has_entries(&self) -> bool {
         self.has_entries
     }
 
-    pub(crate) async fn notice_facts(
-        &mut self,
-    ) -> Result<Option<RunCompletionNoticeFacts>, String> {
+    pub async fn notice_facts(&mut self) -> Result<Option<RunCompletionNoticeFacts>, String> {
         load_run_completion_notice_facts_on_pg_tx(self.tx, &self.run_id).await
     }
 
     /// The completing tx itself, for the notice INSERTs.
-    pub(crate) fn transaction(&mut self) -> &mut sqlx::Transaction<'conn, sqlx::Postgres> {
+    pub fn transaction(&mut self) -> &mut sqlx::Transaction<'conn, sqlx::Postgres> {
         self.tx
     }
 }
 
 /// Recipients and label inputs of one run-completion notice.
-pub(crate) struct RunCompletionNoticeFacts {
-    pub(crate) repo: Option<String>,
-    pub(crate) targets: Vec<String>,
-    pub(crate) entry_count: i64,
+pub struct RunCompletionNoticeFacts {
+    pub repo: Option<String>,
+    pub targets: Vec<String>,
+    pub entry_count: i64,
 }
 
 /// `None` when the run has no notice channel; the entry count is then never read.
-pub(crate) async fn load_run_completion_notice_facts_on_pg_tx(
+pub async fn load_run_completion_notice_facts_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_id: &str,
 ) -> Result<Option<RunCompletionNoticeFacts>, String> {

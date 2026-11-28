@@ -25,12 +25,14 @@ pub(super) use self::evidence::{
     GuardedDeliveredElsewhereSignal, GuardedNonterminalDeleteDecision, cleanup_current_output_eof,
     guarded_cleanup_delivered_elsewhere_signal, placeholder_real_body_exposure_evidence,
 };
+#[cfg(test)]
+pub(super) use self::ops::watcher_rollover_prefixes_to_delete_on_terminal;
 pub(super) use self::ops::{
     FallbackPlaceholderCleanupDecision, apply_placeholder_suppression,
     delete_nonterminal_placeholder, delete_nonterminal_placeholder_unless_delivered,
     delete_terminal_placeholder, delete_terminal_placeholder_unless_delivered,
     delete_watcher_rollover_frozen_prefixes, fallback_placeholder_cleanup_decision,
-    record_placeholder_cleanup, watcher_rollover_prefixes_to_delete_on_terminal,
+    record_placeholder_cleanup,
 };
 
 #[cfg(test)]

@@ -5,11 +5,11 @@ use crate::services::agent_protocol::RuntimeHandoffKind;
 
 /// Degraded reason a non-gateway node carries for each provider whose writer channels only the
 /// gateway may serve.
-pub(crate) const TUI_OUTPUT_REQUIRES_GATEWAY: &str = "tui_output_requires_gateway";
+pub const TUI_OUTPUT_REQUIRES_GATEWAY: &str = "tui_output_requires_gateway";
 
 /// How this process holds the Discord gateway for one provider.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum HostRole {
+pub enum HostRole {
     Gateway,
     Runner,
     Standby,
@@ -17,7 +17,7 @@ pub(crate) enum HostRole {
 
 /// How many of `provider`'s boot writer channels this node leaves to the gateway; `None` when
 /// the boot list is unknown, which health must not read as zero.
-pub(crate) fn gateway_only_channels(
+pub fn gateway_only_channels(
     provider: &str,
     role: HostRole,
     boot: Option<&BootChannels>,

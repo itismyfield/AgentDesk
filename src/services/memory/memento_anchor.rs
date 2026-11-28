@@ -306,19 +306,19 @@ impl MementoBackend {
     }
 }
 
-pub(crate) struct SessionAnchorRequest<'a> {
-    pub(crate) settings: &'a ResolvedMemorySettings,
-    pub(crate) provider: &'a ProviderKind,
-    pub(crate) current_path: &'a str,
-    pub(crate) channel_id: u64,
-    pub(crate) memory_scope_channel_id: u64,
-    pub(crate) role_id: Option<&'a str>,
-    pub(crate) session_id: Option<&'a str>,
-    pub(crate) fresh: bool,
+pub struct SessionAnchorRequest<'a> {
+    pub settings: &'a ResolvedMemorySettings,
+    pub provider: &'a ProviderKind,
+    pub current_path: &'a str,
+    pub channel_id: u64,
+    pub memory_scope_channel_id: u64,
+    pub role_id: Option<&'a str>,
+    pub session_id: Option<&'a str>,
+    pub fresh: bool,
 }
 
 impl SessionAnchorRequest<'_> {
-    pub(crate) fn peek_prompt(&self) -> Option<(String, usize)> {
+    pub fn peek_prompt(&self) -> Option<(String, usize)> {
         if self.fresh || self.session_id.is_none() {
             return None;
         }
@@ -337,14 +337,14 @@ impl SessionAnchorRequest<'_> {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn load_session_anchor_prompt(
+pub async fn load_session_anchor_prompt(
     request: SessionAnchorRequest<'_>,
 ) -> Option<(String, usize)> {
     let prompt = load_session_anchor_snapshot(request).await?;
     Some((prompt.text, prompt.records.len()))
 }
 
-pub(crate) async fn load_session_anchor_snapshot(
+pub async fn load_session_anchor_snapshot(
     request: SessionAnchorRequest<'_>,
 ) -> Option<SessionAnchorPrompt> {
     let SessionAnchorRequest {

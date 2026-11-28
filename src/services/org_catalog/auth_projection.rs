@@ -3,10 +3,10 @@ use super::document::OrgSchema;
 use crate::services::provider_auth_profile::{ProviderAuthProfileDef, fallback::FallbackPolicy};
 use std::collections::HashMap;
 
-pub(crate) type PrimaryProfileMap = HashMap<String, String>;
+pub type PrimaryProfileMap = HashMap<String, String>;
 
 #[derive(Debug)]
-pub(crate) struct ProfileBindingInput {
+pub struct ProfileBindingInput {
     pub agent_id: String,
     pub provider: Option<String>,
     pub agent_profile: Option<String>,
@@ -15,7 +15,7 @@ pub(crate) struct ProfileBindingInput {
 }
 
 #[derive(Debug)]
-pub(crate) struct AuthCatalogSnapshot {
+pub struct AuthCatalogSnapshot {
     pub profiles: HashMap<String, ProviderAuthProfileDef>,
     pub primary_profiles: PrimaryProfileMap,
     pub fallback_policies: HashMap<String, FallbackPolicy>,
@@ -65,7 +65,7 @@ impl From<&OrgSchema> for AuthCatalogSnapshot {
     }
 }
 
-pub(crate) fn configured_auth_profile<'a>(
+pub fn configured_auth_profile<'a>(
     channel: Option<&'a str>,
     agent: Option<&'a str>,
 ) -> Option<&'a str> {
@@ -73,7 +73,7 @@ pub(crate) fn configured_auth_profile<'a>(
     input.channel.or(input.agent)
 }
 
-pub(crate) fn provider_primary_profile(
+pub fn provider_primary_profile(
     profiles: Option<&PrimaryProfileMap>,
     provider: Option<&str>,
 ) -> String {

@@ -1403,7 +1403,7 @@ mod tests {
         use super::*;
         use crate::db::dispatched_sessions::hosted_execution;
         use crate::db::dispatched_sessions::hosted_execution::HostedState;
-        use crate::db::dispatched_sessions::hosted_execution::tests::{
+        use crate::db::dispatched_sessions::hosted_execution::test_support::{
             future_schema, owner, record, wire,
         };
         use crate::services::discord::host_defer_gate::tests::{

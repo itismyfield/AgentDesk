@@ -17,7 +17,7 @@ use crate::services::session_host::thread_host::{self, PolicyHost};
 use crate::services::tui_prompt_dedupe::clear_relaunch::herdr_bootstrap;
 
 #[derive(Debug)]
-pub(crate) enum TurnHost {
+pub enum TurnHost {
     /// The existing path, unchanged.
     Tmux,
     Herdr(Box<HerdrTurnPlan>),
@@ -28,13 +28,13 @@ pub(crate) enum TurnHost {
 }
 
 #[derive(Debug)]
-pub(crate) struct ReturnPlan {
+pub struct ReturnPlan {
     pub row: HostedObservation,
     pub record: HostedExecution,
 }
 
 #[derive(Debug)]
-pub(crate) struct HerdrTurnPlan {
+pub struct HerdrTurnPlan {
     pub endpoint: HerdrLaunchEndpoint,
     /// `None` while the channel has no sessions row yet.
     #[cfg_attr(not(unix), allow(dead_code))]
@@ -45,7 +45,7 @@ pub(crate) struct HerdrTurnPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HerdrRefusal {
+pub enum HerdrRefusal {
     /// The row holds a Pending or Bound Herdr execution (`None`: an unreadable record) but the
     /// channel is not configured.
     HostedHerdrUnconfigured {
@@ -154,21 +154,22 @@ pub(crate) async fn read_row(pool: Option<&PgPool>, session_key: Option<&str>) -
 
 /// Called again right before spawn, after [`refusal_before_turn`]. Admission and O readiness are
 /// read only for a configured channel.
-pub(crate) async fn for_turn(
+pub async fn for_turn(
     pool: Option<&PgPool>,
     provider: &ProviderKind,
     channel_id: u64,
     session_key: Option<&str>,
 ) -> TurnHost {
-    let host = resolve(pool, provider, channel_id, session_key, true).await;
+    let (host, verified_bound) = resolve(pool, provider, channel_id, session_key, true).await;
     // Synchronous readers of a thread's current execution read this final judgement.
-    thread_host::record_judged(channel_id, recorded_execution(&host));
+    thread_host::record_judged(channel_id, recorded_execution(&host, verified_bound));
     host
 }
 
 /// A thread's recorded execution is the evidence its judgement verified, not the turn's permission:
-/// a refusal after its Bound row matched keeps that pane; a refusal on the row, or a return, forgets.
-fn recorded_execution(host: &TurnHost) -> Option<bool> {
+/// a refusal after its Bound row matched (`verified_bound`) keeps that pane; any other refusal, or
+/// a return, forgets.
+fn recorded_execution(host: &TurnHost, verified_bound: bool) -> Option<bool> {
     match host {
         TurnHost::Herdr(_) => Some(true),
         TurnHost::Tmux => Some(false),
@@ -178,7 +179,7 @@ fn recorded_execution(host: &TurnHost) -> Option<bool> {
             | HerdrRefusal::AdmissionStopped { .. }
             | HerdrRefusal::OWriterNotReady
             | HerdrRefusal::ExecutorNotWired,
-        ) => Some(true),
+        ) => verified_bound.then_some(true),
         TurnHost::Refused(
             HerdrRefusal::HostedHerdrUnconfigured { .. } | HerdrRefusal::HostedRowUnreadable { .. },
         )
@@ -188,33 +189,36 @@ fn recorded_execution(host: &TurnHost) -> Option<bool> {
 
 /// Reads the selected host and its current row without admission or output-writer gates.
 #[cfg(unix)]
-pub(crate) async fn for_observation(
+pub async fn for_observation(
     pool: Option<&PgPool>,
     provider: &ProviderKind,
     channel_id: u64,
     session_key: Option<&str>,
 ) -> TurnHost {
-    resolve(pool, provider, channel_id, session_key, false).await
+    resolve(pool, provider, channel_id, session_key, false)
+        .await
+        .0
 }
 
+/// The turn host, and whether it matched the thread's Bound row at its parent's endpoint.
 async fn resolve(
     pool: Option<&PgPool>,
     provider: &ProviderKind,
     channel_id: u64,
     session_key: Option<&str>,
     execution: bool,
-) -> TurnHost {
+) -> (TurnHost, bool) {
     let configured_endpoint = |channel_id| session_hosts::herdr_endpoint(channel_id);
     if let Some(endpoint) = configured_endpoint(channel_id) {
-        return configured_turn(
+        let host = configured_turn(
             pool,
             provider,
             channel_id,
             session_key,
             (endpoint, execution),
             None,
-        )
-        .await;
+        );
+        return (host.await, false);
     }
     let row = read_row(pool, session_key).await;
     let policy = crate::services::session_host::surface_policy::policy_channel(channel_id);
@@ -222,33 +226,37 @@ async fn resolve(
         && let Some(endpoint) = configured_endpoint(policy)
     {
         if is_live_thread_endpoint(channel_id, provider, session_key, &row, &endpoint) {
-            return configured_turn(
+            let host = configured_turn(
                 pool,
                 provider,
                 channel_id,
                 session_key,
                 (endpoint, execution),
                 Some(row),
-            )
-            .await;
+            );
+            return (host.await, true);
         }
         if let Err(detail) = &row {
-            return TurnHost::Refused(HerdrRefusal::HostedRowUnreadable {
-                detail: detail.clone(),
-            });
+            let detail = detail.clone();
+            return (
+                TurnHost::Refused(HerdrRefusal::HostedRowUnreadable { detail }),
+                false,
+            );
         }
-        return match herdr_trace(&row) {
+        let host = match herdr_trace(&row) {
             Some(state) => TurnHost::Refused(HerdrRefusal::HostedHerdrUnconfigured { state }),
             None => TurnHost::Tmux,
         };
+        return (host, false);
     }
     if let Some(plan) = return_plan(provider, &row) {
-        return TurnHost::Return(Box::new(plan));
+        return (TurnHost::Return(Box::new(plan)), false);
     }
-    match herdr_trace(&row) {
+    let host = match herdr_trace(&row) {
         Some(state) => TurnHost::Refused(HerdrRefusal::HostedHerdrUnconfigured { state }),
         None => TurnHost::Tmux,
-    }
+    };
+    (host, false)
 }
 
 /// A checked child can keep its current Herdr pane under its parent's configured endpoint.
@@ -279,7 +287,7 @@ pub(crate) fn is_live_thread_endpoint(
 
 /// Before resetting, reconciling or clearing a turn, refuse a configured Herdr session.
 /// An unconfigured channel passes without I/O.
-pub(crate) async fn refusal_before_turn<F>(
+pub async fn refusal_before_turn<F>(
     pool: Option<&PgPool>,
     provider: &ProviderKind,
     channel_id: u64,
@@ -303,7 +311,7 @@ where
 
 /// The intake's first judgement: a configured turn only the missing executor refused passes while
 /// its provider's Herdr switch is on.
-pub(crate) async fn intake_refusal_before_turn<F>(
+pub async fn intake_refusal_before_turn<F>(
     pool: Option<&PgPool>,
     provider: &ProviderKind,
     channel_id: u64,
@@ -325,7 +333,7 @@ thread_local! {
 }
 
 /// Whether a configured channel's turn of `provider` runs on Herdr; any other provider never does.
-pub(crate) fn herdr_turn_switched_on_for(provider: &ProviderKind) -> bool {
+pub fn herdr_turn_switched_on_for(provider: &ProviderKind) -> bool {
     match provider {
         ProviderKind::Claude => herdr_turn_switched_on(),
         ProviderKind::Codex => {
@@ -343,7 +351,7 @@ pub(crate) fn herdr_turn_switched_on_for(provider: &ProviderKind) -> bool {
 }
 
 /// Whether a configured channel's Claude turn runs on Herdr; unset or false keeps it refused.
-pub(crate) fn herdr_turn_switched_on() -> bool {
+pub fn herdr_turn_switched_on() -> bool {
     #[cfg(any(test, feature = "test-support"))]
     if let Some(forced) = FORCED_SWITCH.with(std::cell::Cell::get) {
         return forced;
@@ -356,10 +364,10 @@ pub(crate) fn herdr_turn_switched_on() -> bool {
 
 /// Stands in for the live switch on this thread until dropped.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) struct ForcedSwitch(Option<bool>);
+pub struct ForcedSwitch(Option<bool>);
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn force_switch_for_test(on: Option<bool>) -> ForcedSwitch {
+pub fn force_switch_for_test(on: Option<bool>) -> ForcedSwitch {
     ForcedSwitch(FORCED_SWITCH.with(|cell| cell.replace(on)))
 }
 
@@ -372,10 +380,10 @@ impl Drop for ForcedSwitch {
 
 /// Stands in for the live Codex switch on this thread until dropped.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) struct ForcedCodexSwitch(Option<bool>);
+pub struct ForcedCodexSwitch(Option<bool>);
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn force_codex_switch_for_test(on: Option<bool>) -> ForcedCodexSwitch {
+pub fn force_codex_switch_for_test(on: Option<bool>) -> ForcedCodexSwitch {
     ForcedCodexSwitch(FORCED_CODEX_SWITCH.with(|cell| cell.replace(on)))
 }
 
@@ -548,7 +556,7 @@ fn hold_released(_nonce: &str) -> bool {
 }
 
 /// Whether a front held on `channel` is watched for the canary bootstrap.
-pub(crate) fn bootstrap_watched(provider: &ProviderKind, channel: u64) -> bool {
+pub fn bootstrap_watched(provider: &ProviderKind, channel: u64) -> bool {
     *provider == ProviderKind::Codex
         && crate::services::herdr_launch::herdr_canary(channel)
         && herdr_turn_switched_on_for(provider)
@@ -556,7 +564,7 @@ pub(crate) fn bootstrap_watched(provider: &ProviderKind, channel: u64) -> bool {
 
 /// One read of a held canary front's cause.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum HeldLook {
+pub enum HeldLook {
     /// The turn host would now plan the turn, or the channel left the bootstrap path.
     Ready,
     /// The writer is not ready and no bootstrap may start.
@@ -567,7 +575,7 @@ pub(crate) enum HeldLook {
 
 /// The turn host's own judgement for a held front; the row is not read while the pin, the vacant
 /// pane or the live actor already refuse.
-pub(crate) async fn held_look(
+pub async fn held_look(
     pool: Option<&PgPool>,
     provider: &ProviderKind,
     channel: u64,
@@ -591,7 +599,7 @@ pub(crate) async fn held_look(
 }
 
 /// The launch endpoint a channel's configured Herdr endpoint names.
-pub(crate) fn launch_endpoint(endpoint: ChannelEndpoint) -> HerdrLaunchEndpoint {
+pub fn launch_endpoint(endpoint: ChannelEndpoint) -> HerdrLaunchEndpoint {
     HerdrLaunchEndpoint {
         execution_node: endpoint.execution_node,
         config_key: endpoint.key,

@@ -11,20 +11,20 @@ use crate::services::claude_tui::readiness::compact::{self, Outcome};
 use crate::services::provider::ProviderKind;
 
 mod turn_identity;
-pub(in crate::services) use turn_identity::CompactTurnIdentity;
+pub use turn_identity::CompactTurnIdentity;
 
 // The key lives in a private child so only test builds can name it outside this module.
 mod pane_key {
     /// Per-pane key for the once-per-fill-cycle armed flag, keyed by channel and tmux pane so
     /// [`super::clear_for_tmux`] can forget every channel's flag for a recreated pane name.
     #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-    pub(crate) struct CompactPaneKey {
+    pub struct CompactPaneKey {
         pub(super) channel_id: u64,
         pub(super) tmux_session_name: String,
     }
 }
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use pane_key::CompactPaneKey;
+pub use pane_key::CompactPaneKey;
 #[cfg(not(any(test, feature = "test-support")))]
 use pane_key::CompactPaneKey;
 
@@ -46,7 +46,7 @@ struct PaneArmState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::services) enum CompactWindowSource {
+pub enum CompactWindowSource {
     Proven,
     FallbackMax,
 }
@@ -289,7 +289,7 @@ fn trigger_window_for_resolution(resolution: Option<u64>) -> Option<(u64, Compac
 
 /// Validate and forward one complete active Claude usage snapshot. Missing model,
 /// launch provenance, or any usage component fails closed before pane state exists.
-pub(in crate::services) fn observe_active_usage<T: CompactTurnIdentity>(
+pub fn observe_active_usage<T: CompactTurnIdentity>(
     turn_identity: T,
     provider: &ProviderKind,
     model: Option<&str>,
@@ -360,7 +360,7 @@ pub(in crate::services) fn observe_active_usage<T: CompactTurnIdentity>(
 /// (Codex compacts natively), an unresolvable window, or a `0`/disabled percent.
 /// A `0`/low `usage_tokens` is deliberately NOT short-circuited: it is the
 /// post-compact re-arm signal handled inside [`observe_and_decide_with_source`].
-pub(in crate::services) fn maybe_inject_compact<T: CompactTurnIdentity>(
+pub fn maybe_inject_compact<T: CompactTurnIdentity>(
     turn_identity: T,
     provider: &ProviderKind,
     usage_tokens: u64,
@@ -379,7 +379,7 @@ pub(in crate::services) fn maybe_inject_compact<T: CompactTurnIdentity>(
     );
 }
 
-pub(in crate::services) fn maybe_inject_compact_with_source<T: CompactTurnIdentity>(
+pub fn maybe_inject_compact_with_source<T: CompactTurnIdentity>(
     turn_identity: T,
     provider: &ProviderKind,
     usage_tokens: u64,
@@ -483,6 +483,11 @@ pub(crate) fn clear_for_tmux(tmux_session_name: &str) {
 }
 
 #[cfg(any(test, feature = "test-support"))]
+pub fn clear_for_tmux_for_test(tmux_session_name: &str) {
+    clear_for_tmux(tmux_session_name);
+}
+
+#[cfg(any(test, feature = "test-support"))]
 fn reset_for_test() {
     let mut guard = COMPACT_TRIGGER_STATE
         .lock()
@@ -494,17 +499,17 @@ fn reset_for_test() {
 // Test seams for the compact tests mounted in the discord-layer test host.
 #[cfg(any(test, feature = "test-support"))]
 impl CompactPaneKey {
-    pub(crate) fn channel_id_for_test(&self) -> u64 {
+    pub fn channel_id_for_test(&self) -> u64 {
         self.channel_id
     }
 
-    pub(crate) fn tmux_session_name_for_test(&self) -> &str {
+    pub fn tmux_session_name_for_test(&self) -> &str {
         &self.tmux_session_name
     }
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn pane_still_disarmed_for_send_for_test(
+pub fn pane_still_disarmed_for_send_for_test(
     pane: &CompactPaneKey,
     generation: u64,
     threshold: CompactThreshold,
@@ -513,7 +518,7 @@ pub(crate) fn pane_still_disarmed_for_send_for_test(
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn submit_under_composer_lock_for_test<T>(
+pub fn submit_under_composer_lock_for_test<T>(
     pane: &CompactPaneKey,
     generation: u64,
     threshold: CompactThreshold,
@@ -538,12 +543,12 @@ pub(crate) fn submit_under_composer_lock_for_test<T>(
 /// The armed flag is process-global test state. Keep every stateful test
 /// serialized so one fixture cannot clear another under normal parallel runs.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) static STATE_TEST_LOCK: Mutex<()> = Mutex::new(());
+pub static STATE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Acquire the shared state guard and reset all compact-trigger test state while
 /// the guard is held. The caller retains the guard for its entire test.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn state_test_guard() -> std::sync::MutexGuard<'static, ()> {
+pub fn state_test_guard() -> std::sync::MutexGuard<'static, ()> {
     let guard = STATE_TEST_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -551,11 +556,11 @@ pub(crate) fn state_test_guard() -> std::sync::MutexGuard<'static, ()> {
     guard
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests {
     use super::*;
 
-    pub(crate) fn observe_and_decide(
+    pub fn observe_and_decide(
         pane: &CompactPaneKey,
         occupied: u64,
         threshold: CompactThreshold,
@@ -563,7 +568,7 @@ pub(crate) mod tests {
         observe_and_decide_with_source(pane, occupied, threshold, CompactWindowSource::Proven)
     }
 
-    pub(crate) fn pane() -> CompactPaneKey {
+    pub fn pane() -> CompactPaneKey {
         CompactPaneKey {
             channel_id: 42,
             tmux_session_name: "tmux-4591".to_string(),
@@ -572,11 +577,11 @@ pub(crate) mod tests {
 
     // window 1_000_000, percent 50, lower 300_000 → effective 500_000,
     // rearm_floor = 500_000 - 5% * 1_000_000 = 450_000.
-    pub(crate) fn threshold_for(window: u64) -> CompactThreshold {
+    pub fn threshold_for(window: u64) -> CompactThreshold {
         compact_threshold(window, 50, 300_000).expect("valid threshold fixture")
     }
 
-    pub(crate) fn armed_state(pane: &CompactPaneKey) -> Option<bool> {
+    pub fn armed_state(pane: &CompactPaneKey) -> Option<bool> {
         COMPACT_TRIGGER_STATE
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -585,7 +590,7 @@ pub(crate) mod tests {
             .map(|entry| entry.armed)
     }
 
-    pub(crate) fn panes_is_empty() -> bool {
+    pub fn panes_is_empty() -> bool {
         COMPACT_TRIGGER_STATE
             .lock()
             .unwrap_or_else(|error| error.into_inner())

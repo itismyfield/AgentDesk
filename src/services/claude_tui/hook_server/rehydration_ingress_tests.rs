@@ -422,7 +422,11 @@ fn registration_completion_accepts_adoption_advanced_binding() {
                 "registration logged A before completion"
             );
             assert_eq!(
-                adopt_from_hook(&a, &b, &HookSignal::from_payload("session_start", &payload)),
+                adopt_from_hook(
+                    &a,
+                    &b,
+                    &HookSignal::from_payload_for_test("session_start", &payload)
+                ),
                 AdoptionHttp::Durable(DurableKind::Adopted)
             );
             assert_eq!(
@@ -717,7 +721,7 @@ fn stale_snapshot_keeps_the_adoption(launch: bool) {
     let (seam_stale, seam_b, payload) = (stale.clone(), b.clone(), race.payload.clone());
     dedupe::pane_registration::BEFORE_JUDGED.with_borrow_mut(|v| {
         *v = Some(Box::new(move || {
-            let hook = HookSignal::from_payload("session_start", &payload);
+            let hook = HookSignal::from_payload_for_test("session_start", &payload);
             let adopted = adopt_from_hook(&seam_stale, &seam_b, &hook);
             assert_eq!(adopted, AdoptionHttp::Durable(DurableKind::Adopted));
         }))
@@ -1124,7 +1128,6 @@ mod o_restart;
 
 #[test]
 fn hook_refresh_same_uuid_stop_retries_until_the_writer_can_apply_it() {
-    use crate::services::claude_tui::source_verify::boot_time_for_tests;
     use crate::services::tui_o::{
         ownership::OwnershipGate,
         shadow::{ShadowProvider, binding_reader::source_id_for, capture::renumber},
@@ -1183,11 +1186,8 @@ fn hook_refresh_same_uuid_stop_retries_until_the_writer_can_apply_it() {
         })
         .unwrap();
     dedupe::reset_state_for_tests();
-    forget_channel_for_tests(channel);
-    crate::services::claude_tui::hook_server::observation_ingress::set_discovery_pending_for_tests(
-        true,
-    );
-    let _boot = boot_time_for_tests(Some(chrono::Utc::now()));
+    backdate_fixture_pin(channel, &old);
+    ingress.hold_discovery();
     let _shift = renumber::shift(&path, 1 << 40);
     let request = uuid();
     let header = race.envelope().encode().unwrap();

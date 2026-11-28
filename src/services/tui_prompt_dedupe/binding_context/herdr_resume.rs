@@ -19,7 +19,7 @@ use crate::services::tui_prompt_dedupe::binding_events::SourceId;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ResumeStart {
+pub struct ResumeStart {
     pub operation: String,
     pub path: PathBuf,
     pub dev: u64,
@@ -43,6 +43,16 @@ impl ResumeStart {
             return Err("codex herdr resume: source or restart boundary changed".into());
         }
         Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn capture_for_test(
+        operation: String,
+        channel: u64,
+        source: &SourceId,
+        store: &crate::services::tui_o::store::OStore,
+    ) -> Result<Self, String> {
+        Self::capture(operation, channel, source, store)
     }
 
     /// Capture only after the caller confirmed the old execution ended; O must have captured EOF.

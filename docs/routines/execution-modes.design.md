@@ -421,7 +421,7 @@ PR1은 `valid_routine_metadata`와 기존 execution_mode process를 presentation
 
 ### giant 배치와 검증
 
-새 독립 책임 순증0 대상: `agent_executor.rs`2326, runtime1144, store4207, discord_log2101, session_control1157, loader3266 외에 **headless_turn.rs1545, terminal_outcome_delivery.rs1016, inflight.rs6314, message_outbox.rs1459, intake_gate.rs1388**도 포함한다(현재 source 실측; 과거 baseline 숫자를 현재 줄수로 쓰지 않음). parent에는 필드/mod/호출 교체만 두고 정책·분류·새 branch는 child에 둔다. 각 PR의 maintainability/giant ratchet을 통과해야 하며 giant를 예산 회피용으로 키우지 않는다. API 문서 경로는 `src/server/routes/docs/inventory/endpoints/part_06.rs:405-648`, taxonomy, `routes/domains/ops.rs`다.
+새 독립 책임 순증0 대상: `agent_executor.rs`2326, runtime1144, store4207, discord_log2101, session_control1157, loader3266 외에 **headless_turn.rs1545, terminal_outcome_delivery.rs1016, inflight.rs6314, message_outbox.rs1459, intake_gate.rs1388**도 포함한다(현재 source 실측; 과거 baseline 숫자를 현재 줄수로 쓰지 않음). parent에는 필드/mod/호출 교체만 두고 정책·분류·새 branch는 child에 둔다. 각 PR의 maintainability/giant ratchet을 통과해야 하며 giant를 예산 회피용으로 키우지 않는다. API 문서 경로는 `docs/data/api-endpoints.json`, taxonomy, `routes/domains/ops.rs`다.
 
 H의 새 독립 책임은 `src/services/routines/discord_log/failure_escalation.rs`, `src/services/message_outbox/routine_incident.rs`, `src/server/outbox_actionable_delivery/routine_incident.rs`, `src/services/discord/outbound/manual_delivery/routine_incident_nonce.rs`로 분리한다. 기존 parent에는 mod/typed 호출만 둔다. H의 +1100은 정책/이력 child2개+250, snapshot/API/result4개+135(선행 A와 겹쳐도 상쇄하지 않은 상한), 같은 outbox row migration/helper3개+330, delivery/worker/typed result3개+205, 기존 writer nonce2개+180의 보수 합계다. N+1을 예약하는 producer는 terminal 저장 경계 한 곳이며 logger 재진입은 동일 사건 키를 읽기만 한다. H1/H2로 나눌 경우 H2가 준비될 때 자동 capability로 함께 노출하며 운영자 수동 스위치는 없다.
 

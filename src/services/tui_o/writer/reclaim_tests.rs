@@ -6,7 +6,7 @@ use crate::services::claude_tui::hook_server::adoption_retry::{
     deferred_adoption_count, retry_deferred_claude_adoptions,
 };
 use crate::services::claude_tui::hook_server::observation_ingress::{
-    IngressOutcome, ProceedReason, observe_binding_hook,
+    IngressOutcome, ProceedReason, observe_binding_hook, tests::backdate_fixture_pin,
 };
 use crate::services::claude_tui::hook_server::relay_receipts::RELAY_PUBLISHED_AT_HEADER;
 use crate::services::tui_o::store::rotation::Boundary;
@@ -102,7 +102,6 @@ fn execution_headers(pane: &ProducerPane, session: &str, path: &Path) -> axum::h
 
 #[tokio::test(start_paused = true)]
 async fn hook_refresh_recovers_one_cursor_and_reposts_nothing_after_interrupt() {
-    use crate::services::claude_tui::source_verify::boot_time_for_tests;
     use crate::services::tui_o::shadow::capture::renumber;
     use crate::services::tui_o::store::{CURSOR_DIR, STORE_DIR_NAME, StoreError, fault};
 
@@ -131,7 +130,7 @@ async fn hook_refresh_recovers_one_cursor_and_reposts_nothing_after_interrupt() 
         let before = harness.channel().cursor(&old).unwrap().clone();
         assert_eq!(harness.port.posts(), ["already posted"]);
 
-        let _boot = boot_time_for_tests(Some(Utc::now()));
+        backdate_fixture_pin(CHANNEL, &old);
         let _device = renumber::shift(&path, 1 << 40);
         let live = source_id_for(&session, &path).unwrap();
         let dir = harness
@@ -153,7 +152,7 @@ async fn hook_refresh_recovers_one_cursor_and_reposts_nothing_after_interrupt() 
                 &payload,
                 &headers
             )
-            .refused()
+            .refused_for_test()
         );
         polls(4).await;
         assert!(task.is_finished(), "{step:?} must interrupt publication");
@@ -195,7 +194,6 @@ async fn hook_refresh_recovers_one_cursor_and_reposts_nothing_after_interrupt() 
 #[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn hook_refresh_moves_the_cursor_to_the_live_device_without_repost() {
-    use crate::services::claude_tui::source_verify::boot_time_for_tests;
     use crate::services::tui_o::shadow::capture::renumber;
     for event in ["UserPromptSubmit", "Stop"] {
         let session = uuid::Uuid::new_v4().to_string();
@@ -219,7 +217,7 @@ async fn hook_refresh_moves_the_cursor_to_the_live_device_without_repost() {
         assert_eq!(harness.port.posts(), ["before reboot"]);
         let before = harness.channel().cursor(&stored).unwrap().clone();
 
-        let _boot = boot_time_for_tests(Some(Utc::now()));
+        backdate_fixture_pin(CHANNEL, &stored);
         let _renumber = renumber::shift(&path, 1 << 40);
         let live = source_id_for(&session, &path).unwrap();
         assert_ne!(stored.dev, live.dev);
@@ -234,7 +232,7 @@ async fn hook_refresh_moves_the_cursor_to_the_live_device_without_repost() {
             &payload,
             &headers,
         );
-        assert!(!ingress.refused(), "{ingress:?}");
+        assert!(!ingress.refused_for_test(), "{ingress:?}");
         polls(4).await;
         let pinned = pane.history().current.unwrap().pin.unwrap();
         assert_eq!(pinned, live, "{event} must refresh the verified pin");
@@ -337,7 +335,7 @@ fn hook_refresh_rejects_a_delayed_hook_from_the_previous_path() {
             &headers,
         )
     };
-    assert!(!hook(&moved, 3).refused());
+    assert!(!hook(&moved, 3).refused_for_test());
     let pin = source_id_for(&session, &moved).unwrap();
     assert_eq!(pane.history().current.unwrap().pin, Some(pin.clone()));
     hook(&path, 2);

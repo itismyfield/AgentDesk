@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -214,16 +215,25 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
                 self.write_graph(root, active=active, optional_active=optional_active, catalog_active=True, mutation=mutation)
             if runner:
                 fsync = (
-                    ("src/server/mod.rs", "worker_recovery", "src/server/worker_recovery.rs", "server::worker_recovery::windows_contract::tests::first_fatal_exit_persists_ledger_and_exits"),
-                    ("src/services/discord/mod.rs", "runtime_store", "src/services/discord/runtime_store.rs", "services::discord::runtime_store::windows_contract::tests::windows_parent_dir_sync_succeeds_without_flushing"),
+                    ("src/server/mod.rs", "mod worker_recovery;\n", "src/server/worker_recovery.rs", "server::worker_recovery::windows_contract::tests::first_fatal_exit_persists_ledger_and_exits"),
+                    ("src/adk_runtime_lib.rs", "pub mod services {\n    pub mod discord {\n        pub mod runtime_store;\n    }\n}\n", "src/services/discord/runtime_store.rs", "services::discord::runtime_store::windows_contract::tests::windows_parent_dir_sync_succeeds_without_flushing"),
                 )
+                (root / "Cargo.toml").write_text('[package]\nname = "agentdesk"\n[workspace]\nmembers = ["crates/adk-runtime"]\n', encoding="utf-8")
+                (root / "crates/adk-runtime").mkdir(parents=True)
+                (root / "crates/adk-runtime/Cargo.toml").write_text('[package]\nname = "adk-runtime"\n[lib]\npath = "../../src/adk_runtime_lib.rs"\n', encoding="utf-8")
                 (root / "src/lib.rs").write_text("mod services;\nmod server;\n", encoding="utf-8")
-                with (root / "src/services/mod.rs").open("a", encoding="utf-8") as file:
-                    file.write("mod discord;\n")
-                for parent, module, source, test_id in fsync:
-                    (root / parent).parent.mkdir(parents=True, exist_ok=True)
-                    (root / parent).write_text(f"mod {module};\n", encoding="utf-8")
+                for parent, declaration, source, test_id in fsync:
+                    (root / source).parent.mkdir(parents=True, exist_ok=True)
+                    (root / parent).write_text(declaration, encoding="utf-8")
                     (root / source).write_text("mod windows_contract { #[cfg(test)] mod tests { #[test] fn " + test_id.rsplit("::", 1)[1] + "() {} } }\n", encoding="utf-8")
+                if mutation == "worker_recovery_removed":
+                    (root / "src/lib.rs").write_text("mod services;\n", encoding="utf-8")
+                    shutil.rmtree(root / "src/server")
+                elif mutation == "runtime_store_removed":
+                    (root / "src/adk_runtime_lib.rs").write_text("pub mod services {\n    pub mod discord {}\n}\n", encoding="utf-8")
+                    (root / "src/services/discord/runtime_store.rs").unlink()
+                elif mutation == "runtime_store_id_removed":
+                    (root / "src/services/discord/runtime_store.rs").write_text("mod windows_contract { #[cfg(test)] mod tests {} }\n", encoding="utf-8")
             governed = root / LEXICAL.source
             original = root / "lexical.original"
             if governed.exists():
@@ -286,7 +296,7 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
 
     def test_runner_requires_the_windows_transcript_refusal(self) -> None:
         expected = (
-            "nextest run --lib --profile ci --no-tests fail -E "
+            "nextest run --workspace --lib --profile ci --no-tests fail -E "
             "test(=services::discord::health::turn_deliver::inject::queued_reconcile::"
             "mismatched_file_identity_refuses_transcript_proof) | "
             "test(=services::tui_input::human_frame::history::v2::keyless::platform_tests::"
@@ -303,6 +313,46 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
         missing = self.run_fixture(runner=True, mode="missing_windows_refusal")
         self.assertEqual(missing.result.returncode, 4, missing.result.stderr)
         self.assertEqual(missing.calls[-1], expected)
+
+    def test_runner_fails_when_a_required_owner_selects_nothing_and_still_runs_the_rest(self) -> None:
+        # Losing either owner (declaration and file, or only its test) must fail the runner, not skip the others.
+        for mutation, survivor in (("runtime_store_removed", "agentdesk"), ("runtime_store_id_removed", "agentdesk"),
+                                   ("worker_recovery_removed", "adk-runtime")):
+            with self.subTest(mutation=mutation):
+                outcome = self.run_fixture(runner=True, mutation=mutation)
+                self.assertNotEqual(outcome.result.returncode, 0, outcome.result.stdout)
+                self.assertEqual([call.split()[2] for call in outcome.calls[:-1]], [survivor], outcome.calls)
+                self.assertTrue(outcome.calls[-1].startswith("nextest run --workspace --lib "), outcome.calls)
+
+    def test_runner_seals_this_checkout_and_names_compiled_windows_targets(self) -> None:
+        # The fixtures above model the crate layout by hand; this seals the committed runner against the checkout.
+        with tempfile.TemporaryDirectory() as temp:
+            calls = Path(temp) / "calls"
+            (Path(temp) / "cargo").write_text(
+                '#!/usr/bin/env bash\nprintf "%s\\n" "$*" >>"$FAKE_CALLS"\necho "running 1 test"\n'
+                'echo "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.0s"\n',
+                encoding="utf-8")
+            (Path(temp) / "cargo").chmod(0o755)
+            env = os.environ | {"FAKE_CALLS": str(calls), "PATH": f"{temp}:{os.environ['PATH']}"}
+            env.pop("AGENTDESK_REPO_ROOT", None)
+            result = subprocess.run(["bash", str(RUNNER)], text=True, capture_output=True, env=env, check=False)
+            lines = calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(lines[:2], [
+            "test -p agentdesk --lib server::worker_recovery::windows_contract::tests::"
+            "first_fatal_exit_persists_ledger_and_exits -- --exact --test-threads=1",
+            "test -p adk-runtime --lib services::discord::runtime_store::windows_contract::tests::"
+            "windows_parent_dir_sync_succeeds_without_flushing -- --exact --test-threads=1",
+        ])
+        sys.path.insert(0, str(ROOT / "scripts/ci"))
+        import rust_test_sources as sources
+        compiled = set()
+        for manifest, lib_root in sources.workspace_lib_roots(ROOT).values():
+            inventory = sources.walk(lib_root, ROOT, manifest_dir=manifest.parent)
+            compiled |= sources.platform_split(inventory, "windows", sources.default_features(manifest.parent))[0]
+        names = re.findall(r"test\(=([^)]+)\)", lines[2])
+        self.assertTrue(lines[2].startswith("nextest run --workspace --lib "), lines[2])
+        self.assertEqual((len(names), [name for name in names if name not in compiled]), (7, []))
 
     def test_wrapper_selects_only_supported_path_interpreter(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

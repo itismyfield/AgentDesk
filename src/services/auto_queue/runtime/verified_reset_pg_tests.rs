@@ -4,7 +4,7 @@ use crate::services::discord::SharedData;
 use crate::services::discord::admin_host_guard::{self, ManagedReset};
 use crate::services::discord::health::HealthRegistry;
 use crate::services::provider::ProviderKind;
-use crate::services::provider_teardown::tests::test_support::FakeTmux;
+use crate::services::provider_teardown::test_support::FakeTmux;
 use crate::services::tui_prompt_dedupe as dedupe;
 use poise::serenity_prelude::ChannelId;
 use std::sync::Arc;

@@ -6,7 +6,7 @@ use crate::services::tui_o::writer::binding::{
 };
 use crate::services::tui_o::writer::{PostOutcome, SeenMessage};
 
-pub(crate) async fn wait_metadata(
+pub async fn wait_metadata(
     store: &ChannelStore,
     alarms: &impl AlarmSink,
     stopping: &watch::Receiver<bool>,
@@ -15,14 +15,14 @@ pub(crate) async fn wait_metadata(
 }
 
 #[derive(Default)]
-pub(crate) struct Posts {
+pub struct Posts {
     records: Mutex<Vec<(u64, SeenMessage)>>,
     lost: Mutex<std::collections::VecDeque<bool>>,
     missing: Mutex<Vec<u64>>,
 }
 
 impl Posts {
-    pub(crate) fn to(&self, channel: u64) -> Vec<String> {
+    pub fn to(&self, channel: u64) -> Vec<String> {
         let posts = locked(&self.records);
         let to = posts.iter().filter(|(c, _)| *c == channel);
         to.map(|(_, message)| message.content.clone()).collect()
@@ -90,7 +90,7 @@ impl DiscordPort for Posts {
     }
 }
 
-pub(crate) struct AnyLease;
+pub struct AnyLease;
 
 impl DeliveryLease for AnyLease {
     type Held = ();
@@ -100,7 +100,7 @@ impl DeliveryLease for AnyLease {
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct Alarms(pub(crate) Arc<Mutex<Vec<(u64, WriterAlarm)>>>);
+pub struct Alarms(pub Arc<Mutex<Vec<(u64, WriterAlarm)>>>);
 
 impl AlarmSink for Alarms {
     fn raise(&self, channel: u64, alarm: WriterAlarm) {
@@ -108,7 +108,7 @@ impl AlarmSink for Alarms {
     }
 }
 
-pub(crate) struct Startup {
+pub struct Startup {
     event: BindingEvent,
     notice: watch::Sender<u64>,
 }
@@ -129,25 +129,25 @@ type CustodyProbe = Option<fn(u64) -> bool>;
 
 /// Reports `facts` for every channel (none blocking by default); the store's own checks and
 /// the adoption still apply. `on_facts` runs once as the next facts are read.
-pub(crate) struct TestHost {
-    pub(crate) posts: Arc<Posts>,
-    pub(crate) alarms: Alarms,
+pub struct TestHost {
+    pub posts: Arc<Posts>,
+    pub alarms: Alarms,
     sources: BTreeMap<u64, SourceId>,
-    pub(crate) facts: Mutex<ActivationFacts>,
-    pub(crate) on_facts: Mutex<FactsHook>,
+    pub facts: Mutex<ActivationFacts>,
+    pub on_facts: Mutex<FactsHook>,
     /// Legacy's relay state for channels that already hold output; fails closed when unset.
-    pub(crate) legacy: Mutex<Option<Arc<dyn LegacyView>>>,
+    pub legacy: Mutex<Option<Arc<dyn LegacyView>>>,
     /// The tmux session each channel's binding names, `host-<channel>` when unset.
-    pub(crate) sessions: Mutex<BTreeMap<u64, String>>,
+    pub sessions: Mutex<BTreeMap<u64, String>>,
     /// Legacy's custody of a channel as the gateway reads it, as an inflight row; none when unset.
-    pub(crate) custody: Mutex<CustodyProbe>,
+    pub custody: Mutex<CustodyProbe>,
     /// Legacy's mailbox work and watcher emission for every channel; idle by default.
     pub(crate) busy: std::sync::atomic::AtomicBool,
     pub(crate) relaying: std::sync::atomic::AtomicBool,
 }
 
 impl TestHost {
-    pub(crate) fn new(sources: impl IntoIterator<Item = (u64, SourceId)>) -> Arc<Self> {
+    pub fn new(sources: impl IntoIterator<Item = (u64, SourceId)>) -> Arc<Self> {
         Arc::new(Self {
             posts: Arc::default(),
             alarms: Alarms::default(),

@@ -10,7 +10,7 @@ use crate::services::provider::ProviderKind::{Claude as ClaudeKind, Codex as Cod
 use crate::services::tui_turn_state::envelope_is_turn_end_terminator;
 
 /// Visible assistant prose, preserving the block's text and excluding signatures and blank thinking.
-pub(crate) fn visible_assistant_block_text(block: &serde_json::Value) -> Option<&str> {
+pub fn visible_assistant_block_text(block: &serde_json::Value) -> Option<&str> {
     match block.get("type").and_then(serde_json::Value::as_str) {
         Some("text") => block.get("text").and_then(serde_json::Value::as_str),
         Some("thinking") => block
@@ -170,11 +170,11 @@ thread_local! {
 
 /// Captures a store using the old thinking-skip rule without creating thinking ledger entries.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) struct V5Rule(());
+pub struct V5Rule(());
 
 #[cfg(any(test, feature = "test-support"))]
 impl V5Rule {
-    pub(crate) fn hold() -> Self {
+    pub fn hold() -> Self {
         V5_RULE.set(true);
         Self(())
     }
@@ -198,7 +198,7 @@ fn claude_body(resumed: bool, block: &Value) -> UnitContent {
 }
 
 /// Claude's top-level compaction marker, including the underscored spelling.
-pub(crate) fn record_is_compact_summary(record: &Value) -> bool {
+pub fn record_is_compact_summary(record: &Value) -> bool {
     ["isCompactSummary", "is_compact_summary"]
         .into_iter()
         .any(|key| record.get(key).and_then(Value::as_bool).unwrap_or(false))
@@ -289,8 +289,12 @@ fn codex_item(item: &Value, item_type: &str) -> Option<RecordFact> {
             let texts: Vec<&str> = parts.filter_map(|part| str_at(part, "text")).collect();
             return Some(RecordFact::Prompt(false, texts.join("\n")));
         }
-        // Reasoning, other roles, inter-agent traffic and the session's tool list are not output.
-        ("message" | "reasoning" | "agent_message" | "additional_tools", _) => return None,
+        // Reasoning, other roles, inter-agent traffic, the session's tool list and harness
+        // configuration changes such as reasoning effort are not output.
+        (
+            "message" | "reasoning" | "agent_message" | "additional_tools" | "configuration_update",
+            _,
+        ) => return None,
         ("function_call" | "custom_tool_call" | "tool_search_call", _) => (
             UnitKind::Tool,
             tool_call(item, &["arguments", "input", "action"]),
@@ -549,6 +553,14 @@ mod tests {
         let blocked = RecordFact::Blocked("unsupported response_item definitely_unknown".into());
         let unknown = classify(ShadowProvider::Codex, &item("definitely_unknown"));
         assert_eq!(unknown, [blocked]);
+    }
+
+    /// A rollout's configuration update, with placeholder values, carries no answer text.
+    #[test]
+    fn codex_configuration_update_yields_nothing() {
+        let line = r#"{"timestamp":"<ts>","ordinal":0,"type":"response_item","payload":{"type":"configuration_update","reasoning":{"effort":"<effort>"}},"metadata":{"history_sequence":0,"sampled_through_sequence":0,"client_authored":false,"harness_authored_configuration":true}}"#;
+        let record = serde_json::from_str(line).unwrap();
+        assert_eq!(super::classify(ShadowProvider::Codex, &record), []);
     }
 
     #[test]

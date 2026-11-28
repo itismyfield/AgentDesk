@@ -8,9 +8,9 @@ use pulldown_cmark::{Event, Options, Parser, Tag};
 
 use crate::services::provider::ProviderKind;
 
-pub(crate) const BLOCKED_PROVIDER_OUTPUT_BODY: &str =
+pub const BLOCKED_PROVIDER_OUTPUT_BODY: &str =
     "⚠️ 내부 제어 데이터가 섞인 응답을 차단했습니다. 원문은 전송하지 않았습니다.";
-pub(crate) const HELD_PROVIDER_OUTPUT_BODY: &str =
+pub const HELD_PROVIDER_OUTPUT_BODY: &str =
     "⚠️ 응답에 내부 제어 데이터 가능성이 있어 확인될 때까지 전송을 보류했습니다.";
 
 const SYSTEM_BANNER: &str = "[SYSTEM NOTIFICATION - NOT USER INPUT]";
@@ -33,14 +33,14 @@ const CONTROL_ANCHORS: &[&str] = &[
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ProviderOutputKind {
+pub enum ProviderOutputKind {
     ClaudeSystemNotification,
     ClaudeToolWrapper,
     PartialControlMarker,
 }
 
 impl ProviderOutputKind {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::ClaudeSystemNotification => "claude_system_notification",
             Self::ClaudeToolWrapper => "claude_tool_wrapper",
@@ -50,16 +50,13 @@ impl ProviderOutputKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ProviderOutputVerdict {
+pub enum ProviderOutputVerdict {
     Clean,
     Hold { kind: ProviderOutputKind },
     Blocked { kind: ProviderOutputKind },
 }
 
-pub(crate) fn inspect_provider_output(
-    provider: &ProviderKind,
-    text: &str,
-) -> ProviderOutputVerdict {
+pub fn inspect_provider_output(provider: &ProviderKind, text: &str) -> ProviderOutputVerdict {
     if !matches!(provider, ProviderKind::Claude) {
         return ProviderOutputVerdict::Clean;
     }
@@ -70,7 +67,7 @@ pub(crate) fn inspect_provider_output(
 /// control token is not enough to block a legitimate explanation, but it is
 /// held while the response is still growing because a later chunk could turn
 /// it into one of the forbidden compounds.
-pub(crate) fn inspect_provider_streaming_output(
+pub fn inspect_provider_streaming_output(
     provider: &ProviderKind,
     text: &str,
 ) -> ProviderOutputVerdict {
@@ -88,7 +85,7 @@ pub(crate) fn inspect_provider_streaming_output(
     }
 }
 
-pub(crate) fn inspect_provider_streaming_rollover(
+pub fn inspect_provider_streaming_rollover(
     provider: &ProviderKind,
     unsent_response: &str,
     frozen_chunk: &str,
@@ -105,11 +102,11 @@ pub(crate) fn inspect_provider_streaming_rollover(
     }
 }
 
-pub(crate) fn safe_blocked_body(_kind: ProviderOutputKind) -> &'static str {
+pub fn safe_blocked_body(_kind: ProviderOutputKind) -> &'static str {
     BLOCKED_PROVIDER_OUTPUT_BODY
 }
 
-pub(crate) fn safe_held_body(_kind: ProviderOutputKind) -> &'static str {
+pub fn safe_held_body(_kind: ProviderOutputKind) -> &'static str {
     HELD_PROVIDER_OUTPUT_BODY
 }
 

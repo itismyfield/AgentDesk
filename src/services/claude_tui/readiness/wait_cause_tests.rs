@@ -1,7 +1,9 @@
 //! A readiness wait that ends without a proof names its open cause; a source an older launch lost
 //! settles as retained instead of holding for good.
+#[cfg(test)]
 use super::*;
 
+#[cfg(test)]
 /// An older launch whose finished turn this restarted daemon has not seen.
 fn restarted() -> Rig {
     initialize();
@@ -12,6 +14,7 @@ fn restarted() -> Rig {
     r
 }
 
+#[cfg(test)]
 fn idle() -> Option<String> {
     Some(crate::services::claude_tui::input::submission::tests::view(
         "", false,

@@ -278,12 +278,23 @@ impl Reader {
     }
 }
 
+#[cfg(unix)]
+struct QuietOffer {
+    origin: super::super::input_notices::NoticeOrigin,
+    binding_tail: u64,
+    capture: Fingerprint,
+    devices: Vec<u64>,
+    registry_revisions: Vec<u64>,
+    anchors_settled: bool,
+}
+
 #[derive(Default)]
 pub(super) struct NativeSources {
     #[cfg(unix)]
     seeds: std::collections::HashMap<SourceId, observe_memo::Seed>,
     #[cfg(unix)]
     revision: u64,
+    anchors: super::super::reply_anchor::Anchors,
 }
 
 pub(super) fn open_native(
@@ -304,6 +315,7 @@ pub(super) fn open_native(
             cursor.captured_through,
             &cursor.prefix_hash,
         )?;
+        native.anchors.track(&cursor.source);
         native
             .seeds
             .insert(cursor.source.clone(), observe_memo::Seed::new(seed));
@@ -341,6 +353,33 @@ impl NativeSources {
 
 #[cfg(unix)]
 impl NativeSources {
+    /// Runs and their anchors for the source as analysed, once no receipt is left to record.
+    fn settle_anchors(
+        &self,
+        (channel, devices): (u64, &[u64]),
+        source: &SourceId,
+        registrations: Vec<super::super::input_facts::native::Registration>,
+    ) -> bool {
+        use super::super::input_facts::native::registrations_fingerprint;
+        let Some(Ok(projection)) = self.seeds.get(source).map(|seed| seed.projection()) else {
+            return false;
+        };
+        let registrations: Vec<_> = registrations
+            .into_iter()
+            .filter(|r| r.ticket.channel_id == channel && !r.not_sent)
+            .map(|mut registration| {
+                registration.devices.extend_from_slice(devices);
+                registration
+            })
+            .collect();
+        let Ok(fingerprint) = registrations_fingerprint(&registrations) else {
+            return false;
+        };
+        let key = (projection.through(), format!("{fingerprint}:{devices:?}"));
+        self.anchors
+            .settle(source, key, || projection.memberships(&registrations))
+    }
+
     fn append(&mut self, source: &SourceId, record: &CapturedRecord) {
         if let Some(seed) = self.seeds.get_mut(source) {
             seed.append(record);
@@ -399,8 +438,37 @@ impl NativeSources {
     }
 }
 
+#[cfg(unix)]
 impl<B: BindingEvents> Sources<B> {
-    pub(crate) fn with_native_inputs(mut self, enabled: bool) -> Self {
+    pub(in crate::services::tui_o::writer) fn notice_projection(
+        &self,
+        cursor: &crate::services::tui_o::store::spool::Cursor,
+        stamp: &crate::services::tui_o::shadow::capture::Fingerprint,
+    ) -> Option<&super::super::input_facts::native::Projection> {
+        let reader = self.readers.iter().find(|r| r.source == cursor.source)?;
+        let capture = reader.capture.as_ref()?;
+        let seed = self
+            .native
+            .as_ref()?
+            .seeds
+            .get(&cursor.source)?
+            .projection()
+            .ok()?;
+        (seed.through() == cursor.captured_through
+            && capture.captured_through() == cursor.captured_through
+            && capture.prefix_hash() == cursor.prefix_hash
+            && capture.fingerprint().ok().as_ref() == Some(stamp))
+        .then_some(seed)
+    }
+}
+
+impl<B: BindingEvents> Sources<B> {
+    /// The reply anchors this channel's native sources settle, when native inputs are read.
+    pub(crate) fn reply_anchors(&self) -> Option<super::super::reply_anchor::Anchors> {
+        self.native.as_ref().map(|native| native.anchors.clone())
+    }
+
+    pub fn with_native_inputs(mut self, enabled: bool) -> Self {
         if enabled && self.provider == crate::services::tui_o::shadow::ShadowProvider::Claude {
             self.native = Some(NativeSources::default());
         }
@@ -416,7 +484,7 @@ impl<B: BindingEvents> Sources<B> {
 
     /// Inputs reduced by every native seed of this channel, for the cost tests.
     #[cfg(all(any(test, feature = "test-support"), unix))]
-    pub(crate) fn native_reductions(&self) -> usize {
+    pub fn native_reductions(&self) -> usize {
         let seeds = self.native.iter().flat_map(|native| native.seeds.values());
         seeds.map(observe_memo::Seed::reduced).sum()
     }
@@ -483,7 +551,7 @@ impl<B: BindingEvents> Sources<B> {
 
     /// The buffered unterminated tail, once the seed has every complete record before it.
     #[cfg(unix)]
-    pub(crate) fn raw_tail(
+    pub fn raw_tail(
         &self,
         source: &SourceId,
     ) -> Option<super::super::input_facts::native::terminal::Tail> {
@@ -571,11 +639,23 @@ impl<B: BindingEvents> Sources<B> {
         None
     }
 
+    /// An unread or partial tail can become terminal evidence without advancing the seed.
     #[cfg(unix)]
-    pub(crate) async fn offer_native(
-        &mut self,
-        port: &super::super::actor::native_input::NativePort,
-    ) {
+    fn complete_native_capture(&self, source: &SourceId, through: u64) -> Option<Fingerprint> {
+        let reader = self.readers.iter().find(|r| &r.source == source)?;
+        let capture = reader
+            .capture
+            .as_ref()
+            .filter(|_| reader.pending.is_none())?;
+        let fingerprint = capture.fingerprint().ok()?;
+        (through == capture.captured_through()
+            && through == capture.read_through()
+            && through == fingerprint.len)
+            .then_some(fingerprint)
+    }
+
+    #[cfg(unix)]
+    pub async fn offer_native(&mut self, port: &super::super::actor::native_input::NativePort) {
         port.inner.retry().await;
         let sources: Vec<_> = self
             .readers
@@ -599,18 +679,89 @@ impl<B: BindingEvents> Sources<B> {
                 end: through,
                 line: Vec::new(),
             };
-            let Ok(origin) = self.native_origin(&source, &record, None) else {
-                continue;
+            let binding_tail = *self.notice.borrow();
+            let capture = self.complete_native_capture(&source, through);
+            let quiet = self
+                .native
+                .as_ref()
+                .and_then(|native| native.seeds.get(&source))
+                .and_then(|seed| seed.quiet.as_ref())
+                .filter(|quiet| {
+                    quiet.origin.record.end == through
+                        && quiet.binding_tail == binding_tail
+                        && capture.as_ref() == Some(&quiet.capture)
+                        && quiet.devices == devices
+                });
+            let (origin, known) = match quiet {
+                Some(quiet) => (
+                    quiet.origin.clone(),
+                    Some(quiet.registry_revisions.as_slice()),
+                ),
+                None => {
+                    let Ok(origin) = self.native_origin(&source, &record, None) else {
+                        continue;
+                    };
+                    (origin, None)
+                }
             };
-            let Ok(snapshot) = port.inner.snapshot(origin.clone()).await else {
-                continue;
+            let mut snapshot = match port.inner.snapshot_since(origin.clone(), known).await {
+                Ok(Some(snapshot)) => snapshot,
+                Ok(None) => {
+                    if quiet.is_some_and(|offer| offer.anchors_settled)
+                        && let Some(native) = self.native.as_ref()
+                    {
+                        native.anchors.refresh_settled(&source, through);
+                    }
+                    continue;
+                }
+                Err(_) => {
+                    if let Some(seed) = self
+                        .native
+                        .as_mut()
+                        .and_then(|native| native.seeds.get_mut(&source))
+                    {
+                        seed.quiet = None;
+                    }
+                    continue;
+                }
             };
+            let registry_revisions = std::mem::take(&mut snapshot.registry_revisions);
+            let has_open_barrier = snapshot.has_open_barrier;
             let Some(native) = self.native.as_ref() else {
                 continue;
             };
+            let mut kept = snapshot.registrations.clone();
             let Ok((mut observed, mut barriers)) =
                 native.observe(scope, &source, &origin, snapshot, None)
             else {
+                continue;
+            };
+            if !has_open_barrier
+                && observed.receipts.is_empty()
+                && observed.evidence.is_empty()
+                && barriers.is_empty()
+                && let Some(capture) = capture
+                && binding_tail != u64::MAX
+            {
+                let anchors_settled = native.settle_anchors(scope, &source, kept);
+                let Some(seed) = self
+                    .native
+                    .as_mut()
+                    .and_then(|native| native.seeds.get_mut(&source))
+                else {
+                    continue;
+                };
+                seed.quiet = Some(QuietOffer {
+                    origin,
+                    binding_tail,
+                    capture,
+                    devices,
+                    registry_revisions,
+                    anchors_settled,
+                });
+                continue;
+            }
+            let Some(native) = self.native.as_ref() else {
                 continue;
             };
             if let Some(receipt) = observed.receipts.first() {
@@ -642,6 +793,7 @@ impl<B: BindingEvents> Sources<B> {
                 let Ok(snapshot) = port.inner.snapshot(origin.clone()).await else {
                     continue;
                 };
+                kept = snapshot.registrations.clone();
                 let Ok(fresh) = native.observe(scope, &source, &origin, snapshot, None) else {
                     continue;
                 };
@@ -650,6 +802,7 @@ impl<B: BindingEvents> Sources<B> {
                     continue;
                 }
             }
+            native.settle_anchors(scope, &source, kept);
             for proof in &barriers {
                 let Some(target) = proof.ticket.source.as_ref().map(|s| &s.target) else {
                     continue;

@@ -212,6 +212,7 @@ async fn legacy_tool_result_retries_and_refusals_are_excluded_across_restart() {
             index: 0,
             payload: "legacy private traceback".into(),
             notice_origin: None,
+            reply: None,
         });
         for _ in 0..2 {
             let mut writer = harness.writer();

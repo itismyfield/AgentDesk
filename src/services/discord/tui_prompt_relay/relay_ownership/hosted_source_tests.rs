@@ -86,7 +86,7 @@ async fn the_claude_idle_scanner_carries_the_transcript_it_actually_read() {
     let fx = Fixture::new();
     let _mode = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let pane = Pane::with_tmux(fx.root.path(), CHANNEL, LOGICAL.into());
-    let _tmux = crate::services::provider_teardown::tests::test_support::FakeTmux::install(LOGICAL);
+    let _tmux = crate::services::provider_teardown::test_support::FakeTmux::install(LOGICAL);
     let original = hosted_source::capture("claude", LOGICAL, CHANNEL, &pane.path, Some(&pane.a))
         .expect("the fixture durably bound its actual transcript");
     append(

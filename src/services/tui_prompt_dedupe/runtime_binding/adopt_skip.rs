@@ -4,7 +4,7 @@
 use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AdoptSkip {
+pub enum AdoptSkip {
     PayloadNotUuid,
     UnmappedCommandSession,
     NotClaudeTui,
@@ -67,7 +67,7 @@ impl AdoptSkip {
 type Explained = (Option<(String, String)>, Option<AdoptSkip>);
 
 /// `adopt_claude_continuation_session` plus the reason when nothing was adopted or logged.
-pub(crate) fn adopt_claude_continuation_explained(
+pub fn adopt_claude_continuation_explained(
     command_session_id: &str,
     payload_session_id: &str,
     hook: &HookSignal,
@@ -104,11 +104,12 @@ type HerdrExecutions = HashMap<String, (String, bool)>;
 static HERDR_EXECUTIONS: LazyLock<Mutex<HerdrExecutions>> = LazyLock::new(Default::default);
 // Until a Herdr pane is listed the hook path reads this flag and takes no lock; tests keep the flag
 // per thread but run the same atomic operations on it.
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 static LISTED: AtomicBool = AtomicBool::new(false);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static LISTED: AtomicBool = const { AtomicBool::new(false) };
+    #[cfg(test)]
     pub(crate) static HERDR_HOLD_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 use std::sync::atomic::{
@@ -117,9 +118,9 @@ use std::sync::atomic::{
 };
 
 fn listed<R>(read: impl FnOnce(&AtomicBool) -> R) -> R {
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     return read(&LISTED);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     LISTED.with(read)
 }
 
@@ -129,7 +130,7 @@ static LISTING_ORDER: LazyLock<Mutex<HashMap<String, std::sync::Weak<Mutex<()>>>
 
 /// The lock a handoff holds on `logical` from its owner judgement until its claim commits, so a
 /// launch or reconcile lists the pane before that judgement or after the claim, never between.
-pub(crate) fn herdr_listing_order(logical: &str) -> std::sync::Arc<Mutex<()>> {
+pub fn herdr_listing_order(logical: &str) -> std::sync::Arc<Mutex<()>> {
     let mut locks = LISTING_ORDER.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(lock) = locks.get(logical).and_then(std::sync::Weak::upgrade) {
         return lock;
@@ -144,14 +145,14 @@ pub(crate) fn herdr_listing_order(logical: &str) -> std::sync::Arc<Mutex<()>> {
 /// commits before the change returns and a later hook sees the change.
 fn change_hold(logical: &str, change: impl FnOnce(&mut HerdrExecutions)) {
     let order = herdr_listing_order(logical);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Err(std::sync::TryLockError::WouldBlock) = order.try_lock() {
         HOLD_CONTENDED.with_borrow(|sent| sent.as_ref().map(|tx| tx.send("listing contended")));
     }
     let _order = order.lock().unwrap_or_else(|p| p.into_inner());
     crate::services::tmux_common::with_tmux_source_authority(logical, |_| {
         listed(|flag| flag.fetch_or(true, AcqRel));
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Err(std::sync::TryLockError::WouldBlock) = HERDR_EXECUTIONS.try_lock() {
             HOLD_CONTENDED.with_borrow(|sent| sent.as_ref().map(|tx| tx.send("hold contended")));
         }
@@ -159,27 +160,27 @@ fn change_hold(logical: &str, change: impl FnOnce(&mut HerdrExecutions)) {
     });
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// Told when this thread's hold change waits on a handoff or a claim holding the map.
-    pub(crate) static HOLD_CONTENDED: std::cell::RefCell<Option<std::sync::mpsc::Sender<&'static str>>> =
+    pub static HOLD_CONTENDED: std::cell::RefCell<Option<std::sync::mpsc::Sender<&'static str>>> =
         const { std::cell::RefCell::new(None) };
     /// Parks this thread's next claim before it reads its admission, until the test resumes it.
-    pub(crate) static ADMISSION_PAUSE: std::cell::RefCell<
+    pub static ADMISSION_PAUSE: std::cell::RefCell<
         Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
     > = const { std::cell::RefCell::new(None) };
     /// Admission reads this thread lets pass before `ADMISSION_PAUSE` parks one.
-    pub(crate) static ADMISSION_PAUSE_SKIPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub static ADMISSION_PAUSE_SKIPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The admission a watcher claim on `logical` commits under, the map locked until it drops.
 /// `Err` withholds a listed pane no reconcile admitted, or a Herdr host the map does not list.
 #[allow(clippy::result_unit_err)]
-pub(crate) fn herdr_claim_admission(
+pub fn herdr_claim_admission(
     logical: &str,
     herdr_host: bool,
 ) -> Result<Option<std::sync::MutexGuard<'static, HerdrExecutions>>, ()> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     ADMISSION_PAUSE.with_borrow_mut(|pause| {
         pause.as_ref()?;
         let skips = ADMISSION_PAUSE_SKIPS.get();
@@ -204,7 +205,7 @@ pub(crate) fn herdr_claim_admission(
 
 /// A launch installed execution `nonce` on `logical`: it is held until a reconcile admits it, and
 /// an earlier execution's admission ends here.
-pub(crate) fn install_herdr_execution(logical: &str, nonce: &str) {
+pub fn install_herdr_execution(logical: &str, nonce: &str) {
     change_hold(logical, |executions| {
         executions.insert(logical.to_owned(), (nonce.to_owned(), false));
     });
@@ -228,7 +229,7 @@ pub(crate) fn restore_herdr_execution_under_source_authority(
 }
 
 /// The reconcile admitted execution `nonce` on `logical`, unless a newer one is installed there.
-pub(crate) fn admit_herdr_execution(logical: &str, nonce: &str) {
+pub fn admit_herdr_execution(logical: &str, nonce: &str) {
     change_hold(logical, |executions| match executions.get(logical) {
         Some((listed, _)) if listed != nonce => {}
         _ => drop(executions.insert(logical.to_owned(), (nonce.to_owned(), true))),
@@ -237,7 +238,7 @@ pub(crate) fn admit_herdr_execution(logical: &str, nonce: &str) {
 
 /// The reconcile refused execution `nonce` on `logical`, or could not name one (`None`): that
 /// only withholds a listed pane, and a refusal of another execution leaves the listed one alone.
-pub(crate) fn withhold_herdr_execution(logical: &str, nonce: Option<&str>) {
+pub fn withhold_herdr_execution(logical: &str, nonce: Option<&str>) {
     change_hold(logical, |executions| {
         match (executions.get_mut(logical), nonce) {
             (Some((listed, _)), Some(nonce)) if nonce != listed => {}
@@ -252,7 +253,7 @@ pub(crate) fn withhold_herdr_execution(logical: &str, nonce: Option<&str>) {
 
 /// Execution `nonce` left `logical` for tmux: its listing ends, so the pane's hooks and watcher
 /// read as tmux again. A newer execution listed there stays.
-pub(crate) fn release_herdr_execution(logical: &str, nonce: &str) {
+pub fn release_herdr_execution(logical: &str, nonce: &str) {
     change_hold(logical, |executions| {
         if executions
             .get(logical)
@@ -265,12 +266,12 @@ pub(crate) fn release_herdr_execution(logical: &str, nonce: &str) {
 
 /// Whether a claim on `logical` may be withheld: a Herdr host, or a pane a launch listed.
 /// Any other claim is admitted, whatever other panes are listed. Read under `herdr_listing_order`.
-pub(crate) fn herdr_claim_may_be_withheld(logical: &str, herdr_host: bool) -> bool {
+pub fn herdr_claim_may_be_withheld(logical: &str, herdr_host: bool) -> bool {
     herdr_host || herdr_execution_listed(logical)
 }
 
 /// Whether a launch or a reconcile listed `logical` as a Herdr pane, admitted or not.
-pub(crate) fn herdr_execution_listed(logical: &str) -> bool {
+pub fn herdr_execution_listed(logical: &str) -> bool {
     if !listed(|flag| flag.load(Acquire)) {
         return false;
     }
@@ -290,14 +291,14 @@ pub(crate) fn herdr_execution_is(logical: &str, nonce: &str) -> bool {
 
 /// The execution a launch or a reconcile last listed on `logical` as a Herdr pane. Read without
 /// the listed flag, which a test keeps per thread; the lock is a leaf.
-pub(crate) fn herdr_listed_execution(logical: &str) -> Option<String> {
+pub fn herdr_listed_execution(logical: &str) -> Option<String> {
     let executions = HERDR_EXECUTIONS.lock();
     let executions = executions.unwrap_or_else(|poison| poison.into_inner());
     executions.get(logical).map(|(nonce, _)| nonce.clone())
 }
 
 /// The execution listed on `logical` and whether a reconcile admitted it; the lock is a leaf.
-pub(crate) fn herdr_listing(logical: &str) -> Option<(String, bool)> {
+pub fn herdr_listing(logical: &str) -> Option<(String, bool)> {
     let executions = HERDR_EXECUTIONS.lock();
     let executions = executions.unwrap_or_else(|poison| poison.into_inner());
     executions.get(logical).cloned()

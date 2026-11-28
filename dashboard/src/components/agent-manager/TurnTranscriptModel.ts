@@ -240,11 +240,21 @@ export function shouldRefreshCard(event: Event, cardId: string): boolean {
   const payload = detail?.payload;
   if (!type || !payload) return false;
 
-  if (type === "kanban_card_new" || type === "kanban_card_update") {
+  if (
+    type === "kanban_card_new" ||
+    type === "kanban_card_update" ||
+    type === "kanban_card_created" ||
+    type === "kanban_card_updated"
+  ) {
     return payload.id === cardId;
   }
 
-  if (type === "dispatch_new" || type === "dispatch_update") {
+  if (
+    type === "dispatch_new" ||
+    type === "dispatch_update" ||
+    type === "task_dispatch_created" ||
+    type === "task_dispatch_updated"
+  ) {
     return payload.kanban_card_id === cardId;
   }
 

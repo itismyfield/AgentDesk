@@ -3,10 +3,10 @@
 pub mod actor;
 pub(crate) mod ansi;
 pub mod bounded_tmux;
-pub(crate) mod human_frame;
+pub mod human_frame;
 pub mod input_key;
 pub(crate) mod submission;
-pub(crate) mod submission_tmux;
+pub mod submission_tmux;
 
 #[cfg(test)]
 mod ansi_tests;
@@ -17,5 +17,5 @@ mod human_frame_tests;
 #[cfg(test)]
 mod input_key_tests;
 
-pub(crate) mod target_epoch;
+pub mod target_epoch;
 pub(crate) mod writer_lease;

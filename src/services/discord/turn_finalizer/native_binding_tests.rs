@@ -562,7 +562,7 @@ async fn native_8148_coldsource_terminal_none_refuses_new_source() {
         .unwrap();
     f.transcript();
     f.history
-        .try_native_not_sent(&f.namespace, &f.ticket)
+        .try_native_not_sent_for_test(&f.namespace, &f.ticket)
         .unwrap();
     f.port()
         .bind_source(&f.namespace, &f.ticket, &f.history)
@@ -632,7 +632,7 @@ async fn native_8148_coldsource_selected_intent_retires_on_exact_not_sent() {
         .await
         .unwrap();
     f.history
-        .try_native_not_sent(&f.namespace, &f.ticket)
+        .try_native_not_sent_for_test(&f.namespace, &f.ticket)
         .unwrap();
     port.bind_source(&f.namespace, &f.ticket, &f.history)
         .await
@@ -768,7 +768,7 @@ async fn native_8148_coldsource_cap_preserves_debt_and_reclaims_only_after_ack()
         .await
         .unwrap();
     f.history
-        .try_native_not_sent(&f.namespace, &f.ticket)
+        .try_native_not_sent_for_test(&f.namespace, &f.ticket)
         .unwrap();
     release_unkeyed_source(&f.shared, &f.history, &f.namespace, &f.ticket)
         .await

@@ -60,6 +60,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             payload: TEXT.to_string(),
             output_origin: None,
             notice_origin: None,
+            reply: None,
         };
         self.send_piece(&piece, None, None, None).await;
         settled(self.store().ledger(), &key).unwrap_or(Notice::Pending)

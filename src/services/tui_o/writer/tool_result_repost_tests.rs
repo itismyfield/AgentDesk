@@ -44,7 +44,7 @@ async fn shared_tool_result_without_local_history_is_excluded_before_repost_pg()
     assert!(harness.port.posts().is_empty());
     let ledger = writer.store().ledger();
     assert_eq!(
-        ledger.excluded(key.unit()),
+        ledger.excluded(key.unit_for_test()),
         Some(pieces::TOOL_RESULT_INTERNAL)
     );
     assert_eq!(

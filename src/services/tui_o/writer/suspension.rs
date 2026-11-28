@@ -12,7 +12,7 @@ struct Scope {
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct Suspension(Arc<Mutex<Scope>>);
+pub struct Suspension(Arc<Mutex<Scope>>);
 
 impl std::fmt::Debug for Suspension {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -31,21 +31,21 @@ impl std::fmt::Debug for Suspension {
 }
 
 impl Suspension {
-    pub(crate) fn contains(&self, source: &SourceId) -> bool {
+    pub fn contains(&self, source: &SourceId) -> bool {
         self.0
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .keys
             .contains(&source_key(source))
     }
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.0
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .keys
             .is_empty()
     }
-    pub(crate) fn nonce(&self) -> Option<String> {
+    pub fn nonce(&self) -> Option<String> {
         self.0
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -94,11 +94,7 @@ impl Suspension {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(in crate::services) fn extend(
-        &self,
-        nonce: String,
-        sources: impl IntoIterator<Item = SourceId>,
-    ) {
+    pub fn extend(&self, nonce: String, sources: impl IntoIterator<Item = SourceId>) {
         let mut scope = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         scope
             .keys

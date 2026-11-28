@@ -1,5 +1,5 @@
 use super::*;
-use crate::services::tui_input::human_frame::history::v2::native_tests::Fixture;
+use crate::services::tui_input::human_frame::history::v2::native_support::Fixture;
 use crate::test_support::wait::{WAIT_CAP, await_within};
 
 #[tokio::test]

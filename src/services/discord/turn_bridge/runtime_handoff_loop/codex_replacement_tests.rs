@@ -7,7 +7,7 @@ use crate::services::discord::task_supervisor::{
     self, watcher_completion, watcher_spawn_observation,
 };
 use crate::services::discord::turn_presence::activity;
-use crate::services::provider_teardown::tests::test_support::FakeTmux;
+use crate::services::provider_teardown::test_support::FakeTmux;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 

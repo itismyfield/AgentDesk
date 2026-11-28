@@ -90,7 +90,7 @@ fn cards_on(root: &Path) {
     assert_eq!(crate::config::runtime_root().as_deref(), Some(root));
     tool_card_switch::set(root, CANARY_CHANNEL, true, 7163).unwrap();
     assert!(tool_card_switch::global_enabled());
-    assert!((tool_card_switch::ToolCardSwitch::for_channel(
+    assert!((tool_card_switch::ToolCardSwitch::for_channel_for_test(
         CANARY_CHANNEL
     ))());
     crate::services::tui_prompt_dedupe::codex_verified::provenance::admission::set_ready_for_tests(
@@ -114,15 +114,14 @@ async fn fresh_proof_preserves_tool_cards_and_turn_summary_after_deriver_reset()
     let _dedupe = DedupeGuard::acquire();
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
     let _scope = ScopeFixture::new();
-    let _tmux =
-        crate::services::provider_teardown::tests::test_support::FakeTmux::install(CANARY_TMUX);
+    let _tmux = crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
     dedupe::reset_state_for_tests();
     dedupe::binding_events::set_test_root(Some(root.path()));
     cards_on(root.path());
     let (_, n2) = proven(root.path());
     let harness = initial(&n2);
     let writer = harness.writer();
-    let selection = writer.suspension_for_test().clone();
+    let selection = writer.suspension_for_test();
     let (stop, stopped) = watch::channel(false);
     let (resumed, ready) = watch::channel(false);
     let actor = tokio::spawn(run_channel(
@@ -222,15 +221,14 @@ async fn pending_deriver_holds(case: Pending) {
     let _dedupe = DedupeGuard::acquire();
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
     let _scope = ScopeFixture::new();
-    let _tmux =
-        crate::services::provider_teardown::tests::test_support::FakeTmux::install(CANARY_TMUX);
+    let _tmux = crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
     dedupe::reset_state_for_tests();
     dedupe::binding_events::set_test_root(Some(root.path()));
     cards_on(root.path());
     let (n3_context, n3) = proven(root.path());
     let harness = initial(&n3);
     let writer = harness.writer();
-    let selection = writer.suspension_for_test().clone();
+    let selection = writer.suspension_for_test();
     let (stop, stopped) = watch::channel(false);
     let (resumed, ready) = watch::channel(false);
     let actor = tokio::spawn(run_channel(

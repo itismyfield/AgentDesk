@@ -1,6 +1,6 @@
 //! Discovery through the idle entry while the real O host keeps reading its original source.
 use super::*;
-use crate::services::provider_teardown::tests::test_support::FakeTmux;
+use crate::services::provider_teardown::test_support::FakeTmux;
 use crate::services::tmux_common as tc;
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::{ShadowProvider, binding_reader::source_id_for};

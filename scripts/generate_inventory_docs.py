@@ -86,6 +86,7 @@ def cfg_requires_test(predicate: str) -> bool:
 
 TOP_LEVEL_MODULE_PURPOSES = {
     "adk_base_lib.rs": "Library root of the `adk-base` workspace crate; builds the seed `domain` value contracts and `utils` pure helpers in place, which the parent re-exports under their old paths.",
+    "adk_runtime_lib.rs": "Library root of the `adk-runtime` workspace crate; builds the runtime modules (config, db, logging, the provider/TUI/session services) in place, which the parent re-exports under their old paths.",
     "adk_test_support_lib.rs": "Library root of the `adk-test-support` workspace crate; builds the `test_support` capped waits, serialized runtimes, lock holder records and source lexer in place for dev-dependencies only, which the parent re-exports under `#[cfg(test)]`.",
     "api_caller_observability.rs": "Request-principal classification and uniform log-only API caller attribution records for identity-consuming mutation paths.",
     "bootstrap.rs": "Builds config, database, policy engine, and shared app state before launch.",
@@ -113,6 +114,7 @@ TOP_LEVEL_MODULE_PURPOSES = {
     "krx_db_b_tests.rs": "Test-only host that declares the second slice of KRX db tests calling root-crate items.",
     "krx_db_tests.rs": "Test-only host that declares KRX db tests calling root-crate items, so they leave the KRX crate.",
     "krx_services_tests.rs": "Test-only host that declares KRX services tests (cluster) calling root-crate items, so they leave the KRX crate.",
+    "krx_services_tests/": "Test functions moved out of KRX services test files because they call root-crate items.",
     "krx_session_host_tests.rs": "Test-only host that declares KRX session_host tests calling root-crate items, so they leave the KRX crate.",
     "krx_tui_o_tests.rs": "Test-only host that declares KRX tui_o tests calling root-crate items, so they leave the KRX crate.",
     "krx_tui_o_unix_tests.rs": "Test-only host for KRX tui_o tests originally gated on `cfg(all(test, unix))` that call root-crate items.",
@@ -746,8 +748,12 @@ def _path_attr(code: str, view: str) -> str | None:
     return match.group("path") if match else None
 
 
+_WORKSPACE_LIB_ROOT_RE = re.compile(r"adk_[a-z0-9_]+_lib\.rs")
+
+
 def _file_module_dir(parent: Path) -> Path:
-    if parent.name in {"lib.rs", "main.rs", "mod.rs"}:
+    # Workspace crates build `src/adk_*_lib.rs` as their lib root, so children sit beside it like lib.rs.
+    if parent.name in {"lib.rs", "main.rs", "mod.rs"} or _WORKSPACE_LIB_ROOT_RE.fullmatch(parent.name):
         return parent.parent
     return parent.parent / parent.stem
 

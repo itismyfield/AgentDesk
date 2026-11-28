@@ -1,7 +1,7 @@
 //! Error takeover uses the same fenced transaction as watchdog recovery.
 use super::*;
 
-pub(crate) async fn observe_provider_error(
+pub async fn observe_provider_error(
     lease: &RecoveryLease,
     input: ObserveInput,
     checkpoint: CheckpointPayload,

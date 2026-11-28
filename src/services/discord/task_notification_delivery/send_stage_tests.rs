@@ -96,7 +96,7 @@ async fn a_blocked_send_and_a_blocked_settlement_report_different_stages_and_ref
     let channel = 8_284_001;
     let _candidates = test_override::force_candidates(&[(channel, ClaudeTui)]);
     let candidate = test_override::with_channels(|boot| boot?.candidate(channel).cloned()).unwrap();
-    assert!(candidate.defer(channel));
+    assert!(candidate.defer_for_test(channel));
     let root = tempfile::tempdir().unwrap();
     let store = if PARENT_DIR_FSYNC_FLUSHES {
         OStore::open_if_enabled(&StoreConfig { enabled: true }, root.path())

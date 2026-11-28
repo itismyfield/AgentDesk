@@ -63,7 +63,7 @@ impl Source {
         let previous_root = events::test_root();
         events::set_test_root(Some(root));
         let payload = json!({"source":"startup","session_id":native,"transcript_path":old});
-        let hook = events::HookSignal::from_payload("session_start", &payload);
+        let hook = events::HookSignal::from_payload_for_test("session_start", &payload);
         let meta = std::fs::metadata(&old).unwrap();
         events::record_verified(
             &events::Proposal {
@@ -101,7 +101,7 @@ impl Source {
         let native = uuid::Uuid::new_v4().to_string();
         self.path = self.path.with_file_name(format!("{native}.jsonl"));
         let payload = json!({"source":"clear","session_id":native,"transcript_path":self.path});
-        let hook = events::HookSignal::from_payload("session_start", &payload);
+        let hook = events::HookSignal::from_payload_for_test("session_start", &payload);
         events::record_pending(&events::Proposal {
             channel_id: self.channel,
             provider: "claude",

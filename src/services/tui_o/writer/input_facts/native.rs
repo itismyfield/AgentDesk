@@ -13,12 +13,12 @@ use serde_json::Value;
 #[cfg(unix)]
 mod receipt;
 #[cfg(unix)]
-pub(crate) mod terminal;
+pub mod terminal;
 #[cfg(unix)]
 pub(crate) use receipt::MembershipReceipt;
 
 /// What one record says about the queue.
-pub(crate) enum QueueRecord {
+pub enum QueueRecord {
     Enqueue(String),
     /// Removed without running (`remove` other than mid-turn absorption).
     Withdraw(String),
@@ -38,7 +38,7 @@ pub(crate) enum QueueRecord {
     Prompt(String),
 }
 
-pub(crate) fn classify(value: &Value) -> Option<QueueRecord> {
+pub fn classify(value: &Value) -> Option<QueueRecord> {
     let text = |key: &str| value.get(key).and_then(body);
     match value["type"].as_str()? {
         "queue-operation" => match value["operation"].as_str()? {
@@ -85,20 +85,23 @@ fn body(value: &Value) -> Option<String> {
 }
 
 #[cfg(unix)]
-pub(crate) use crate::services::tui_input::human_frame::history::v2::native::{
-    EvidenceRegistration as Registration, registrations_fingerprint, same_registered_file,
+pub use crate::services::tui_input::human_frame::history::v2::native::{
+    EvidenceRegistration as Registration, registrations_fingerprint,
 };
 
 #[cfg(unix)]
+use crate::services::tui_input::human_frame::history::v2::native::same_registered_file;
+
+#[cfg(unix)]
 impl Registration {
-    pub(crate) fn matches(&self, binding: &SourceBinding) -> bool {
+    pub fn matches(&self, binding: &SourceBinding) -> bool {
         self.ticket.matches_binding(binding, &self.devices)
     }
 }
 
 #[cfg(unix)]
 impl Ticket {
-    pub(crate) fn matches_binding(&self, binding: &SourceBinding, devices: &[u64]) -> bool {
+    pub fn matches_binding(&self, binding: &SourceBinding, devices: &[u64]) -> bool {
         binding.provider == super::ShadowProvider::Claude
             && self.channel_id == binding.channel_id
             && self.source.as_ref().is_some_and(|s| {
@@ -121,18 +124,18 @@ impl Ticket {
 /// A candidate batch is read-only; its stamp is rechecked before any future actor mutation.
 #[cfg(unix)]
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
-pub(crate) struct Observation {
-    pub(crate) binding: SourceBinding,
-    pub(crate) generation: u64,
-    pub(crate) binding_seq: u64,
-    pub(crate) revision: u64,
-    pub(crate) through: u64,
-    pub(crate) registrations_fingerprint: String,
-    pub(crate) devices: Vec<u64>,
+pub struct Observation {
+    pub binding: SourceBinding,
+    pub generation: u64,
+    pub binding_seq: u64,
+    pub revision: u64,
+    pub through: u64,
+    pub registrations_fingerprint: String,
+    pub devices: Vec<u64>,
     /// A verified raw EOF closer at `through`; it never moves `through` itself.
-    pub(crate) terminal: Option<terminal::RawWitness>,
-    pub(crate) evidence: Vec<Evidence>,
-    pub(crate) receipts: Vec<MembershipReceipt>,
+    pub terminal: Option<terminal::RawWitness>,
+    pub evidence: Vec<Evidence>,
+    pub receipts: Vec<MembershipReceipt>,
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
@@ -144,35 +147,35 @@ pub(super) struct Record {
 
 #[cfg(unix)]
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct Run {
-    pub(crate) start: u64,
+pub struct Run {
+    pub start: u64,
     pub(crate) native_id: Option<String>,
 }
 
 #[cfg(unix)]
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct Evidence {
-    pub(crate) namespace: String,
-    pub(crate) ticket: Ticket,
-    pub(crate) run: Option<Run>,
-    pub(crate) range: (u64, u64),
-    pub(crate) membership_range: Option<(u64, u64)>,
-    pub(crate) membership_row: Option<String>,
-    pub(crate) closer_range: Option<(u64, u64)>,
-    pub(crate) disposition: Disposition,
+pub struct Evidence {
+    pub namespace: String,
+    pub ticket: Ticket,
+    pub run: Option<Run>,
+    pub range: (u64, u64),
+    pub membership_range: Option<(u64, u64)>,
+    pub membership_row: Option<String>,
+    pub closer_range: Option<(u64, u64)>,
+    pub disposition: Disposition,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) supersedes: Option<terminal::Supersession>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) raw: Option<terminal::RawWitness>,
+    pub raw: Option<terminal::RawWitness>,
 }
 
 #[cfg(unix)]
-pub(crate) use crate::services::tui_input::human_frame::history::v2::native::barrier::Barrier;
+pub use crate::services::tui_input::human_frame::history::v2::native::barrier::Barrier;
 #[cfg(unix)]
 #[derive(Default, Debug, PartialEq, Eq)]
-pub(crate) struct Analysis {
-    pub(crate) evidence: Vec<Evidence>,
-    pub(crate) barriers: Vec<Barrier>,
+pub struct Analysis {
+    pub evidence: Vec<Evidence>,
+    pub barriers: Vec<Barrier>,
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
@@ -186,10 +189,11 @@ mod test_support;
 pub(crate) mod tests;
 
 #[cfg(unix)]
-pub(crate) type Projection = projection::Projection;
+pub type Projection = projection::Projection;
 
 #[cfg(unix)]
 mod projection {
+    mod membership;
     use super::*;
     use crate::services::tui_o::shadow::capture::{
         MAX_PARTIAL_BYTES, PrefixConsumer, SourceCapture,
@@ -197,6 +201,8 @@ mod projection {
     use crate::services::tui_o::shadow::identity::{RecordFact, classify, row_key};
     use crate::services::tui_o::shadow::seal::{TurnEvent, TurnTracker};
     use std::io;
+
+    mod notice_absorption;
     #[cfg(test)]
     use std::io::Write;
 
@@ -229,10 +235,11 @@ mod projection {
         event: Option<Event>,
         boundaries: Vec<Edge>,
         receipt: Option<receipt::Fact>,
+        notice_absorption: Option<Box<notice_absorption::Removal>>,
         interrupt: Option<Vec<String>>,
     }
     /// Source-owned input hashes and native ranges, without output bodies or raw JSON records.
-    pub(crate) struct Projection {
+    pub struct Projection {
         binding: SourceBinding,
         facts: Vec<Fact>,
         tracker: TurnTracker,
@@ -246,7 +253,7 @@ mod projection {
     }
     impl Projection {
         /// Only the existing reopen hash pass can publish an authenticated seed.
-        pub(crate) fn reopen(
+        pub fn reopen(
             binding: SourceBinding,
             through: u64,
             hash: &str,
@@ -282,11 +289,11 @@ mod projection {
         ) -> Result<Vec<Evidence>, String> {
             self.analyze(registrations).map(|a| a.evidence)
         }
-        pub(crate) fn analyze(&self, registrations: &[Registration]) -> Result<Analysis, String> {
+        pub fn analyze(&self, registrations: &[Registration]) -> Result<Analysis, String> {
             self.analyze_closed(registrations, None)
         }
         /// `raw` adds one closing edge after the last complete record; it is never a record.
-        pub(crate) fn analyze_closed(
+        pub fn analyze_closed(
             &self,
             registrations: &[Registration],
             raw: Option<&terminal::RawWitness>,
@@ -303,10 +310,18 @@ mod projection {
                     aborted: raw.aborted,
                 }],
                 receipt: None,
+                notice_absorption: None,
                 interrupt: None,
             });
             let facts = (self.facts.as_slice(), closer.as_ref());
-            let mut analysis = reduce(&self.binding, facts, registrations, self.through, None)?;
+            let mut analysis = reduce(
+                &self.binding,
+                facts,
+                registrations,
+                self.through,
+                None,
+                None,
+            )?;
             if let Some(raw) = raw {
                 terminal::attach(&mut analysis.evidence, raw);
             }
@@ -348,13 +363,14 @@ mod projection {
                             && admitted_range == range
                             && admitted_row == Some(row);
                     }),
+                    None,
                 )
                 .is_ok()
                     && matched
             })
             .collect()
         }
-        pub(crate) fn idle(&self) -> bool {
+        pub fn idle(&self) -> bool {
             self.state == super::super::TurnState::Idle
         }
         pub(crate) fn append(
@@ -460,6 +476,7 @@ mod projection {
                     receipt: (!strict)
                         .then(|| receipt::read(&value, line, range))
                         .flatten(),
+                    notice_absorption: notice_absorption::removal(&value, line),
                     interrupt: strict.then(|| terminal::interrupt_hashes(&value)).flatten(),
                     event,
                     boundaries,
@@ -540,6 +557,7 @@ mod projection {
         registrations: &[Registration],
         through: u64,
         mut membership: Option<MembershipRecorder<'_>>,
+        mut notices: Option<&mut notice_absorption::NoticeFold<'_>>,
     ) -> Result<Analysis, String> {
         if binding.provider != super::ShadowProvider::Claude {
             return Ok(Analysis::default());
@@ -553,6 +571,10 @@ mod projection {
             .filter(|r| {
                 (r.candidate || terminal::superseding(r, &interrupts)) && r.matches(binding)
             })
+            .collect();
+        let windows: Vec<_> = registered
+            .iter()
+            .map(|r| notice_absorption::Window::new(r, notices.as_deref()))
             .collect();
         let mut inputs: Vec<Input> = vec![];
         let mut run: Option<Run> = None;
@@ -604,7 +626,9 @@ mod projection {
                             }
                             let Some(owner) = input.owner else { continue };
                             let registration = registered[owner];
-                            if !accepts_row(registration, record) || member[owner].is_some() {
+                            if !windows[owner].accepts_row(registration, record)
+                                || member[owner].is_some()
+                            {
                                 continue;
                             }
                             let Some(pending) = &input.pending else {
@@ -664,13 +688,7 @@ mod projection {
                     }
                 }
             }
-            let eligible = |i: usize| {
-                registered[i]
-                    .ticket
-                    .source
-                    .as_ref()
-                    .is_some_and(|s| s.offset <= record.range.0)
-            };
+            let eligible = |i: usize| windows[i].contains(record.range.0);
             let candidate = |body: &[String], receipt: bool| {
                 let candidates: Vec<_> = registered
                     .iter()
@@ -696,10 +714,8 @@ mod projection {
             };
             match event {
                 Event::Enqueue(body) => {
-                    let owner = candidate(body, false).filter(|i| {
-                    records.iter().filter(|r| r.range.0 >= registered[*i].ticket.source.as_ref().map_or(u64::MAX, |s| s.offset))
-                        .filter(|r| matches!(&r.event, Some(Event::Enqueue(b)) if same_body(b, body))).count() == 1
-                });
+                    let owner = candidate(body, false)
+                        .filter(|&i| windows[i].unique_enqueue(records, body));
                     inputs.push(Input {
                         body: body.clone(),
                         owner,
@@ -804,7 +820,7 @@ mod projection {
                     let owner = receipt
                         .or_else(|| {
                             at.and_then(|at| inputs[at].owner)
-                                .filter(|i| accepts_row(registered[*i], record))
+                                .filter(|i| windows[*i].accepts_row(registered[*i], record))
                         })
                         .or_else(|| {
                             (matches.is_empty()
@@ -818,9 +834,21 @@ mod projection {
                             .flatten()
                         });
                     if let Some(at) = at {
+                        if absorption
+                            && owner.is_none()
+                            && run.is_some()
+                            && inputs[at].owner.is_none()
+                            && let Some(notices) = notices.as_deref_mut()
+                            && !registered
+                                .iter()
+                                .enumerate()
+                                .any(|(i, r)| eligible(i) && body.contains(&r.frame_hash))
+                        {
+                            notices.unowned.insert(record.range, inputs[at].start);
+                        }
                         if inputs[at]
                             .owner
-                            .is_some_and(|i| !accepts_row(registered[i], record))
+                            .is_some_and(|i| !windows[i].accepts_row(registered[i], record))
                         {
                             continue;
                         }
@@ -910,14 +938,6 @@ mod projection {
                 })
                 .collect(),
         })
-    }
-
-    fn accepts_row(registration: &Registration, value: &Fact) -> bool {
-        registration.receipts.is_empty()
-            || value
-                .row
-                .as_deref()
-                .is_some_and(|uuid| registration.receipts.iter().any(|known| known == uuid))
     }
 
     fn settle_removed(

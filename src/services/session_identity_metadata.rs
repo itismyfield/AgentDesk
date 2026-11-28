@@ -19,7 +19,7 @@ fn owner_scope(root: &str, node: &str) -> String {
     format!("{:x}", hash.finalize())
 }
 
-pub(crate) fn runtime_identity(session: &str) -> Result<ManagedIdentity, String> {
+pub fn runtime_identity(session: &str) -> Result<ManagedIdentity, String> {
     Ok(ManagedIdentity {
         v: 1,
         owner_scope: current_owner_scope()?,
@@ -47,7 +47,7 @@ pub(crate) fn binding_identity(context: &BindingContext) -> Result<ManagedIdenti
     Ok(identity)
 }
 
-pub(crate) fn provider_identity(
+pub fn provider_identity(
     session: &str,
     provider: &str,
     channel: Option<u64>,
@@ -61,7 +61,7 @@ pub(crate) fn provider_identity(
 }
 
 impl crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation {
-    pub(crate) fn tmux_identity(&self) -> Result<ManagedIdentity, String> {
+    pub fn tmux_identity(&self) -> Result<ManagedIdentity, String> {
         binding_identity(&self.context)
     }
 }

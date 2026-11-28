@@ -12,35 +12,67 @@ use tower::ServiceExt;
 use super::*;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::claude_tui::hook_registry::{self, RegistryKey};
-use crate::services::claude_tui::hook_server::adoption_retry::{
-    deferred_adoption_count, reset_deferred_adoptions_for_tests,
-};
+#[cfg(test)]
+use crate::services::claude_tui::hook_server::adoption_retry::deferred_adoption_count;
+use crate::services::claude_tui::hook_server::adoption_retry::reset_deferred_adoptions_for_tests;
 use crate::services::claude_tui::hook_server::relay_receipts::{
     RELAY_DEADLINE_HEADER, RELAY_PUBLISHED_AT_HEADER, RELAY_REQUEST_ID_HEADER,
     RELAY_RESPOND_BY_HEADER,
 };
+#[cfg(test)]
+use crate::services::claude_tui::hook_server::retry_deferred_claude_adoptions;
 use crate::services::claude_tui::hook_server::{
-    HookEvent, HookServerState, hook_receiver_router_with_state, retry_deferred_claude_adoptions,
+    HookEvent, HookServerState, hook_receiver_router_with_state,
 };
 use crate::services::tui_prompt_dedupe::binding_events::{
-    APPEND_FAULT, BindingEvent, BindingTarget, binding_events_since, set_test_root,
+    APPEND_FAULT, BindingEvent, BindingTarget, SourceId, binding_events_since,
+    forget_channel_for_tests, log_path, set_test_root,
 };
 use crate::services::tui_prompt_dedupe::{
-    TEST_LOCK, TuiRuntimeBinding, clear_claude_session_rotation,
-    lock_claude_session_rotations_for_tests, register_provider_session,
-    register_rehydrated_tmux_runtime_binding, register_tmux_channel, register_tmux_runtime_binding,
-    reset_state_for_tests, runtime_binding_for_tmux_session,
+    TEST_LOCK, TuiRuntimeBinding, lock_claude_session_rotations_for_tests,
+    register_provider_session, register_tmux_channel, register_tmux_runtime_binding,
+    reset_state_for_tests,
+};
+#[cfg(test)]
+use crate::services::tui_prompt_dedupe::{
+    clear_claude_session_rotation, register_rehydrated_tmux_runtime_binding,
+    runtime_binding_for_tmux_session,
 };
 
+#[cfg(test)]
 /// How long a wait for something that must happen polls before failing: a hang detector, not a
 /// bound of the contract, so a slow runner only makes a broken build fail later.
 const LIVENESS: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Marks the fixture's saved pin as committed before this host booted.
+pub fn backdate_fixture_pin(channel: u64, source: &SourceId) {
+    let path = log_path(channel).unwrap().unwrap();
+    let text = fs::read_to_string(&path).unwrap();
+    let mut records: Vec<Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let source = json!(source);
+    let pin = records.iter_mut().rev().find(|record| {
+        record["verified"] == true
+            && (record["new"]["source"] == source || record["new"]["resolved"]["source"] == source)
+    });
+    pin.expect("verified fixture pin")["committed_at"] =
+        json!(chrono::DateTime::<chrono::Utc>::UNIX_EPOCH);
+    let mut journal = Vec::new();
+    for record in records {
+        serde_json::to_writer(&mut journal, &record).unwrap();
+        journal.push(b'\n');
+    }
+    fs::write(path, journal).unwrap();
+    forget_channel_for_tests(channel);
+}
+
 /// One receiver over a scratch binding log, with the dedupe state held for the test.
-pub(crate) struct Ingress {
+pub struct Ingress {
     _root: tempfile::TempDir,
     dir: tempfile::TempDir,
-    pub(crate) state: HookServerState,
+    pub state: HookServerState,
     app: Router,
     pins: std::cell::RefCell<HashMap<String, (String, Value, HeaderMap)>>,
     runtime: tokio::runtime::Runtime,
@@ -48,8 +80,14 @@ pub(crate) struct Ingress {
     _state: MutexGuard<'static, ()>,
 }
 
+impl Default for Ingress {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Ingress {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         let state_lock = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let rotations = lock_claude_session_rotations_for_tests();
         reset_state_for_tests();
@@ -73,15 +111,19 @@ impl Ingress {
         }
     }
 
-    pub(crate) fn pending_feedback(&self, session: &str) -> usize {
+    pub fn pending_feedback(&self, session: &str) -> usize {
         self.state.memento_feedback.pending_count(session)
     }
 
-    pub(crate) fn path(&self, session: &str) -> PathBuf {
+    pub fn hold_discovery(&self) {
+        set_discovery_pending_for_tests(true);
+    }
+
+    pub fn path(&self, session: &str) -> PathBuf {
         self.dir.path().join(format!("{session}.jsonl"))
     }
 
-    pub(crate) fn transcript(&self, session: &str) -> PathBuf {
+    pub fn transcript(&self, session: &str) -> PathBuf {
         let path = self.path(session);
         let row = json!({"type": "mode", "sessionId": session});
         fs::write(&path, format!("{row}\n")).unwrap();
@@ -89,7 +131,7 @@ impl Ingress {
     }
 
     /// A managed Claude pane bound to `a`, logging to `channel`.
-    pub(crate) fn pane(&self, tmux: &str, channel: u64, a: &str) -> PathBuf {
+    pub fn pane(&self, tmux: &str, channel: u64, a: &str) -> PathBuf {
         let a_path = self.transcript(a);
         register_provider_session("claude", a, tmux);
         register_tmux_channel(tmux, channel);
@@ -97,7 +139,7 @@ impl Ingress {
         a_path
     }
 
-    pub(crate) fn payload(&self, session: &str, source: Option<&str>) -> Value {
+    pub fn payload(&self, session: &str, source: Option<&str>) -> Value {
         json!({ "session_id": session, "source": source, "transcript_path": self.path(session) })
     }
 
@@ -110,7 +152,7 @@ impl Ingress {
         self.send_envelope(uri, payload, request_id, None)
     }
 
-    pub(crate) fn send_envelope(
+    pub fn send_envelope(
         &self,
         uri: &str,
         payload: &Value,
@@ -177,7 +219,7 @@ impl Ingress {
         })
     }
 
-    pub(crate) fn claude_hook(
+    pub fn claude_hook(
         &self,
         event: &str,
         command: &str,
@@ -189,7 +231,7 @@ impl Ingress {
     }
 
     /// Seeds one memento recall whose feedback the next Stop of `session` must flush.
-    pub(crate) fn seed_feedback(&self, session: &str) {
+    pub fn seed_feedback(&self, session: &str) {
         let recall = json!({
             "tool_name": "mcp__memento__recall",
             "tool_response": {"_meta": {"searchEventId": "4308"}}
@@ -210,16 +252,19 @@ impl Drop for Ingress {
     }
 }
 
+#[cfg(test)]
 #[path = "native_clear_fence_tests.rs"]
 mod native_clear_fence_tests;
 
+#[cfg(test)]
 #[path = "same_session_source_tests.rs"]
 mod same_session_source_tests;
 
+#[cfg(test)]
 #[path = "resume_renumber_tests.rs"]
 mod resume_renumber_tests;
 
-pub(crate) fn claude(path: &std::path::Path, session: &str) -> TuiRuntimeBinding {
+pub fn claude(path: &std::path::Path, session: &str) -> TuiRuntimeBinding {
     TuiRuntimeBinding {
         runtime_kind: RuntimeHandoffKind::ClaudeTui,
         output_path: path.display().to_string(),
@@ -231,19 +276,20 @@ pub(crate) fn claude(path: &std::path::Path, session: &str) -> TuiRuntimeBinding
     }
 }
 
-pub(crate) fn uuid() -> String {
+pub fn uuid() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-pub(crate) fn events(channel: u64) -> Vec<BindingEvent> {
+pub fn events(channel: u64) -> Vec<BindingEvent> {
     binding_events_since(channel, 0).unwrap()
 }
 
-pub(crate) fn pending_lines(channel: u64, session: &str) -> usize {
+pub fn pending_lines(channel: u64, session: &str) -> usize {
     let is_pending = |e: &BindingEvent| matches!(&e.new, BindingTarget::Pending { payload_session_id, .. } if payload_session_id == session);
     events(channel).iter().filter(|e| is_pending(e)).count()
 }
 
+#[cfg(test)]
 fn session_lines(channel: u64, session: &str) -> Vec<u64> {
     let names = |e: &BindingEvent| match &e.new {
         BindingTarget::Source(source) | BindingTarget::Resolved { source, .. } => {
@@ -258,15 +304,16 @@ fn session_lines(channel: u64, session: &str) -> Vec<u64> {
         .collect()
 }
 
-pub(crate) fn buffered(session: &str) -> usize {
+pub fn buffered(session: &str) -> usize {
     let key = RegistryKey::new("claude", Some(session), None).unwrap();
     hook_registry::global().buffered_len(&key)
 }
 
-pub(crate) fn drain(rx: &mut tokio::sync::broadcast::Receiver<HookEvent>) -> usize {
+pub fn drain(rx: &mut tokio::sync::broadcast::Receiver<HookEvent>) -> usize {
     std::iter::from_fn(|| rx.try_recv().ok()).count()
 }
 
+#[cfg(test)]
 fn check_refused_until_durable(fault: &'static str) {
     let ingress = Ingress::new();
     let (channel, tmux) = (7_400, "ingress-fault");

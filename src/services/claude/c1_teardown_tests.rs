@@ -1,7 +1,7 @@
 #![cfg(unix)]
 
 use super::*;
-use crate::services::provider_teardown::tests::test_support::{
+use crate::services::provider_teardown::test_support::{
     FakeTmux, cleared, refusals, take_exit_reason,
 };
 
