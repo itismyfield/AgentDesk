@@ -3,8 +3,6 @@ use std::time::{Duration, Instant};
 
 #[path = "http_ops/loopback.rs"]
 mod loopback;
-#[cfg(test)]
-use loopback::connect_first_reachable;
 use loopback::{HttpFailure, invoke_localhost_before, loopback_http_request_inner};
 
 #[cfg(test)]
@@ -360,15 +358,10 @@ fn ureq_localhost_post(url: &str, body: &str, timeout: std::time::Duration) -> S
 
 #[cfg(test)]
 mod tests {
+    use super::loopback::{HttpFailure, connect_first_reachable};
     use super::*;
     use std::io::{Read, Write};
     use std::time::{Duration, Instant};
-
-    #[path = "http_ops/loopback.rs"]
-    mod loopback;
-    #[cfg(test)]
-    use loopback::connect_first_reachable;
-    use loopback::{HttpFailure, invoke_localhost_before, loopback_http_request_inner};
 
     #[test]
     fn policy_http_get_uses_read_only_loopback_transport_and_js_registration() {

@@ -9,12 +9,14 @@ use super::{invoke_localhost_post, register_http_ops};
 use crate::engine::loader::{
     ArmedDeadline, install_policy_interrupt_handler, new_eval_deadline_slot,
 };
+use crate::test_support::wait::await_within;
 use crate::utils::bridge_deadline::ScopedBridgeDeadline;
 
 const CLUSTER: &str = "/api/cluster/nodes";
 const CANDIDATES: &str = "/api/sessions/idle-cleanup-candidates";
 const SLOW: &str = "/api/sessions/slow/kill-tmux";
 const READY: &str = "/api/sessions/ready/kill-tmux";
+const SERVER_WAIT_CAP: Duration = Duration::from_secs(8);
 
 #[test]
 fn loopback_read_timeout_has_a_canonical_deadline_error() {
@@ -30,7 +32,7 @@ async fn quickjs_idle_kill_settles_deadline_and_resumes_after_the_slow_post() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = tokio::spawn(async move {
-        tokio::time::timeout(Duration::from_secs(8), serve_ticks(listener))
+        tokio::time::timeout(SERVER_WAIT_CAP, serve_ticks(listener))
             .await
             .expect("both ticks must reach the loopback server")
     });
@@ -113,7 +115,7 @@ async fn quickjs_idle_kill_settles_deadline_and_resumes_after_the_slow_post() {
     );
     drop(ctx);
     drop(runtime);
-    server.await.unwrap();
+    await_within(server, SERVER_WAIT_CAP).await.unwrap();
 }
 
 async fn serve_ticks(listener: tokio::net::TcpListener) {
