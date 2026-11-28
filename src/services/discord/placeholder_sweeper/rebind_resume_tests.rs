@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 use super::*;
 use crate::services::discord::health::test_support::MockDiscord;
 use crate::services::discord::host_teardown_gate::test_support::{
-    Stored, channel_key, seed as seed_host,
+    Stored, channel_key, seed as seed_host, shared_on,
 };
 use crate::services::discord::inflight::{self, RelayOwnerKind, TurnSource};
 use crate::services::discord::queue_io::cancel_backstop_test_support as support;
@@ -28,7 +28,6 @@ use crate::services::discord::queue_io::input_owner::drive::{
 };
 use crate::services::discord::queue_io::input_owner::effect::{Completion, Leaf, PreparedPayload};
 use crate::services::discord::queue_io::input_owner::pump;
-use crate::services::discord::test_fixtures::shared_on;
 use crate::services::session_host::test_support::InjectedLivenessGuard;
 use crate::services::session_host::{HostLiveness, HostSessionRef};
 use crate::services::turn_orchestrator::{PendingQueueItem, QueuePersistenceContext, v2_queue};

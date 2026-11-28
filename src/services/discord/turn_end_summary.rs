@@ -393,18 +393,6 @@ pub(in crate::services::discord) async fn post_watcher(
     post_live(&gateway, provider, summary.summary).await;
 }
 
-#[cfg(any(test, feature = "test-support"))]
-pub(in crate::services::discord) fn row(channel: u64, user: u64, nonce: &str) -> InflightTurnState {
-    serde_json::from_value(serde_json::json!({
-        "version":9,"provider":"claude","channel_id":channel,"channel_name":"summary-test",
-        "request_owner_user_id":1,"user_msg_id":user,"current_msg_id":100,"current_msg_len":6,
-        "user_text":"question","source":"text","session_id":null,"tmux_session_name":null,
-        "output_path":null,"input_fifo_path":null,"last_offset":20,"turn_start_offset":10,
-        "full_response":"answer","response_sent_offset":6,"started_at":"unknown","updated_at":"unknown",
-        "turn_nonce":nonce,"runtime_kind":"claude_tui"
-    })).unwrap()
-}
-
 #[cfg(test)]
 #[path = "turn_end_summary_tests.rs"]
 pub(in crate::services::discord) mod tests;

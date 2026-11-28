@@ -57,7 +57,7 @@ use self::rollback_journal::{
     unclaim_replace_continuation_rollback,
 };
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(in crate::services::discord) mod rollback_transport_test_hook {
     use super::*;
 

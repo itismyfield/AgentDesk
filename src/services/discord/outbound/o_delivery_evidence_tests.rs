@@ -495,6 +495,7 @@ impl Fixture {
         )
         .unwrap()
     }
+    #[cfg(test)]
     pub async fn http(
         &self,
     ) -> (

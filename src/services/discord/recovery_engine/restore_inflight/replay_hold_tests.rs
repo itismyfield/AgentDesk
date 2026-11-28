@@ -10,11 +10,10 @@ use poise::serenity_prelude::{self as serenity, MessageId};
 mod routine_presentation_tests;
 
 use crate::services::discord::host_teardown_gate::test_support::{
-    Stored, channel_key, nameless_turn, seed,
+    Stored, channel_key, nameless_turn, seed, shared_on,
 };
 use crate::services::discord::recovery_engine::o_cut_recorder;
 use crate::services::discord::recovery_engine::restore_inflight_turns;
-use crate::services::discord::test_fixtures::shared_on;
 use crate::services::session_host::test_support::{InjectedLivenessGuard, InjectedPresenceGuard};
 use crate::services::session_host::{HostLiveness, HostPresence, HostSessionRef};
 use poise::serenity_prelude::ChannelId;

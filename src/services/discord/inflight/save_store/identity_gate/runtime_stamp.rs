@@ -205,7 +205,7 @@ fn persist_terminal_range(
         &fresh,
         can_deliver_directly,
     );
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     crate::services::discord::turn_bridge::record_stream_test_event(
         fresh.channel_id,
         format!("admission-peek={body_ownership:?}"),
@@ -270,7 +270,7 @@ fn persist_terminal_range(
     local.tui_terminal_generation_mtime_ns = persisted.tui_terminal_generation_mtime_ns;
     local.last_offset = persisted.last_offset;
     local.save_generation = persisted.save_generation;
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     crate::services::discord::turn_bridge::record_stream_test_event(
         persisted.channel_id,
         format!(

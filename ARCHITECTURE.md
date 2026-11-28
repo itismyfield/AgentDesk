@@ -2164,7 +2164,6 @@ src/
 │   │   │   ├── host_recovery_guard.rs
 │   │   │   ├── host_recovery_guard_keyed_tests.rs
 │   │   │   ├── host_recovery_guard_log_tests.rs
-│   │   │   ├── host_recovery_seed_fixture_tests.rs
 │   │   │   ├── invariant_test_capture.rs
 │   │   │   ├── managed_submission.rs
 │   │   │   ├── managed_submission_tests.rs
@@ -2571,7 +2570,6 @@ src/
 │   │   │   ├── controller_cutover.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── o_anchor_repost_tests.rs
-│   │   │   ├── recovery_fake_gateway_fixture_tests.rs
 │   │   │   ├── restart.rs
 │   │   │   └── shared.rs
 │   │   ├── relay_health/

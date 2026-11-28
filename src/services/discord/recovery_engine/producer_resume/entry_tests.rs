@@ -1276,7 +1276,7 @@ async fn r1_repaired_episode_admits_one_queued_successor_and_delivers_its_final(
         "AGENTDESK_CONFIG",
         &config,
     );
-    discord::host_defer_gate::map_channel(&f.shared, f.channel, "").await;
+    discord::host_defer_gate::tests::map_channel(&f.shared, f.channel, "").await;
     {
         let mut core = f.shared.core.lock().await;
         let session = core.sessions.get_mut(&f.channel).unwrap();

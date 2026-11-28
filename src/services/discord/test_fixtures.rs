@@ -6,14 +6,6 @@ use super::{Arc, ChannelId, SharedData, TmuxWatcherHandle, tmux_watcher_now_ms};
 #[cfg(unix)]
 use super::{ProviderKind, queue_dispatch, serenity, shared_state, tui_prompt_relay};
 
-/// A claude runtime on `pool`.
-pub(crate) async fn shared_on(pool: &sqlx::PgPool) -> Arc<SharedData> {
-    let shared =
-        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
-    shared.settings.write().await.provider = super::ProviderKind::Claude;
-    shared
-}
-
 #[cfg(all(test, unix))]
 pub(crate) fn claim_cross_channel_tmux_watcher_for_high_risk_test(
     requested_channel_id: ChannelId,

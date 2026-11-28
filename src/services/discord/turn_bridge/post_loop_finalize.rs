@@ -98,9 +98,9 @@ pub(super) async fn run_post_loop_finalize(
     ctx: PostLoopFinalizeContext,
     state: PostLoopFinalizeState,
 ) -> PostLoopFinalizeOutput {
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     super::record_stream_test_event(ctx.channel_id.get(), "finalize");
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     if ctx.cancelled {
         super::record_stream_test_event(ctx.channel_id.get(), "cancel-finalize");
     }

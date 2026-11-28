@@ -362,11 +362,11 @@ pub(super) async fn handle_stream_content_message(
                                 );
                                 terminal_full_replay_cleanup_msg_ids =
                                     streaming_rollover_frozen_msg_ids.clone();
-                                #[cfg(any(test, feature = "test-support"))]
+                                #[cfg(test)]
                                 super::super::record_stream_test_event(channel_id.get(), "replay");
                                 response_sent_offset = 0;
                             }
-                            #[cfg(any(test, feature = "test-support"))]
+                            #[cfg(test)]
                             super::super::record_stream_test_event(channel_id.get(), format!("done-body={:?}/{}", full_response, response_sent_offset));
                             if let Some(s) = sid {
                                 new_session_id = Some(s.clone());

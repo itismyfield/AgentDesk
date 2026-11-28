@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::services::discord::gateway::{DiscordGateway, TurnGateway};
 use crate::services::discord::tui_prompt_relay::bridge_gateway::terminal_notice_test_gateway;
-use crate::services::discord::turn_end_summary::row;
+use crate::services::discord::turn_end_summary::tests::row;
 use crate::services::discord::turn_end_summary::{LiveSummary, post_live};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_summary_line::Outcome;

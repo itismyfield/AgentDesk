@@ -478,7 +478,7 @@ async fn send_rollback_channel_message(
     require_reference: bool,
     nonce: Option<&str>,
 ) -> Result<TransportReceipt, Error> {
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     if let Some(result) = super::rollback_transport_test_hook::send(
         channel_id,
         content,
@@ -558,7 +558,7 @@ pub(super) async fn delete_rollback_channel_message(
     channel_id: ChannelId,
     message_id: MessageId,
 ) -> Result<(), Error> {
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     if let Some(result) = super::rollback_transport_test_hook::delete(channel_id, message_id) {
         return result;
     }

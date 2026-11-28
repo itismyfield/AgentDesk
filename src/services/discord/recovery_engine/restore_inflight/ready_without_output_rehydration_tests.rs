@@ -15,7 +15,7 @@ async fn partial_eof_actual_controller_preserves_frozen_prefix_and_streamed_curr
     use crate::services::discord::formatting::ReplaceLongMessageOutcome;
     use crate::services::discord::outbound::delivery_record as dr;
     use crate::services::discord::recovery_paths::controller_cutover::{
-        deliver_recovery_replace_via_controller, recovery_fake_gateway::RecoveryFakeGateway,
+        deliver_recovery_replace_via_controller, tests::RecoveryFakeGateway,
     };
     use crate::services::tui_prompt_dedupe as dedupe;
     let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();

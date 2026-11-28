@@ -303,7 +303,7 @@ pub(crate) fn backfill_inflight_after_guard(provider: &ProviderKind, channel_id:
     let _ = super::inflight::load_inflight_state(provider, channel_id.get());
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(crate) mod test_support;
 
 #[cfg(test)]
