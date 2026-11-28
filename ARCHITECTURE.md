@@ -2046,7 +2046,10 @@ src/
 │   │   │   ├── restart_recovery.rs
 │   │   │   ├── restart_recovery_tests.rs
 │   │   │   ├── retired_wake.rs
-│   │   │   └── root_replaced.rs
+│   │   │   ├── root_replaced.rs
+│   │   │   ├── root_replaced_hook_test_support.rs
+│   │   │   ├── route_fixture_test_support.rs
+│   │   │   └── terminate_hook_test_support.rs
 │   │   ├── host_key_derivation/
 │   │   │   ├── ke_session_tests.rs
 │   │   │   └── ke_tests.rs
@@ -3899,6 +3902,8 @@ src/
 │   │   ├── destructive_cancel_gate.rs
 │   │   ├── discord_io.rs
 │   │   ├── dispatch_policy.rs
+│   │   ├── dl_herdr_terminate_test_host.rs
+│   │   ├── dl_herdr_terminate_unix_test_host.rs
 │   │   ├── dl_turn_bridge_test_host.rs
 │   │   ├── dl_turn_bridge_unix_test_host.rs
 │   │   ├── dl_turn_presence_test_host.rs
