@@ -5,8 +5,7 @@ use uuid::Uuid;
 
 /// Read the complete native transcript in order. Unreadable evidence blocks eligibility.
 pub(crate) fn pending_schedule(rows: impl BufRead, native_session_id: Uuid) -> bool {
-    let _ = pending(rows, native_session_id);
-    false
+    pending(rows, native_session_id).unwrap_or(true)
 }
 
 enum Change {
@@ -34,6 +33,9 @@ fn pending(rows: impl BufRead, native_session_id: Uuid) -> Option<bool> {
             }
         }
         if row["subtype"] == "scheduled_task_fire" {
+            if row["type"] != "system" || row.get("sessionId").is_none() {
+                return None;
+            }
             let task = row["taskId"].as_str().filter(|id| !id.is_empty())?;
             if jobs.get(task) == Some(&false) {
                 jobs.remove(task);

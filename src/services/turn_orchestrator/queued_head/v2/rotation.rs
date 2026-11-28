@@ -62,11 +62,13 @@ impl Target {
                 .await
                 .map_err(|_| HandoffError::Unavailable)?;
             if let Some(rotation) = observed {
-                return Ok(rotation?.filter(|intent| intent.session_row_id == row_id)
+                return Ok(rotation?
+                    .filter(|intent| intent.session_row_id == row_id)
                     .map(|intent| intent.into_status(Utc::now())));
             }
         }
-        Ok(Self::read_rotation(path, &namespace).await?
+        Ok(Self::read_rotation(path, &namespace)
+            .await?
             .filter(|intent| intent.session_row_id == row_id)
             .map(|intent| intent.into_status(Utc::now())))
     }
@@ -89,7 +91,7 @@ impl Target {
         else {
             return Ok(None);
         };
-        if snapshot.namespace.as_deref() != Some(namespace) {
+        if snapshot.rotation.is_some() && snapshot.namespace.as_deref() != Some(namespace) {
             return Err(HandoffError::Conflict);
         }
         Ok(snapshot.rotation)
@@ -98,23 +100,40 @@ impl Target {
     pub(crate) async fn stage(&self, handoff: Handoff) -> Result<Receipt, HandoffError> {
         let (path, namespace) = self.queue()?;
         let row_id = self.session_row_id;
-        if let Some(mailbox) = ChannelMailboxRegistry::global_handle(self.channel) {
-            return mailbox
+        let handoff = if let Some(mailbox) = ChannelMailboxRegistry::global_handle(self.channel) {
+            let (owner_path, owner_namespace) = (path.clone(), namespace.clone());
+            let outcome = mailbox
                 .v2_request(move |slot| {
-                    Ok(match slot.as_mut() {
-                        Some(owner) if owner.owns_rotation_path(&path, &namespace) => {
-                            owner.stage_rotation(row_id, handoff, Utc::now())
-                        }
-                        Some(_) => Err(HandoffError::Conflict),
-                        None => Err(HandoffError::Unavailable),
-                    })
+                    let Some(owner) = slot.as_mut() else {
+                        return Ok(Err(handoff));
+                    };
+                    let staged = if owner.owns_rotation_path(&owner_path, &owner_namespace) {
+                        owner.stage_rotation(row_id, handoff, Utc::now())
+                    } else {
+                        Err(HandoffError::Conflict)
+                    };
+                    Ok(Ok(staged))
                 })
                 .await
                 .map_err(|_| HandoffError::Unavailable)?;
-        }
+            match outcome {
+                Ok(staged) => return staged,
+                Err(handoff) => handoff,
+            }
+        } else {
+            handoff
+        };
         // A restarted node can replay a persisted receipt before its mailbox adopts the queue.
-        let intent = Self::read_rotation(path, &namespace).await?.ok_or(HandoffError::Conflict)?;
-        intent.check_handoff(row_id, &handoff, &sha256(handoff.body.as_bytes()), Utc::now())?
+        let intent = Self::read_rotation(path, &namespace)
+            .await?
+            .ok_or(HandoffError::Conflict)?;
+        intent
+            .check_handoff(
+                row_id,
+                &handoff,
+                &sha256(handoff.body.as_bytes()),
+                Utc::now(),
+            )?
             .ok_or(HandoffError::Unavailable)
     }
 }
@@ -126,8 +145,28 @@ impl Owner {
         handoff: Handoff,
         now: DateTime<Utc>,
     ) -> Result<Receipt, HandoffError> {
-        let _ = (&self, session_row_id, handoff, now);
-        Err(HandoffError::Unavailable)
+        let digest = sha256(handoff.body.as_bytes());
+        let intent = self
+            .snapshot
+            .rotation
+            .as_ref()
+            .ok_or(HandoffError::Conflict)?;
+        if let Some(receipt) = intent.check_handoff(session_row_id, &handoff, &digest, now)? {
+            return Ok(receipt);
+        }
+        let mut next = self.snapshot.clone();
+        let intent = next.rotation.as_mut().ok_or(HandoffError::Conflict)?;
+        let receipt = Receipt {
+            op_id: intent.op_id,
+            digest,
+            stored_at: now,
+        };
+        intent.submission = Some(StoredHandoff {
+            receipt: receipt.clone(),
+            body: handoff.body,
+        });
+        self.commit(next).map_err(|_| HandoffError::Unavailable)?;
+        Ok(receipt)
     }
 
     fn owns_rotation_path(&self, path: &std::path::Path, namespace: &str) -> bool {
@@ -144,7 +183,9 @@ impl Owner {
         latch: impl FnOnce() -> Option<(&'a sqlx::PgPool, &'a str, String)>,
     ) -> Result<bool, String> {
         use crate::{db::transcript_rotation_requests, services::transcript_rotation::eligibility};
-        let soft_bytes = soft_bytes.unwrap_or_default();
+        let Some(soft_bytes) = soft_bytes else {
+            return Ok(false);
+        };
         if self.snapshot.rotation.is_some()
             || self.snapshot.holds_input()
             || !eligibility::eligible(soft_bytes, evidence)
@@ -189,7 +230,10 @@ impl RotationIntent {
             || self.op_id != handoff.op_id
             || self.native_session_id != handoff.native_session_id
             || !bool::from(
-                self.ticket.digest.as_bytes().ct_eq(sha256(handoff.ticket.as_bytes()).as_bytes()),
+                self.ticket
+                    .digest
+                    .as_bytes()
+                    .ct_eq(sha256(handoff.ticket.as_bytes()).as_bytes()),
             )
         {
             return Err(HandoffError::Conflict);
@@ -219,9 +263,9 @@ impl RotationIntent {
         } else {
             "requested"
         };
-        let (receipt, body) = self
-            .submission
-            .map_or((None, None), |stored| (Some(stored.receipt), Some(stored.body)));
+        let (receipt, body) = self.submission.map_or((None, None), |stored| {
+            (Some(stored.receipt), Some(stored.body))
+        });
         Status {
             op_id: self.op_id,
             native_session_id: self.native_session_id,

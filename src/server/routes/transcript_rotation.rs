@@ -9,7 +9,7 @@ use serde_json::json;
 
 use super::AppState;
 use crate::db::dispatched_session_canonical_identity::{
-    HookSessionUpsertError, resolve_session_key_pg,
+    HookSessionUpsertError, resolve_session_row_pg,
 };
 use crate::domain::provider::ProviderKind;
 use crate::error::AppError;
@@ -28,9 +28,6 @@ pub(super) async fn submit(
         Ok(handoff) => handoff,
         Err(rejection) => return Ok(rejection.into_response()),
     };
-    if handoff.body.trim().is_empty() {
-        return Err(AppError::bad_request("rotation handoff body is empty"));
-    }
     let receipt = target(&state, &key)
         .await?
         .stage(handoff)
@@ -57,13 +54,16 @@ pub(super) async fn status(
 }
 
 fn require_enabled(state: &AppState) -> Result<(), AppError> {
-    let _ = state;
-    Ok(())
+    state
+        .config
+        .runtime
+        .transcript_rotation_soft_bytes
+        .map(|_| ())
+        .ok_or_else(|| AppError::not_found("transcript rotation disabled"))
 }
 
 #[derive(sqlx::FromRow)]
 struct Session {
-    id: i64,
     channel_id: Option<String>,
     discord_token_hash: Option<String>,
     instance_id: Option<String>,
@@ -72,7 +72,7 @@ struct Session {
 async fn target(state: &AppState, key: &str) -> Result<Target, AppError> {
     let unavailable = || handoff_error(HandoffError::Unavailable);
     let pool = state.pg_pool.as_ref().ok_or_else(unavailable)?;
-    let key = resolve_session_key_pg(pool, key)
+    let (session_row_id, _) = resolve_session_row_pg(pool, Some(key), None, None)
         .await
         .map_err(|error| match error {
             HookSessionUpsertError::Conflict(_) => handoff_error(HandoffError::Conflict),
@@ -80,10 +80,10 @@ async fn target(state: &AppState, key: &str) -> Result<Target, AppError> {
         })?
         .ok_or_else(|| AppError::not_found("session not found"))?;
     let session: Session = sqlx::query_as(
-        "SELECT id, channel_id, discord_token_hash, instance_id FROM sessions
-         WHERE session_key = $1 AND provider = 'claude'",
+        "SELECT channel_id, discord_token_hash, instance_id FROM sessions
+         WHERE id = $1 AND provider = 'claude'",
     )
-    .bind(key)
+    .bind(session_row_id)
     .fetch_optional(pool)
     .await
     .map_err(|_| unavailable())?
@@ -108,7 +108,7 @@ async fn target(state: &AppState, key: &str) -> Result<Target, AppError> {
         })
         .ok_or_else(|| handoff_error(HandoffError::Conflict))?;
     Ok(Target {
-        session_row_id: session.id,
+        session_row_id,
         channel: ChannelId::new(channel_id),
         persistence: QueuePersistenceContext::new(&ProviderKind::Claude, &token_hash, None),
     })

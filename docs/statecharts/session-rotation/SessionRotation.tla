@@ -172,6 +172,7 @@ ClearCommit == /\ s.online /\ s.clearing
        !.turn = "Idle", !.turnBy = None, !.turnGen = None]
 
 \* ---------------- rotation ----------------
+\* P1: eligibility::eligible and schedules::pending_schedule precede Owner::reserve_rotation.
 Reserve == /\ s.online /\ s.phase = "Idle" /\ s.latch["Old"] = "Fresh" /\ Eligible /\ OldQuiet
   /\ ~s.clearing
   /\ s' = [s EXCEPT !.phase = "Requesting", !.in[Req] = [Rec0 EXCEPT !.st = "Queued",
@@ -179,12 +180,13 @@ Reserve == /\ s.online /\ s.phase = "Idle" /\ s.latch["Old"] = "Fresh" /\ Eligib
 ReserveUnsupported == /\ ~FixLatch /\ s.online /\ s.phase = "Idle"
   /\ s.latch["Old"] = "Fresh" /\ ~Eligible /\ OldQuiet
   /\ s' = [s EXCEPT !.latch["Old"] = "Spent"]
-\* The durable MayHaveSent commit spends the latch before the key goes out.
+\* P1: db/transcript_rotation_requests.rs inserts before Owner::reserve_rotation commits.
+\* This model abstracts that pair and the later request send as one dispatch.
 AskDispatch == /\ s.online /\ s.phase = "Requesting" /\ ~s.abort /\ ~s.expired /\ OldQuiet
   /\ Eligible /\ s.in[Req].st = "Queued" /\ ~s.clearing
   /\ s' = [s EXCEPT !.in[Req].st = "Sent", !.asks = @ + 1, !.latch["Old"] = "Spent",
        !.phase = "Asked"]
-\* The handoff API stores the body under the exact request ticket; no process effect.
+\* P1: routes/transcript_rotation.rs submit calls Owner::stage_rotation for the pinned ticket.
 Stage == /\ s.online /\ s.phase = "Asked" /\ s.turn = "Open" /\ s.turnBy = Req
   /\ s.turnGen = "Old" /\ s' = [s EXCEPT !.phase = "Staged", !.body = TRUE]
 Tick == /\ s.phase \in PreBarrier /\ ~s.expired /\ s' = [s EXCEPT !.expired = TRUE]

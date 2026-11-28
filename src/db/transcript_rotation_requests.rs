@@ -30,8 +30,7 @@ pub async fn insert(
     .bind(request.requested_at)
     .fetch_optional(pool)
     .await?;
-    let _ = inserted;
-    Ok(false)
+    Ok(inserted.is_some())
 }
 
 pub async fn get(
