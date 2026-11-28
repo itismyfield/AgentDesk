@@ -393,7 +393,7 @@ fn retry(context: &Context) {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-#[path = "producer_resume/producer_resume_hook_tests.rs"]
+#[path = "producer_resume/producer_resume_hook_test_support.rs"]
 pub(in crate::services::discord) mod producer_resume_hook_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub(in crate::services::discord) use producer_resume_hook_tests::record_epilogue_body;

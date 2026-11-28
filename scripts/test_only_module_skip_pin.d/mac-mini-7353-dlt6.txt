@@ -1,0 +1,9 @@
+resolver | src/services/discord/dl_recovery_engine_test_host.rs
+resolver | src/services/discord/dl_recovery_engine_unix_test_host.rs
+resolver | src/services/discord/inflight/save_store/create_monotonic_fixture_test_support.rs
+resolver | src/services/discord/inflight/save_store/identity_gate/runtime_stamp/claude_terminal_fixture_test_support.rs
+resolver | src/services/discord/inflight/synthetic_carry_forward_fixture_test_support.rs
+resolver | src/services/discord/recovery_engine/herdr_row_end_hook_test_support.rs
+resolver | src/services/discord/recovery_engine/producer_resume/producer_resume_hook_test_support.rs
+resolver | src/services/discord/recovery_engine/restore_inflight/ready_without_output_fixture_test_support.rs
+resolver | src/services/discord/recovery_engine/tmux_probe_reader_hook_test_support.rs

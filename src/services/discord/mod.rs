@@ -198,9 +198,9 @@ mod dl_herdr_terminate_tests;
 #[cfg(all(test, unix))]
 mod dl_herdr_terminate_unix_tests;
 #[cfg(test)]
-mod dl_recovery_engine_tests;
+mod dl_recovery_engine_test_host;
 #[cfg(all(test, unix))]
-mod dl_recovery_engine_unix_tests;
+mod dl_recovery_engine_unix_test_host;
 #[cfg(test)]
 mod dl_tmux_watcher_tests;
 #[cfg(all(test, unix))]

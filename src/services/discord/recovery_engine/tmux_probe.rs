@@ -398,7 +398,7 @@ fn settle_result(reader: &RestoredReader, offset: u64) -> RestoredRead {
 /// What a restore reader did, for tests: each pane observation (and whether it settled a
 /// held result), each RuntimeReady it sent, and how it ended.
 #[cfg(any(test, feature = "test-support"))]
-#[path = "tmux_probe_reader_hook_tests.rs"]
+#[path = "tmux_probe_reader_hook_test_support.rs"]
 mod reader_hook_tests;
 
 #[cfg(any(test, feature = "test-support"))]

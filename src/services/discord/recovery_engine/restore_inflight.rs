@@ -2769,7 +2769,7 @@ mod host_probe_tests;
 #[path = "restore_inflight/kickoff_identity_tests.rs"]
 mod kickoff_identity_tests;
 #[cfg(any(test, feature = "test-support"))]
-#[path = "restore_inflight/ready_without_output_fixture_tests.rs"]
+#[path = "restore_inflight/ready_without_output_fixture_test_support.rs"]
 pub(in crate::services::discord) mod ready_without_output_fixture_tests;
 
 #[cfg(test)]

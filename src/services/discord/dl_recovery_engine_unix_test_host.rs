@@ -3,9 +3,6 @@
 #[path = "recovery_engine/restore_inflight/replay_hold_tests.rs"]
 mod replay_hold_tests;
 
-#[path = "recovery_engine/o_aged_settlement_tests.rs"]
-mod o_aged_settlement_tests;
-
 #[path = "inflight/save_store/identity_gate/runtime_stamp/claude_terminal_tests/o_stream_regression_tests.rs"]
 mod o_stream_regression_tests;
 
