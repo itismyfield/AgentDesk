@@ -34,14 +34,14 @@ use std::time::Duration;
 mod host;
 mod o_input;
 #[cfg(unix)]
-pub(crate) use crate::intake_consent_authority::BeforeEffects;
-pub(crate) use host::{
+pub use crate::intake_consent_authority::BeforeEffects;
+pub use host::{
     CheckpointWaits, ExecuteIntakeTurn, IntakeHost, IntakeTurnFuture, IntakeTurnPort,
     IntakeWorkerRuntime, ResolveRuntimeFuture, ShutdownProbe,
 };
 use o_input::{execute_before_effects as execute_intake_turn_core, hold_off_o_gateway};
 #[cfg(unix)]
-pub(crate) use o_input::{scope_key::WorkerScopeKey, take_before_effects};
+pub use o_input::{scope_key::WorkerScopeKey, take_before_effects};
 
 #[derive(Default)]
 struct MarkDoneMissCounters {
@@ -114,7 +114,7 @@ async fn classify_mark_done_miss(pool: &PgPool, row_id: i64, channel_id: &str, u
 /// Provider-local worker activity used by the restart marker poller. The
 /// process-global shutdown counters remain separate; each provider waits only
 /// for its own accepted intake tick before consuming its barrier slot.
-pub(crate) struct IntakeWorkerLifecycle {
+pub struct IntakeWorkerLifecycle {
     admission_fenced: AtomicBool,
     active_ticks: std::sync::atomic::AtomicUsize,
     drained: tokio::sync::Notify,
@@ -131,6 +131,11 @@ impl Default for IntakeWorkerLifecycle {
 }
 
 impl IntakeWorkerLifecycle {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn try_begin_tick_for_test(&self) -> Option<impl Sized + '_> {
+        self.try_begin_tick()
+    }
+
     /// Acquire admission for one complete worker tick. The post-increment fence
     /// check closes the load-before-fence race: either the tick is counted before
     /// the poller drains, or it relinquishes admission without touching the DB.
@@ -150,12 +155,17 @@ impl IntakeWorkerLifecycle {
         Some(IntakeWorkerTickGuard { lifecycle: self })
     }
 
-    pub(crate) fn fence_admission(&self) {
+    pub fn fence_admission(&self) {
         self.admission_fenced.store(true, Ordering::SeqCst);
     }
 
-    pub(crate) fn unfence_admission(&self) {
+    pub fn unfence_admission(&self) {
         self.admission_fenced.store(false, Ordering::SeqCst);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn admission_is_fenced_for_test(&self) -> bool {
+        self.admission_is_fenced()
     }
 
     pub(crate) fn admission_is_fenced(&self) -> bool {
@@ -171,7 +181,7 @@ impl IntakeWorkerLifecycle {
     /// Wait for all active ticks. Create `Notified` before checking the count:
     /// `notify_waiters` reaches futures created before the broadcast, even if
     /// not polled yet, but retains no permit for futures created afterwards.
-    pub(crate) async fn wait_until_drained(&self) {
+    pub async fn wait_until_drained(&self) {
         loop {
             let notified = self.drained.notified();
             #[cfg(test)]
@@ -226,7 +236,7 @@ fn admission_action(
 /// of forwarded intakes drains fast, slower idle cadence so the
 /// worker does not pin its DB pool.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct IntakeWorkerConfig {
+pub struct IntakeWorkerConfig {
     /// Sleep between poll attempts when the queue had no rows to claim.
     pub idle_poll_interval: Duration,
     /// Sleep between poll attempts when the previous tick claimed a row.
@@ -245,7 +255,7 @@ impl Default for IntakeWorkerConfig {
 /// Outcome of running a single claimed row through the executor. Used
 /// by the loop to decide the next sleep interval.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TickOutcome {
+pub enum TickOutcome {
     /// No row was eligible for claim. Loop should sleep longer.
     QueueEmpty,
     /// Loop claimed a row and the executor ran (whether it succeeded
@@ -267,7 +277,7 @@ pub(crate) enum TickOutcome {
 ///
 /// This is the unit a poll loop schedules — extracted so tests can
 /// drive single-tick scenarios without spawning a long-running task.
-pub(crate) async fn run_intake_worker_tick<S: IntakeHost>(
+pub async fn run_intake_worker_tick<S: IntakeHost>(
     pool: &PgPool,
     shared: &Arc<S>,
     target_instance_id: &str,
@@ -304,7 +314,7 @@ pub(crate) async fn run_intake_worker_tick<S: IntakeHost>(
         return Ok(TickOutcome::QueueEmpty);
     };
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     test_executor::checkpoint(test_executor::Checkpoint::AfterClaim).await;
 
     // A marker can land while the claim transaction is in flight. Return only
@@ -423,7 +433,7 @@ pub(crate) async fn run_intake_worker_tick<S: IntakeHost>(
         return Ok(TickOutcome::Held);
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     test_executor::checkpoint(test_executor::Checkpoint::PreAccept).await;
 
     // Transition: claimed → accepted. If the sweep beat us to it,
@@ -462,7 +472,7 @@ pub(crate) async fn run_intake_worker_tick<S: IntakeHost>(
         return Ok(TickOutcome::Processed);
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     test_executor::checkpoint(test_executor::Checkpoint::Spawned).await;
     let result = execute_intake_turn_core(
         &row,
@@ -474,7 +484,7 @@ pub(crate) async fn run_intake_worker_tick<S: IntakeHost>(
         uploads,
     )
     .await;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     test_executor::checkpoint(test_executor::Checkpoint::FinalDb).await;
     let outcome = match result {
         Ok(IntakeExecution::Executed) => {
@@ -517,7 +527,7 @@ pub(crate) async fn run_intake_worker_tick<S: IntakeHost>(
             Ok(TickOutcome::Processed)
         }
     };
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     test_executor::checkpoint(test_executor::Checkpoint::FinalDbDone).await;
     outcome
 }
@@ -560,7 +570,7 @@ async fn release_cancelled_claim(
 /// set it before restart acknowledgement, fencing new poll ticks while an
 /// active tick drains to completion.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_intake_worker_loop<S: IntakeHost>(
+pub async fn run_intake_worker_loop<S: IntakeHost>(
     pool: PgPool,
     shared: Arc<S>,
     target_instance_id: String,
@@ -959,4 +969,4 @@ mod drain_tests;
 
 #[cfg(any(test, feature = "test-support"))]
 #[path = "intake_worker/test_executor.rs"]
-pub(crate) mod test_executor;
+pub mod test_executor;

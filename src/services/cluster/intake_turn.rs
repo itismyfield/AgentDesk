@@ -7,7 +7,7 @@ use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 /// needs (e.g. "🟢 main CI 통과!" relayed from a `Bash run_in_background`
 /// completion). See #796.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TurnKind {
+pub enum TurnKind {
     /// Triggered by a human user message. Race-handler may delete the
     /// placeholder when this turn loses to another active turn — the user
     /// still sees their own message and can be told "queued for later".
@@ -20,14 +20,14 @@ pub(crate) enum TurnKind {
 }
 
 impl TurnKind {
-    pub(crate) fn is_background_trigger(self) -> bool {
+    pub fn is_background_trigger(self) -> bool {
         matches!(self, TurnKind::BackgroundTrigger)
     }
 }
 
 /// Execution and replay custody remain separate outcomes through queued and worker settlement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum IntakeExecution {
+pub enum IntakeExecution {
     Executed,
     Deferred,
     ConsumedProtected,
@@ -44,7 +44,7 @@ pub(crate) enum IntakeExecution {
 /// key is carried separately as `intake_outbox_id`.
 /// Adding a column to `intake_outbox` means adding a field here.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct IntakeRequest {
+pub struct IntakeRequest {
     /// Worker rows carry their claimed `intake_outbox` primary key. Every other
     /// producer carries `None`: a leader-local request is admitted only after any
     /// stale pending route is retired, so no live outbox row remains to own the

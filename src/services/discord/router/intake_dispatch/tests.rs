@@ -937,7 +937,7 @@ async fn obligation_window_facade_rejects_unknown_kind_pg() {
 #[cfg(test)]
 mod snapshot_tests {
     use super::*;
-    use crate::config::snapshot_reader_tests::{Fixture, isolated};
+    use crate::config::snapshot_reader_support::{Fixture, isolated};
 
     fn observe_without_pg(enabled: bool) {
         isolated(|| {

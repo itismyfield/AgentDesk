@@ -18,7 +18,7 @@ pub(super) fn read_hook_context(path: &Path) -> io::Result<BindingContext> {
 
 /// Reads every canonical context, without pruning, creating or discarding failed entries.
 /// The budget counts directory entries, including unfinished or unexpected entries.
-pub(crate) fn inventory(provider: &str, limit: usize) -> Result<Vec<BindingContext>, String> {
+pub fn inventory(provider: &str, limit: usize) -> Result<Vec<BindingContext>, String> {
     let own = context_path(provider, &"0".repeat(32)).map_err(|e| e.to_string())?;
     let parent = own.parent().ok_or("context directory unavailable")?;
     let entries = fs::read_dir(parent).map_err(|e| e.to_string())?;

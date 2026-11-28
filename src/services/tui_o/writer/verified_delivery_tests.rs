@@ -6,76 +6,17 @@ mod tool_card_provenance;
 mod tool_cards;
 #[path = "turn_summary_codex_verified_tests.rs"]
 mod turn_summaries;
+use super::super::test_support::{Gate, episode_span, len, turn};
 use super::*;
 use crate::services::provider::CancelToken;
 use crate::services::tui_o::store::ledger::{LedgerEntry, PieceOutcome};
 use crate::services::tui_o::writer::deliver::Step;
 use crate::services::tui_o::writer::owed::{PROBES, Reevaluation, deliver_owed};
 use crate::services::tui_prompt_dedupe::codex_verified::provenance::admission::{
-    self, forget_channel_for_tests, issue_for_tests, set_ready_for_tests,
+    self, issue_for_tests, set_ready_for_tests,
 };
+use std::sync::Mutex;
 use std::sync::atomic::Ordering;
-/// Opens the readiness gate for one channel on this thread and forgets its records on drop.
-pub(crate) struct Gate(u64);
-impl Gate {
-    pub(crate) fn open(channel: u64, ready: bool) -> Self {
-        set_ready_for_tests(channel, ready);
-        Self(channel)
-    }
-}
-
-impl Drop for Gate {
-    fn drop(&mut self) {
-        set_ready_for_tests(self.0, false);
-        forget_channel_for_tests(self.0);
-    }
-}
-
-fn len(source: &SourceId) -> u64 {
-    std::fs::metadata(&source.path).unwrap().len()
-}
-
-fn episode_span(
-    channel: u64,
-    source: &SourceId,
-    message: u64,
-    range: (u64, u64),
-) -> CodexEpisodeSpan {
-    let mut span = span(source, range.0, Some(range.1));
-    span.episode.channel_id = channel;
-    (span.delivery_channel_id, span.offset_authority_channel_id) = (channel, channel);
-    span.episode.user_message_id = message;
-    span.episode.turn_nonce = format!("turn-{message}");
-    span.episode.native_turn_id = format!("n{message}");
-    span
-}
-
-/// Appends one closed native turn, stores its span, and issues its permit when `permit`.
-pub(crate) fn turn(
-    store: &mut ChannelStore,
-    source: &SourceId,
-    message: u64,
-    bodies: &[&str],
-    permit: bool,
-) -> (CodexEpisodeSpan, Option<Arc<CancelToken>>) {
-    let native = format!("n{message}");
-    let start = len(source);
-    let mut lines = vec![event("task_started", &native)];
-    lines.extend(bodies.iter().map(|text| body(text, text)));
-    lines.push(event("task_complete", &native));
-    append(&source.path, &lines);
-    let channel = store.init().channel;
-    let span = episode_span(channel, source, message, (start, len(source)));
-    store.persist_codex_span(span.clone()).unwrap();
-    let token = permit.then(|| {
-        let nonce = Some(span.episode.turn_nonce.clone());
-        let token = Arc::new(CancelToken::from_persisted_turn_nonce(nonce));
-        let (execution, episode) = (span.execution.clone(), span.episode.clone());
-        issue_for_tests(execution, episode, &token).unwrap();
-        token
-    });
-    (span, token)
-}
 
 /// A switched-over Codex channel with an empty sidecar and its sources resumed.
 struct Verified {

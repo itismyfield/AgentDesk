@@ -8,10 +8,10 @@ use std::future::{Future, poll_fn};
 use std::num::NonZeroU64;
 use std::task::Poll;
 
-pub(crate) use plan::{Piece, Plan, hash};
+pub use plan::{Piece, Plan, hash};
 
 use crate::services::tui_o::ownership::OwnershipGate;
-pub(crate) use crate::services::tui_o::store::agy_delivery::TurnLease;
+pub use crate::services::tui_o::store::agy_delivery::TurnLease;
 use crate::services::tui_o::store::agy_delivery::{Attempt, Journal, Receipt, Stage, State};
 use crate::services::tui_o::store::{ChannelStore, StoreError};
 
@@ -34,13 +34,13 @@ impl From<StoreError> for Error {
     }
 }
 
-pub(crate) enum Post {
+pub enum Post {
     Created(NonZeroU64),
     NotSent(String),
     Unknown,
 }
 
-pub(crate) struct Evidence {
+pub struct Evidence {
     pub id: NonZeroU64,
     pub channel: u64,
     pub bot: u64,
@@ -48,7 +48,7 @@ pub(crate) struct Evidence {
     pub correlation: Option<String>,
 }
 
-pub(crate) trait Transport {
+pub trait Transport {
     fn bot(&self) -> Option<NonZeroU64>;
     fn post(&self, channel: u64, piece: &Piece) -> impl Future<Output = Post> + Send;
     fn history_before(
@@ -59,7 +59,7 @@ pub(crate) trait Transport {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Effect {
+pub enum Effect {
     ClearInflight,
     ReleaseLease,
     WakeQueue,
@@ -67,7 +67,7 @@ pub(crate) enum Effect {
 
 /// Idempotent against the supplied full turn key and lease revision. A missing projection
 /// counts as settled only after checking identity. Queue wakes may be coalesced or replayed.
-pub(crate) trait Projection {
+pub trait Projection {
     fn apply(
         &self,
         lease: TurnLease,

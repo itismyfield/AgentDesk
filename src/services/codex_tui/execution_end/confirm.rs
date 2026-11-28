@@ -40,7 +40,7 @@ impl Vacancy {
     }
 }
 
-pub(crate) async fn record_clear(capture: CapturedOldExecution, reset: bool, unconfirmed: bool) {
+pub async fn record_clear(capture: CapturedOldExecution, reset: bool, unconfirmed: bool) {
     if !reset || unconfirmed {
         warn(&capture, "clear effect unconfirmed");
         return;

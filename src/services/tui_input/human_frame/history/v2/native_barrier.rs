@@ -2,15 +2,15 @@
 use super::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Barrier {
-    pub(crate) namespace: String,
-    pub(crate) ticket: Ticket,
+pub struct Barrier {
+    pub namespace: String,
+    pub ticket: Ticket,
     pub(crate) membership_range: [u64; 2],
     pub(crate) membership_row: String,
     pub(crate) foreign_range: [u64; 2],
     pub(crate) foreign_row: String,
     pub(crate) foreign_hashes: Vec<String>,
-    pub(crate) through: u64,
+    pub through: u64,
     pub(crate) registrations_fingerprint: String,
 }
 
@@ -38,7 +38,7 @@ impl Barrier {
 }
 
 impl Settlement {
-    pub(crate) fn barrier(&self, namespace: &str) -> Result<Option<Barrier>, String> {
+    pub fn barrier(&self, namespace: &str) -> Result<Option<Barrier>, String> {
         self.extra
             .get("foreign_prompt_barrier")
             .map(|v| {
@@ -80,7 +80,7 @@ impl Settlement {
     }
 
     /// A native result crosses the barrier stored now only as its exact interrupt supersession.
-    pub(crate) fn admits_native(&self, namespace: &str, outcome: &Outcome) -> Result<(), String> {
+    pub fn admits_native(&self, namespace: &str, outcome: &Outcome) -> Result<(), String> {
         let proof = &outcome.extra["native_proof"];
         let stored = self.extra.contains_key("foreign_prompt_barrier");
         if !stored && proof["supersedes"].is_null() {
@@ -108,7 +108,7 @@ impl Settlement {
 }
 
 impl Registry {
-    pub(crate) fn record_native_barrier(&self, proof: &Barrier) -> Result<bool, String> {
+    pub fn record_native_barrier(&self, proof: &Barrier) -> Result<bool, String> {
         proof.validate(&proof.namespace, &proof.ticket)?;
         self.native_transaction_checked(
             &proof.namespace,

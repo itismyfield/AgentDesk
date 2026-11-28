@@ -2,7 +2,7 @@ use super::*;
 use crate::services::codex_tui::canary;
 
 // Observe the held gate without its TTL purge or publication side effects.
-pub(crate) fn codex_verified_hold_detail(tmux: &str) -> &'static str {
+pub fn codex_verified_hold_detail(tmux: &str) -> &'static str {
     tc::with_tmux_source_authority(tmux, |authority| {
         if clear_relaunch::open_under(authority) {
             return "cleared_awaiting_launch";

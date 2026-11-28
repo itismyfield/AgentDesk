@@ -9,14 +9,14 @@ use crate::services::claude::herdr_turn::{HoldRelease, release_hold};
 use crate::services::session_host::{PaneProvider, PaneReading, herdr_endpoints};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Scope {
+pub enum Scope {
     Ended,
     Missing,
 }
 
 /// Why a retire changed nothing: the row and every hold are as they were.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RetireRefusal {
+pub enum RetireRefusal {
     NoLocalEndpoint,
     NoRow(&'static str),
     ProviderRunning,
@@ -26,20 +26,20 @@ pub(crate) enum RetireRefusal {
 
 /// A retired execution and what became of its input hold.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Retired {
+pub struct Retired {
     pub nonce: String,
     pub now: bool,
     pub hold: HoldRelease,
 }
 
 /// One read of the registered exact endpoint and whether it proves the execution ended.
-pub(crate) struct Proof {
+pub struct Proof {
     pub reading: PaneReading,
     pub ended: bool,
 }
 
 /// Reads only the registered exact endpoint; nothing is written.
-pub(crate) async fn prove(row: &HostedObservation) -> Result<Proof, RetireRefusal> {
+pub async fn prove(row: &HostedObservation) -> Result<Proof, RetireRefusal> {
     let HostedRecord::Known(record) = &row.record else {
         return Err(RetireRefusal::NoRow("unreadable record"));
     };
@@ -61,7 +61,7 @@ pub(crate) async fn prove(row: &HostedObservation) -> Result<Proof, RetireRefusa
 }
 
 /// Reads only the registered exact endpoint, then retires only that observed row and nonce.
-pub(crate) async fn observed(
+pub async fn observed(
     pool: &PgPool,
     row: &HostedObservation,
     scope: Scope,
@@ -81,14 +81,14 @@ pub(crate) async fn observed(
 }
 
 /// Keeps a Missing retirement for the next front's judgement; a manual retire never records one.
-pub(crate) fn note_missing(record: &HostedExecution) {
+pub fn note_missing(record: &HostedExecution) {
     let mut missing = MISSING.lock().unwrap_or_else(|e| e.into_inner());
     missing.retain(|(owner, _)| owner != &record.owner);
     missing.push((record.owner.clone(), record.execution_nonce.clone()));
 }
 
 /// The hold goes only after this observation's CAS wrote Retired.
-pub(crate) async fn on_reading(
+pub async fn on_reading(
     pool: &PgPool,
     row: &HostedObservation,
     record: &HostedExecution,
@@ -130,7 +130,7 @@ type MissingRetirements = Vec<(HostedOwner, String)>;
 static MISSING: std::sync::LazyLock<std::sync::Mutex<MissingRetirements>> =
     std::sync::LazyLock::new(Default::default);
 
-pub(crate) fn recovered_missing(record: &HostedExecution) -> bool {
+pub fn recovered_missing(record: &HostedExecution) -> bool {
     let mut missing = MISSING.lock().unwrap_or_else(|e| e.into_inner());
     if record.state != HostedState::Retired {
         missing.retain(|(owner, _)| owner != &record.owner);

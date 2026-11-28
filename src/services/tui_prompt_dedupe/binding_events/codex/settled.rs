@@ -2,13 +2,13 @@
 
 use super::*;
 
-pub(crate) struct SettledSource {
+pub struct SettledSource {
     pub source: SourceId,
     pub execution_nonce: Option<String>,
     pub binding_seq: u64,
 }
 
-pub(crate) fn read(channel: u64, pane: &str) -> io::Result<Option<SettledSource>> {
+pub fn read(channel: u64, pane: &str) -> io::Result<Option<SettledSource>> {
     let _logs = lock_logs();
     let records = ownership_records(channel)?;
     let mut checked = std::collections::HashSet::new();

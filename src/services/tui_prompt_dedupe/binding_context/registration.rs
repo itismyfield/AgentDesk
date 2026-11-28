@@ -6,11 +6,11 @@ thread_local! {
     static HOOKS: RefCell<Vec<AfterSpawn>> = const { RefCell::new(Vec::new()) };
 }
 
-pub(crate) struct Scope {
+pub struct Scope {
     _thread: PhantomData<Rc<()>>,
 }
 
-pub(crate) fn enter(after_spawn: AfterSpawn) -> Scope {
+pub fn enter(after_spawn: AfterSpawn) -> Scope {
     HOOKS.with(|hooks| hooks.borrow_mut().push(after_spawn));
     Scope {
         _thread: PhantomData,

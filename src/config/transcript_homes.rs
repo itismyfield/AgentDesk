@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 /// Each declared Claude transcript home with its tilde-expanded path.
-pub(crate) fn declared(config: &super::Config) -> impl Iterator<Item = (&str, PathBuf)> {
+pub fn declared(config: &super::Config) -> impl Iterator<Item = (&str, PathBuf)> {
     let entries = config
         .providers
         .get("claude")

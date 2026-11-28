@@ -39,13 +39,15 @@ impl From<OutboundTarget> for OutboundTargetKey {
     fn from(target: OutboundTarget) -> Self {
         match target {
             OutboundTarget::Channel(channel) => Self::Channel {
-                channel: channel.into(),
+                channel: outbound_channel_id(channel),
             },
             OutboundTarget::Thread { parent, thread } => Self::Thread {
-                parent: parent.into(),
-                thread: thread.into(),
+                parent: outbound_channel_id(parent),
+                thread: outbound_channel_id(thread),
             },
-            OutboundTarget::DmUser(user) => Self::DmUser { user: user.into() },
+            OutboundTarget::DmUser(user) => Self::DmUser {
+                user: outbound_user_id(user),
+            },
         }
     }
 }
@@ -63,28 +65,23 @@ impl From<OutboundOperation> for OutboundOperationKey {
         match operation {
             OutboundOperation::Send => Self::Send,
             OutboundOperation::Edit { message_id } => Self::Edit {
-                message_id: message_id.into(),
+                message_id: outbound_message_id(message_id),
             },
         }
     }
 }
 
-impl From<ChannelId> for OutboundChannelId {
-    fn from(id: ChannelId) -> Self {
-        Self::new(conversation_from_discord(id).get())
-    }
+// Explicit functions: the ID types live in the runtime crate and the Serenity IDs are foreign to both.
+pub(crate) fn outbound_channel_id(id: ChannelId) -> OutboundChannelId {
+    OutboundChannelId::new(conversation_from_discord(id).get())
 }
 
-impl From<MessageId> for OutboundMessageId {
-    fn from(id: MessageId) -> Self {
-        Self::new(id.get())
-    }
+pub(crate) fn outbound_message_id(id: MessageId) -> OutboundMessageId {
+    OutboundMessageId::new(id.get())
 }
 
-impl From<UserId> for OutboundUserId {
-    fn from(id: UserId) -> Self {
-        Self::new(id.get())
-    }
+pub(crate) fn outbound_user_id(id: UserId) -> OutboundUserId {
+    OutboundUserId::new(id.get())
 }
 
 impl From<OutboundIntent> for DiscordOutboundMessage {

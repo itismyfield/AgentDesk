@@ -177,7 +177,7 @@ async fn production_readiness_fallback_withholds_real_writer_effects() {
         Initialized, LEDGER_FILE, OStore, STORE_DIR_NAME, StoreConfig,
     };
     use crate::services::tui_o::writer::deliver::Step;
-    use crate::services::tui_o::writer::owed::tests::owed_writer;
+    use crate::services::tui_o::writer::owed::test_support::owed_writer;
     use crate::services::tui_o::writer::pieces::{Derived, PieceWork};
 
     struct RegistryCleanup(u64);
@@ -230,6 +230,7 @@ async fn production_readiness_fallback_withholds_real_writer_effects() {
         index: 0,
         payload: "출처 활성화 전에는 보내지 않는다".into(),
         notice_origin: None,
+        reply: None,
     });
     let step = writer
         .deliver_admitted(&piece, Some((&record, &origin)))

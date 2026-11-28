@@ -16,7 +16,7 @@ struct OwnedIdentity {
     turn_nonce: Option<String>,
 }
 
-pub(crate) struct LocalSnapshot {
+pub struct LocalSnapshot {
     _root: OwnedRuntimeRoot,
     identity: OwnedIdentity,
     format: (u32, u32, bool, bool),

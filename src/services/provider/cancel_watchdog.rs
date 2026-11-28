@@ -73,13 +73,12 @@ pub fn spawn_cancel_watchdog(
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
     };
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let real_pid_kill = super::cancel_token_cleanup::executor::real_pid_kill_enabled_for_test();
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     let handle = std::thread::spawn(work);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let handle = std::thread::spawn(move || {
-        #[cfg(test)]
         if real_pid_kill {
             super::cancel_token_cleanup::executor::with_real_pid_kill(work);
             return;

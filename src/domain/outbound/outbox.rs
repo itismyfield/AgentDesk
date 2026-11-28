@@ -1,8 +1,8 @@
 pub(crate) mod identity;
-pub(crate) mod source;
+pub mod source;
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct OutboxMessage<'a> {
+pub struct OutboxMessage<'a> {
     pub target: &'a str,
     pub content: &'a str,
     pub bot: &'a str,

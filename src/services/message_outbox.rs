@@ -4,28 +4,28 @@ use crate::domain::bot_role::UtilityBotRole;
 use crate::services::provider::{CancelToken, cancel_requested};
 
 mod attachments;
-pub(crate) mod body_census;
+pub mod body_census;
 mod diagnostics;
 mod identity;
-pub(crate) mod mentions;
+pub mod mentions;
 mod plain;
-pub(crate) mod routine_incident;
+pub mod routine_incident;
 use diagnostics::{warn_lifecycle_enqueue_failure, warn_outbox_enqueue_failure};
 mod session_notice;
-pub(crate) mod source_registry;
-pub(crate) use attachments::{OutboxAttachment, StoredOutboxAttachment, decode_claimed_attachment};
-pub(crate) use session_notice::enqueue_session_notice_pg_on_tx;
+pub mod source_registry;
+pub use attachments::{OutboxAttachment, StoredOutboxAttachment, decode_claimed_attachment};
+pub use session_notice::enqueue_session_notice_pg_on_tx;
 
-pub(crate) use identity::{
+pub use identity::{
     ACTIONABLE_OPS_ALERT_BOT, dedupe_key_for_message, delivery_bot_for_target_session,
     is_actionable_ops_alert, is_non_turn_operational_alert, normalized_reason_code,
     normalized_session_key,
 };
 
 pub(crate) const LIFECYCLE_NOTIFY_DEDUPE_TTL_SECS: i64 = 5 * 60;
-pub(crate) const LIFECYCLE_NOTIFIER_SOURCE: &str = "lifecycle_notifier";
+pub const LIFECYCLE_NOTIFIER_SOURCE: &str = "lifecycle_notifier";
 
-pub(crate) use crate::domain::outbound::outbox::OutboxMessage;
+pub use crate::domain::outbound::outbox::OutboxMessage;
 
 fn encoded_output_origin(
     origin: Option<&crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
@@ -37,13 +37,13 @@ fn encoded_output_origin(
 }
 
 #[derive(Debug)]
-pub(crate) enum OutboxEnqueueError {
+pub enum OutboxEnqueueError {
     SourceNotAllowed { source: String },
     Database(sqlx::Error),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum OutboxEnqueueOutcome {
+pub enum OutboxEnqueueOutcome {
     Enqueued { id: i64 },
     Cancelled,
     NoRow,
@@ -56,7 +56,7 @@ pub(crate) fn fold_outbox_outcome_to_legacy_id(outcome: OutboxEnqueueOutcome) ->
     }
 }
 
-pub(crate) fn validate_outbox_source(source: &str) -> Result<(), OutboxEnqueueError> {
+pub fn validate_outbox_source(source: &str) -> Result<(), OutboxEnqueueError> {
     source_registry::validate_send_source_for(
         source,
         source_registry::SendCallerClass::LoopbackInternal,
@@ -70,7 +70,7 @@ pub(crate) fn validate_outbox_source(source: &str) -> Result<(), OutboxEnqueueEr
 #[path = "message_outbox/identity_tests.rs"]
 mod dedupe_key_tests;
 
-pub(crate) fn enqueue_lifecycle_notification_best_effort(
+pub fn enqueue_lifecycle_notification_best_effort(
     pg_pool: Option<&PgPool>,
     target: &str,
     session_key: Option<&str>,
@@ -190,7 +190,7 @@ async fn release_expired_outbox_dedupe_key_pg(
     Ok(())
 }
 
-pub(crate) async fn enqueue_outbox_pg_returning_id(
+pub async fn enqueue_outbox_pg_returning_id(
     pool: &PgPool,
     message: OutboxMessage<'_>,
 ) -> Result<Option<i64>, OutboxEnqueueError> {
@@ -215,7 +215,7 @@ pub(crate) async fn enqueue_outbox_pg_returning_id_with_cancel(
 /// dedupe TTL (in seconds). Use when the default 5-minute window is too short
 /// for the firing cadence (e.g. periodic GitHub sync alerts that fire every
 /// 20 minutes and should not spam the channel every cycle).
-pub(crate) async fn enqueue_outbox_pg_returning_id_with_ttl(
+pub async fn enqueue_outbox_pg_returning_id_with_ttl(
     pool: &PgPool,
     message: OutboxMessage<'_>,
     dedupe_ttl_secs: i64,
@@ -231,7 +231,7 @@ pub(crate) async fn enqueue_outbox_pg_returning_id_with_ttl(
 /// while the row is pending or sent. A failed row releases the key so an
 /// operator or recovery path may stage a genuine retry. On duplicate, the
 /// existing row id is returned so callers retain an auditable handoff link.
-pub(crate) async fn enqueue_outbox_pg_returning_id_with_persistent_dedupe(
+pub async fn enqueue_outbox_pg_returning_id_with_persistent_dedupe(
     pool: &PgPool,
     message: OutboxMessage<'_>,
 ) -> Result<i64, OutboxEnqueueError> {
@@ -247,14 +247,14 @@ pub(crate) async fn enqueue_outbox_pg_returning_id_with_persistent_dedupe(
 /// Callers use this when the outbox reservation and their own state transition
 /// must commit atomically. Keeping the same dedupe identity as the pool helper
 /// makes crash recovery and competing workers converge on one durable row.
-pub(crate) async fn enqueue_outbox_pg_returning_id_with_persistent_dedupe_on_tx(
+pub async fn enqueue_outbox_pg_returning_id_with_persistent_dedupe_on_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     message: OutboxMessage<'_>,
 ) -> Result<i64, OutboxEnqueueError> {
     enqueue_outbox_pg_with_attachment_on_tx(tx, message, None).await
 }
 
-pub(crate) async fn enqueue_outbox_pg_with_attachment_on_tx(
+pub async fn enqueue_outbox_pg_with_attachment_on_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     message: OutboxMessage<'_>,
     attachment: Option<OutboxAttachment<'_>>,
@@ -319,7 +319,7 @@ pub(crate) async fn enqueue_outbox_with_origin_on_tx(
 /// non-failed/non-cancelled row active; the no-op conflict update returns that
 /// row's id. Terminal rows no longer participate, so a genuine retry inserts a
 /// fresh id.
-pub(crate) async fn enqueue_outbox_pg_returning_outcome_with_exact_dedupe_and_cancel(
+pub async fn enqueue_outbox_pg_returning_outcome_with_exact_dedupe_and_cancel(
     pool: &PgPool,
     message: OutboxMessage<'_>,
     dedupe_key: &str,
@@ -335,7 +335,7 @@ pub(crate) async fn enqueue_outbox_pg_returning_outcome_with_exact_dedupe_and_ca
     .await
 }
 
-pub(crate) async fn enqueue_outbox_pg_with_exact_dedupe_and_attachment(
+pub async fn enqueue_outbox_pg_with_exact_dedupe_and_attachment(
     pool: &PgPool,
     message: OutboxMessage<'_>,
     dedupe_key: &str,
@@ -355,7 +355,7 @@ pub(crate) async fn enqueue_outbox_pg_with_exact_dedupe_and_attachment(
 }
 
 /// The INSERT writes `producer_turn_nonce` once; an exact dedupe hit keeps the first row's value.
-pub(crate) async fn enqueue_outbox_pg_with_exact_origin(
+pub async fn enqueue_outbox_pg_with_exact_origin(
     pool: &PgPool,
     message: OutboxMessage<'_>,
     dedupe_key: &str,
@@ -423,7 +423,7 @@ pub(crate) async fn enqueue_outbox_pg_returning_outcome_with_ttl_and_cancel(
         .await
 }
 
-pub(crate) async fn enqueue_outbox_pg_with_ttl_origin(
+pub async fn enqueue_outbox_pg_with_ttl_origin(
     pool: &PgPool,
     message: OutboxMessage<'_>,
     dedupe_ttl_secs: i64,
@@ -518,12 +518,22 @@ pub(crate) async fn enqueue_outbox_pg_returning_id_with_ttl_and_cancel(
 
 /// Validated deduplicating insert for callers that must atomically commit an
 /// outbox obligation with another PostgreSQL state transition.
-pub(crate) async fn enqueue_outbox_pg_on_tx_with_ttl(
+pub async fn enqueue_outbox_pg_on_tx_with_ttl(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     message: OutboxMessage<'_>,
     dedupe_ttl_secs: i64,
 ) -> Result<Option<i64>, OutboxEnqueueError> {
     enqueue_outbox_pg_on_tx_with_ttl_and_attachment(tx, message, dedupe_ttl_secs, None).await
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub async fn enqueue_outbox_pg_on_tx_with_ttl_and_attachment_for_test(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    message: OutboxMessage<'_>,
+    dedupe_ttl_secs: i64,
+    attachment: Option<OutboxAttachment<'_>>,
+) -> Result<Option<i64>, OutboxEnqueueError> {
+    enqueue_outbox_pg_on_tx_with_ttl_and_attachment(tx, message, dedupe_ttl_secs, attachment).await
 }
 
 pub(crate) async fn enqueue_outbox_pg_on_tx_with_ttl_and_attachment(
@@ -600,7 +610,7 @@ async fn enqueue_outbox_pg_on_tx_with_ttl_origin(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn monitor_alert_rows_for_test(
+pub async fn monitor_alert_rows_for_test(
     pool: &PgPool,
 ) -> Result<Vec<(String, String, String, String, String, String, bool)>, sqlx::Error> {
     sqlx::query_as(
@@ -613,7 +623,7 @@ pub(crate) async fn monitor_alert_rows_for_test(
 }
 
 /// Variant of [`enqueue_outbox_pg`] that lets the caller pick the dedupe TTL.
-pub(crate) async fn enqueue_outbox_pg_with_ttl(
+pub async fn enqueue_outbox_pg_with_ttl(
     pool: &PgPool,
     message: OutboxMessage<'_>,
     dedupe_ttl_secs: i64,
@@ -627,12 +637,22 @@ pub(crate) async fn enqueue_outbox_pg_with_ttl(
 
 /// Stage a deduplicated row that outbox workers cannot claim. The caller must
 /// explicitly activate it after its external authority check, or cancel it.
-pub(crate) async fn stage_outbox_pg_with_ttl(
+pub async fn stage_outbox_pg_with_ttl(
     pool: &PgPool,
     message: OutboxMessage<'_>,
     dedupe_ttl_secs: i64,
 ) -> Result<i64, OutboxEnqueueError> {
     stage_outbox_pg_with_ttl_and_attachment(pool, message, dedupe_ttl_secs, None).await
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub async fn stage_outbox_pg_with_ttl_and_attachment_for_test(
+    pool: &PgPool,
+    message: OutboxMessage<'_>,
+    dedupe_ttl_secs: i64,
+    attachment: Option<OutboxAttachment<'_>>,
+) -> Result<i64, OutboxEnqueueError> {
+    stage_outbox_pg_with_ttl_and_attachment(pool, message, dedupe_ttl_secs, attachment).await
 }
 
 pub(crate) async fn stage_outbox_pg_with_ttl_and_attachment(
@@ -706,7 +726,7 @@ pub(crate) async fn stage_outbox_pg_with_ttl_and_attachment(
     Ok(id)
 }
 
-pub(crate) async fn activate_staged_outbox_pg(pool: &PgPool, id: i64) -> Result<bool, sqlx::Error> {
+pub async fn activate_staged_outbox_pg(pool: &PgPool, id: i64) -> Result<bool, sqlx::Error> {
     Ok(sqlx::query(
         "UPDATE message_outbox SET status='pending'
               WHERE id=$1 AND status='held' AND circuit_open_generation IS NULL",
@@ -722,7 +742,7 @@ pub(crate) async fn activate_staged_outbox_pg(pool: &PgPool, id: i64) -> Result<
 /// same durable id deliverable/terminal before the caller crashed. A missing
 /// id is distinct so the sidecar obligation can be reopened instead of being
 /// falsely marked complete.
-pub(crate) async fn activate_or_confirm_staged_outbox_pg(
+pub async fn activate_or_confirm_staged_outbox_pg(
     pool: &PgPool,
     id: i64,
 ) -> Result<bool, sqlx::Error> {
@@ -739,7 +759,7 @@ pub(crate) async fn activate_or_confirm_staged_outbox_pg(
     .await
 }
 
-pub(crate) async fn cancel_staged_outbox_pg(pool: &PgPool, id: i64) -> Result<bool, sqlx::Error> {
+pub async fn cancel_staged_outbox_pg(pool: &PgPool, id: i64) -> Result<bool, sqlx::Error> {
     Ok(
         sqlx::query("DELETE FROM message_outbox WHERE id=$1 AND status='held'")
             .bind(id)
@@ -758,7 +778,7 @@ pub(crate) async fn cancel_staged_outbox_pg(pool: &PgPool, id: i64) -> Result<bo
 /// them: a sidecar that does retain the id treats a missing row as a signal to
 /// reopen and stage a fresh alert. Bounding them here prevents permanent
 /// housekeeping leaks without activating or otherwise exposing stale alerts.
-pub(crate) async fn gc_stale_outbox_rows(pool: &PgPool) -> Result<(u64, u64, u64), sqlx::Error> {
+pub async fn gc_stale_outbox_rows(pool: &PgPool) -> Result<(u64, u64, u64), sqlx::Error> {
     let held = sqlx::query(
         "DELETE FROM message_outbox
           WHERE status = 'held'
@@ -789,7 +809,7 @@ pub(crate) async fn gc_stale_outbox_rows(pool: &PgPool) -> Result<(u64, u64, u64
     Ok((held, failed, sent))
 }
 
-pub(crate) async fn enqueue_outbox_pg(
+pub async fn enqueue_outbox_pg(
     pool: &PgPool,
     message: OutboxMessage<'_>,
 ) -> Result<bool, OutboxEnqueueError> {
@@ -801,7 +821,7 @@ pub(crate) async fn enqueue_outbox_pg(
 // PG outbox rows are authoritative for the release runtime. Without a PG pool,
 // callers should choose a visible direct-send fallback instead of staging an
 // undrained legacy row.
-pub(crate) async fn enqueue_outbox_best_effort(
+pub async fn enqueue_outbox_best_effort(
     pg_pool: Option<&PgPool>,
     message: OutboxMessage<'_>,
 ) -> Result<bool, OutboxEnqueueError> {
@@ -820,14 +840,14 @@ pub(crate) async fn enqueue_outbox_best_effort(
 }
 
 /// Validated no-dedupe insert for callers already holding a PostgreSQL transaction.
-pub(crate) async fn enqueue_outbox_pg_on_tx(
+pub async fn enqueue_outbox_pg_on_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     message: OutboxMessage<'_>,
 ) -> Result<i64, OutboxEnqueueError> {
     enqueue_outbox_pg_on_tx_with_attachment(tx, message, None).await
 }
 
-pub(crate) async fn enqueue_outbox_pg_on_tx_with_attachment(
+pub async fn enqueue_outbox_pg_on_tx_with_attachment(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     message: OutboxMessage<'_>,
     attachment: Option<OutboxAttachment<'_>>,
@@ -853,7 +873,7 @@ async fn enqueue_plain_on_tx(
     plain::insert_on_tx(tx, message, attachment, notice).await
 }
 
-pub(crate) async fn enqueue_lifecycle_notification_pg(
+pub async fn enqueue_lifecycle_notification_pg(
     pool: &PgPool,
     target: &str,
     session_key: Option<&str>,

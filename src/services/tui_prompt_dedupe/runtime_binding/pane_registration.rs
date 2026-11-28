@@ -34,22 +34,22 @@ struct UnreadyPane {
     aliases: HashSet<String>,
 }
 static FAILED_PANES: LazyLock<Mutex<HashMap<Pane, UnreadyPane>>> = LazyLock::new(Default::default);
-#[cfg(test)]
-thread_local! { pub(crate) static BLOCK_ALIAS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
-#[cfg(test)]
-thread_local! { pub(crate) static BEFORE_JUDGED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) }; }
-#[cfg(test)]
-thread_local! { pub(crate) static BEFORE_COMPLETE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) }; }
+#[cfg(any(test, feature = "test-support"))]
+thread_local! { pub static BLOCK_ALIAS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+#[cfg(any(test, feature = "test-support"))]
+thread_local! { pub static BEFORE_JUDGED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) }; }
+#[cfg(any(test, feature = "test-support"))]
+thread_local! { pub static BEFORE_COMPLETE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) }; }
 
 // The rehydrate pass registers through `register_judged_claude_pane`; these unjudged forms are for tests.
-#[cfg(test)]
-pub(crate) fn register_claude_pane(tmux: &str, channel: u64, binding: TuiRuntimeBinding) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn register_claude_pane(tmux: &str, channel: u64, binding: TuiRuntimeBinding) {
     register_claude_pane_with(tmux, channel, binding, Record::Stat);
 }
 
 /// A launch registration without a judged binding, for tests that drive it directly.
-#[cfg(test)]
-pub(crate) fn register_launched_claude_pane(
+#[cfg(any(test, feature = "test-support"))]
+pub fn register_launched_claude_pane(
     tmux: &str,
     channel: u64,
     binding: TuiRuntimeBinding,
@@ -61,14 +61,14 @@ pub(crate) fn register_launched_claude_pane(
 
 /// A rehydrate pass's registration of `binding`, decided from the pane's binding `judged`. It is
 /// given up when a hook moved the binding since, so a stale source never replaces a newer one.
-pub(crate) fn register_judged_claude_pane(
+pub fn register_judged_claude_pane(
     tmux: &str,
     channel: u64,
     binding: TuiRuntimeBinding,
     context_path: Option<&std::path::Path>,
     judged: Option<&TuiRuntimeBinding>,
 ) -> bool {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(seam) = BEFORE_JUDGED.with_borrow_mut(Option::take) {
         seam();
     }
@@ -85,7 +85,7 @@ pub(crate) fn register_judged_claude_pane(
         .is_some_and(Persisted::published)
 }
 
-pub(crate) fn register_rehydrated_tmux_runtime_binding_under_source_authority(
+pub fn register_rehydrated_tmux_runtime_binding_under_source_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     provider: &str,
     channel_id: u64,
@@ -118,7 +118,7 @@ pub(crate) fn register_rehydrated_tmux_runtime_binding_under_source_authority(
 
 /// A restore names how the pane's binding is logged; see `Record`. `None` when nothing was published;
 /// an unpublished `Persisted` when the pane's pin refused it.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn register_claude_pane_with(
     tmux: &str,
     channel: u64,
@@ -129,16 +129,12 @@ pub(crate) fn register_claude_pane_with(
 }
 
 /// `register_judged_claude_pane` of the pane's own binding, given up if a hook moved it since.
-pub(crate) fn register_unmoved_claude_pane(
-    tmux: &str,
-    channel: u64,
-    binding: TuiRuntimeBinding,
-) -> bool {
+pub fn register_unmoved_claude_pane(tmux: &str, channel: u64, binding: TuiRuntimeBinding) -> bool {
     let judged = binding.clone();
     register_judged_claude_pane(tmux, channel, binding, None, Some(&judged))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn register_claude_pane_with_cause(
     tmux: &str,
     channel: u64,
@@ -170,7 +166,7 @@ fn register_claude_pane_judged(
             authority, "claude", channel, binding, record, cause,
         )
     });
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(complete) = BEFORE_COMPLETE.with_borrow_mut(Option::take) {
         complete();
     }
@@ -224,7 +220,7 @@ fn launch_cause(
 
 /// `register_claude_pane_with` for a caller that holds the pane's source authority across its
 /// own judgment, so the registration and its completion land in that same hold.
-pub(crate) fn register_claude_pane_under_source_authority(
+pub fn register_claude_pane_under_source_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     channel: u64,
     binding: TuiRuntimeBinding,
@@ -246,7 +242,7 @@ pub(crate) fn register_claude_pane_under_source_authority(
 
 /// A restart's restore of a Codex pane's logged `source`, for a caller holding its source
 /// authority: published only while the path still names that file, and nothing new is logged.
-pub(crate) fn register_restored_codex_pane_under_source_authority(
+pub fn register_restored_codex_pane_under_source_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     channel: u64,
     binding: TuiRuntimeBinding,
@@ -267,7 +263,7 @@ fn begin_pane_registration(key: &Pane, binding: &TuiRuntimeBinding) {
     }
 }
 
-pub(crate) fn note_claude_pane_registration(tmux: &str, launch: Option<&str>, ok: bool) {
+pub fn note_claude_pane_registration(tmux: &str, launch: Option<&str>, ok: bool) {
     let Some(launch) = launch.filter(|s| !s.trim().is_empty()) else {
         return;
     };
@@ -349,7 +345,7 @@ fn finish_under_authority(key: &Pane, ok: bool) {
         return;
     }
     let Some(pane) = failed.get(key) else { return };
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if BLOCK_ALIAS.get() {
         return;
     }
@@ -389,10 +385,7 @@ fn finish_under_authority(key: &Pane, ok: bool) {
     }
 }
 
-pub(crate) fn pane_registration_failed(
-    command: &str,
-    envelope: Option<&HookBindingEnvelope>,
-) -> bool {
+pub fn pane_registration_failed(command: &str, envelope: Option<&HookBindingEnvelope>) -> bool {
     let failed = FAILED_PANES.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(HookBindingEnvelope {
         context: CapturedContext::Captured(ctx),

@@ -215,8 +215,11 @@ impl Case {
     }
     pub(crate) fn occupy_unverified(&self) {
         let endpoint = self.real.endpoint();
-        let transport =
-            HerdrSocketTransport::new(&endpoint, HerdrSocketConfig::default(), LineJsonFraming);
+        let transport = HerdrSocketTransport::new_for_test(
+            &endpoint,
+            HerdrSocketConfig::default(),
+            LineJsonFraming,
+        );
         let request = HerdrCall {
             id: "unrelated-command".into(),
             request: HerdrRequest::PaneSendInput {

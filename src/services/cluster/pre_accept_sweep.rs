@@ -5,7 +5,7 @@ use crate::db::intake_outbox::pre_accept_sweep::{Preparation, prepare_locked};
 use crate::db::intake_outbox::{FailedPreAcceptSweepOutcome, IntakeOutboxRow};
 use crate::domain::cluster_policy::ExecutionRequirements;
 
-pub(crate) async fn sweep_failed_pre_accept_once(
+pub async fn sweep_failed_pre_accept_once(
     pool: &PgPool,
     local_leader: &str,
     max_attempts_per_message: u32,

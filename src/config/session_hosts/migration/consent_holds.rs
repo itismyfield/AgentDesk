@@ -29,7 +29,7 @@ fn store() -> crate::services::session_host::policy::consent::ConsentStore {
     )
 }
 
-pub(crate) struct ConsentHolds;
+pub struct ConsentHolds;
 impl HoldSource for ConsentHolds {
     const INTRODUCED: bool = true;
 

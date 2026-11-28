@@ -16,7 +16,7 @@ mod spawn;
 type Server = (Child, Vec<(String, String)>, Vec<String>);
 
 /// One isolated HOME with the scratch herdr installed where the user would have it.
-pub(crate) struct Home {
+pub struct Home {
     dir: tempfile::TempDir,
     pub home: PathBuf,
     pub bin: PathBuf,
@@ -185,7 +185,7 @@ pub(crate) fn wait_for(listens: &Path) {
     }
 }
 
-pub(crate) const FALSE: &str = "[session]\nresume_agents_on_restore = false\n";
+pub const FALSE: &str = "[session]\nresume_agents_on_restore = false\n";
 
 #[tokio::test]
 #[ignore = "needs ADK_TEST_HERDR_BIN: a protocol-22 herdr run in an isolated HOME"]

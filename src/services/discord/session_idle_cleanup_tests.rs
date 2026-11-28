@@ -4,7 +4,9 @@ use std::os::unix::fs::PermissionsExt;
 use poise::serenity_prelude::{ChannelId, MessageId};
 
 use super::{cleanup_expired_sessions, mark_session_disconnected_for_idle_cleanup};
-use crate::db::dispatched_sessions::hosted_execution::tests::{future_schema, owner, record, wire};
+use crate::db::dispatched_sessions::hosted_execution::test_support::{
+    future_schema, owner, record, wire,
+};
 use crate::db::dispatched_sessions::hosted_execution::{HostedOwner, HostedState};
 use crate::services::discord::relay_recovery::tests::orphan_token_finish::queued;
 use crate::services::discord::{

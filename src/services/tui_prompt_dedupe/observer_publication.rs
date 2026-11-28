@@ -5,7 +5,7 @@ use super::TuiRuntimeBinding;
 static PUBLISHED: std::sync::OnceLock<fn(String, TuiRuntimeBinding)> = std::sync::OnceLock::new();
 
 /// Installs the runtime's wake for a newly published binding, beside its health registry.
-pub(crate) fn install(published: fn(String, TuiRuntimeBinding)) {
+pub fn install(published: fn(String, TuiRuntimeBinding)) {
     let _ = PUBLISHED.set(published);
 }
 

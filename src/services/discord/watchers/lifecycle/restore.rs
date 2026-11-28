@@ -904,7 +904,9 @@ mod keyed_teardown_tests {
 
     use super::*;
     use crate::db::dispatched_sessions::hosted_execution::HostedState;
-    use crate::db::dispatched_sessions::hosted_execution::tests::{TOKEN, owner, record, wire};
+    use crate::db::dispatched_sessions::hosted_execution::test_support::{
+        TOKEN, owner, record, wire,
+    };
     use crate::services::discord::adk_session::build_namespaced_session_key;
     use crate::services::discord::inflight::seed_session_row_keyed;
     use crate::services::platform::tmux::PaneLiveness::{DeadOrAbsent, ProbeError};

@@ -16,12 +16,12 @@ use crate::services::claude_tui::memento_feedback::{
 
 mod hook_event;
 pub use hook_event::HookEvent;
-pub(crate) use hook_event::HookFanout;
-pub(crate) mod adoption_retry;
-pub(crate) mod observation_ingress;
-pub(crate) mod relay_receipts;
-pub(crate) use adoption_retry::retry_deferred_claude_adoptions;
-pub(crate) use observation_ingress::{
+pub use hook_event::HookFanout;
+pub mod adoption_retry;
+pub mod observation_ingress;
+pub mod relay_receipts;
+pub use adoption_retry::retry_deferred_claude_adoptions;
+pub use observation_ingress::{
     boot_discovery_done, mark_boot_discovery_complete, note_claude_pane_registration,
 };
 use relay_receipts::{RelayReceiptBegin, RelayReceiptLedger, RelayReceiptPin, RelayReceiptTicket};
@@ -114,9 +114,18 @@ impl HookEventKind {
 
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Default)]
-pub(crate) struct HookBroadcastProbe {
+pub struct HookBroadcastProbe {
+    #[cfg(any(test, feature = "test-support"))]
+    pub primary_discarded: std::sync::atomic::AtomicBool,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) primary_discarded: std::sync::atomic::AtomicBool,
+    #[cfg(any(test, feature = "test-support"))]
+    pub primary_sent: tokio::sync::Notify,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) primary_sent: tokio::sync::Notify,
+    #[cfg(any(test, feature = "test-support"))]
+    pub release_alias: tokio::sync::Notify,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) release_alias: tokio::sync::Notify,
 }
 
@@ -126,8 +135,8 @@ pub struct HookServerState {
     memento_feedback: PendingMementoFeedbackTracker,
     relay_receipts: RelayReceiptLedger,
     claude_projects_root: Option<PathBuf>,
-    #[cfg(test)]
-    pub(crate) broadcast_probe: Option<std::sync::Arc<HookBroadcastProbe>>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub broadcast_probe: Option<std::sync::Arc<HookBroadcastProbe>>,
 }
 
 impl HookServerState {
@@ -137,7 +146,7 @@ impl HookServerState {
             event_tx,
             memento_feedback: PendingMementoFeedbackTracker::default(),
             relay_receipts: RelayReceiptLedger::default(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             broadcast_probe: None,
             claude_projects_root:
                 crate::services::claude_tui::hook_output_guard::configured_claude_projects_root(),
@@ -145,7 +154,7 @@ impl HookServerState {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn new_with_claude_projects_root(claude_projects_root: PathBuf) -> Self {
+    pub fn new_with_claude_projects_root(claude_projects_root: PathBuf) -> Self {
         let mut state = Self::new();
         state.claude_projects_root = Some(claude_projects_root);
         state
@@ -212,7 +221,7 @@ pub fn subscribe_hook_events() -> broadcast::Receiver<HookEvent> {
 
 /// Publishes `event` to the live hook subscribers as the receiver would.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn publish_hook_event_for_tests(event: HookEvent) {
+pub fn publish_hook_event_for_tests(event: HookEvent) {
     let _ = HOOK_SERVER_STATE.event_tx.send(event);
 }
 
@@ -221,7 +230,7 @@ pub fn hook_receiver_router() -> Router {
     hook_receiver_router_with_state(HOOK_SERVER_STATE.clone())
 }
 
-pub(crate) fn hook_receiver_router_with_state(state: HookServerState) -> Router {
+pub fn hook_receiver_router_with_state(state: HookServerState) -> Router {
     super::readiness::initialize();
     Router::new()
         .route("/hooks/{provider}/{event}", post(receive_hook))
@@ -612,7 +621,7 @@ async fn receive_hook(
         );
     } else {
         let primary_discarded = state.event_tx.send(event).is_err();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(probe) = state.broadcast_probe.as_ref() {
             probe
                 .primary_discarded
@@ -779,6 +788,10 @@ fn normalize_hook_event_name(value: &str) -> String {
         .collect::<String>()
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub static ENDPOINT_TEST_LOCK: LazyLock<std::sync::Mutex<()>> =
+    LazyLock::new(|| std::sync::Mutex::new(()));
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -789,9 +802,6 @@ pub(crate) mod tests {
     /// How long a wait for something that must happen polls before failing: a hang detector, not a
     /// bound of the contract, so a slow runner only makes a broken build fail later.
     const LIVENESS: std::time::Duration = std::time::Duration::from_secs(10);
-
-    pub(crate) static ENDPOINT_TEST_LOCK: LazyLock<std::sync::Mutex<()>> =
-        LazyLock::new(|| std::sync::Mutex::new(()));
 
     #[test]
     fn hook_event_kind_normalizes_provider_hook_names() {

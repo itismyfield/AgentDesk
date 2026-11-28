@@ -1,0 +1,25 @@
+---
+title: "owner 입력 S1(Claude): busy 분기와 source 선검사(현재) 대 바로 주입, 키 전 등록, 지연 pin 단일 확정, receipt 결합, 흡수 뒤 합류 표시(목표)"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks NoSourceHold
+    lg1: Path to the IdleDelivers or NoCircularWait or NoSourceHold or ReplyPosted bug
+    lg2: Repeats forever, so IdleDelivers or NoCircularWait or ReplyPosted breaks
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  class lg2 repeats
+  s0: 앞 턴 없음 / B 도착 전 / 토큰 없음 / 화면 Idle, transcript 없음, Bound 없음
+  s1: 앞 턴 없음 / B 대기열 / 토큰 없음 / 화면 Idle, transcript 없음, Bound 없음
+  s2: 앞 턴 없음 / B 보류(키 0) / 토큰 없음 / 화면 Idle, transcript 없음, Bound 없음, 보류 사유: source 미결합
+  [*] --> s0
+  s0 --> s1: 사람 입력 B 도착
+  s1 --> s2: owner drive(S1): 보류 조건만 보고 키 전 등록 뒤 붙여넣기+Enter
+  s2 --> s2: held_watch 재구동 or owner drive(S1): 보류 조건만 보고 키 전 등록 뒤 붙여넣기+Enter
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 breaks
+  class s2 bugPath
+  class s2 repeats

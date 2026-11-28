@@ -1,23 +1,25 @@
 //! Tui session launch.
 
 #[cfg(unix)]
-pub(in crate::services::codex) mod first_input;
-pub(super) mod launch_policy;
+pub mod first_input;
+pub mod launch_policy;
 mod project_trust;
 #[cfg(unix)]
+pub use launch_policy::prepare_codex_herdr_launch;
+#[cfg(unix)]
 pub(super) use launch_policy::{
-    preflight_codex_tui_turn_with_policy, prepare_codex_herdr_launch,
-    prepare_codex_tui_incarnation_with_policy, tui_preflight_with_policy,
+    preflight_codex_tui_turn_with_policy, prepare_codex_tui_incarnation_with_policy,
+    tui_preflight_with_policy,
 };
 #[cfg(unix)]
-pub(crate) use launch_policy::{successor_hooks_ready, validate_herdr_fresh_argv};
+pub use launch_policy::{successor_hooks_ready, validate_herdr_fresh_argv};
 
 use super::*;
 use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
 
 #[cfg(unix)]
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum CodexTuiLaunchRefused {
+pub enum CodexTuiLaunchRefused {
     SourceModeInvalid(&'static str),
     HooksUnavailable,
     CliMissing,
@@ -44,7 +46,7 @@ impl std::fmt::Display for CodexTuiLaunchRefused {
 
 /// Read-only eligibility, reused immediately before each pane effect.
 #[cfg(unix)]
-pub(crate) fn tui_preflight(
+pub fn tui_preflight(
     tmux: &str,
     channel: Option<u64>,
     options: &CodexLaunchOptions,
@@ -55,7 +57,7 @@ pub(crate) fn tui_preflight(
 
 /// A warm incarnation keeps its verified policy when the next launch mode changes.
 #[cfg(unix)]
-pub(crate) fn verified_warm_preflight<'a>(
+pub fn verified_warm_preflight<'a>(
     options: &CodexLaunchOptions,
     context: &'a crate::services::tui_prompt_dedupe::binding_context::BindingContext,
 ) -> Result<VerifiedWarmEligibility<'a>, CodexTuiLaunchRefused> {
@@ -72,7 +74,7 @@ pub(crate) fn verified_warm_preflight<'a>(
 }
 
 #[cfg(unix)]
-pub(crate) struct VerifiedWarmEligibility<'a> {
+pub struct VerifiedWarmEligibility<'a> {
     resume_root: Option<&'a std::path::Path>,
     hooks: bool,
 }
@@ -188,13 +190,13 @@ pub(super) fn preflight_codex_tui_turn(
     )
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 thread_local! {
     pub(super) static BEFORE_PANE_EFFECT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn prepare_codex_tui_launch_script(
+pub fn prepare_codex_tui_launch_script(
     tmux: &str,
     session_id: Option<&str>,
     prompt: &str,
@@ -243,7 +245,7 @@ pub(crate) enum CodexHerdrLaunchRefused {
 
 /// What an admitted Codex Herdr launch runs: the binary, its source mode and its hook endpoint.
 #[cfg(unix)]
-pub(crate) struct CodexHerdrLaunchable {
+pub struct CodexHerdrLaunchable {
     codex_bin: String,
     resolution: crate::services::platform::BinaryResolution,
     policy: &'static str,
@@ -252,7 +254,7 @@ pub(crate) struct CodexHerdrLaunchable {
 #[cfg(all(any(test, feature = "test-support"), unix))]
 impl CodexHerdrLaunchable {
     /// A launchable built field by field, for tests outside this module.
-    pub(crate) fn from_parts_for_test(
+    pub fn from_parts_for_test(
         codex_bin: String,
         resolution: crate::services::platform::BinaryResolution,
         policy: &'static str,
@@ -268,7 +270,7 @@ impl CodexHerdrLaunchable {
 #[cfg(all(any(test, feature = "test-support"), unix))]
 impl CodexHerdrLaunchable {
     /// A verified launchable that runs `bin`, for tests that render a pane command.
-    pub(crate) fn for_tests(bin: &str) -> Self {
+    pub fn for_tests(bin: &str) -> Self {
         Self {
             codex_bin: bin.into(),
             resolution: crate::services::platform::BinaryResolution {
@@ -428,7 +430,7 @@ fn add_codex_tui_hooks(
 
 /// Publishes a tail handoff only after cancellation, source and readiness checks.
 #[cfg(unix)]
-pub(crate) fn emit_codex_tui_post_tail_handoff(
+pub fn emit_codex_tui_post_tail_handoff(
     tail_result: crate::services::codex_tui::rollout_tail::CodexTuiTailResult,
     sender: Sender<StreamMessage>,
     cancel_token_for_post_tail: Option<std::sync::Arc<CancelToken>>,
@@ -488,7 +490,7 @@ pub(crate) fn emit_codex_tui_post_tail_handoff(
             cancel_token_for_post_tail.as_ref(),
         ) {
             Ok(()) => {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 if let Some(seam) = AFTER_READINESS_WAIT.with_borrow_mut(Option::take) {
                     seam();
                 }
@@ -759,7 +761,7 @@ mod tests {
         let (root, _env) = binding_context::tests::fixture_after_shared_test_env_lock();
         let _tmux = binding_context::tests::fake_tmux(root.path());
         let _hosts = crate::config::session_hosts::force_for_test(None, &[]);
-        let _endpoint_lock = crate::services::claude_tui::hook_server::tests::ENDPOINT_TEST_LOCK
+        let _endpoint_lock = crate::services::claude_tui::hook_server::ENDPOINT_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let _endpoint = crate::services::claude_tui::hook_server::publish_hook_endpoint(
@@ -832,7 +834,7 @@ mod tests {
         }
         let _mode = SourceModeRestore(SOURCE_MODE_TEST.with(|slot| slot.get()));
         let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-        let _endpoint_lock = crate::services::claude_tui::hook_server::tests::ENDPOINT_TEST_LOCK
+        let _endpoint_lock = crate::services::claude_tui::hook_server::ENDPOINT_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let _endpoint = crate::services::claude_tui::hook_server::publish_hook_endpoint(
@@ -1095,7 +1097,7 @@ mod tests {
         let _lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let (root, _env) = tests::fixture_after_shared_test_env_lock();
         let _tmux = tests::fake_tmux(root.path());
-        let _endpoint = crate::services::claude_tui::hook_server::tests::ENDPOINT_TEST_LOCK
+        let _endpoint = crate::services::claude_tui::hook_server::ENDPOINT_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let dir = root.path();

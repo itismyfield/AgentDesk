@@ -3,24 +3,24 @@
 use chrono::{DateTime, Utc};
 use chrono_tz::Asia::Seoul;
 
-pub(crate) mod quota;
+pub mod quota;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Outcome {
+pub enum Outcome {
     Completed,
     Cancelled,
     Failed,
 }
 
 #[derive(Default)]
-pub(crate) struct Model<'a> {
+pub struct Model<'a> {
     pub name: Option<&'a str>,
     pub effort: Option<&'a str>,
     pub fast: bool,
 }
 
 #[derive(Default)]
-pub(crate) struct Footer<'a> {
+pub struct Footer<'a> {
     pub elapsed_ms: Option<u64>,
     pub started: Option<DateTime<Utc>>,
     pub ended: Option<DateTime<Utc>>,
@@ -42,7 +42,7 @@ fn model_name(raw: &str) -> Option<&str> {
     .then_some(name)
 }
 
-pub(crate) fn render(outcome: Outcome, footer: Footer<'_>) -> String {
+pub fn render(outcome: Outcome, footer: Footer<'_>) -> String {
     let name = footer.model.name.and_then(model_name);
     let effort = footer.model.effort.map(str::trim).filter(|effort| {
         !effort.is_empty()
@@ -126,5 +126,39 @@ fn elapsed(milliseconds: u64) -> String {
 #[path = "turn_summary_line_tests.rs"]
 mod tests;
 
-#[cfg(test)]
-pub(crate) use tests::assert_completed_footer;
+#[cfg(any(test, feature = "test-support"))]
+pub fn assert_completed_footer(footer: &str) {
+    let mut lines = footer.lines();
+    let first = lines.next().expect("completed footer");
+    let time = r"(?:[01][0-9]|2[0-3]):[0-5][0-9]";
+    let day_time = format!(r"(?:0[1-9]|1[0-2])/(?:0[1-9]|[12][0-9]|3[01]) {time}");
+    let percent = r"(?:100|[1-9]?[0-9])%";
+    let mode = r"[A-Za-z0-9-]{1,16}";
+    let name = r"[A-Za-z0-9][A-Za-z0-9 ._+/\-:@\[\]]{0,63}";
+    let shape = format!(
+        concat!(
+            r"\A-# ⏱️ (?:[0-9]+초|[0-9]+분(?: [0-9]+초)?|[0-9]+시간 [0-9]+분)",
+            r" \((?:{0}|{1})\)(?: · (?:{2}(?: \({3}(?:, fast)?\))?|{3}, fast))?",
+            r"(?: · 📦 {4})?\z"
+        ),
+        time, day_time, name, mode, percent
+    );
+    assert!(
+        regex::Regex::new(&shape).unwrap().is_match(first),
+        "{footer:?}"
+    );
+    if let Some(quota) = lines.next() {
+        let left = r"(?:[1-9][0-9]*d (?:1?[0-9]|2[0-3])h|(?:1?[0-9]|2[0-3])h [1-5]?[0-9]m)";
+        let five = format!(r"5h {percent}(?: \({left}, {time}\))?");
+        let seven = format!(r"7d {percent}(?: \({left}, {day_time}\))?");
+        let fable = format!("Fable {seven}");
+        let shape = format!(
+            r"\A-# (?:{five}(?: · {seven})?(?: · {fable})?|{seven}(?: · {fable})?|{fable})\z"
+        );
+        assert!(
+            regex::Regex::new(&shape).unwrap().is_match(quota) && quota.ends_with(')'),
+            "{footer:?}"
+        );
+    }
+    assert_eq!(lines.next(), None, "{footer:?}");
+}

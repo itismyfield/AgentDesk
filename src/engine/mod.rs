@@ -1136,25 +1136,23 @@ mod runtime_policy_tests {
     use super::*;
 
     fn test_config() -> Config {
-        Config {
-            policies: crate::config::PoliciesConfig {
-                dir: std::path::PathBuf::from("/nonexistent"),
-                hot_reload: false,
-                ..crate::config::PoliciesConfig::default()
-            },
-            ..Config::default()
-        }
+        let mut config = Config::default();
+        config.policies = crate::config::PoliciesConfig {
+            dir: std::path::PathBuf::from("/nonexistent"),
+            hot_reload: false,
+            ..crate::config::PoliciesConfig::default()
+        };
+        config
     }
 
     fn test_config_with_dir(dir: &std::path::Path) -> Config {
-        Config {
-            policies: crate::config::PoliciesConfig {
-                dir: dir.to_path_buf(),
-                hot_reload: false,
-                ..crate::config::PoliciesConfig::default()
-            },
-            ..Config::default()
-        }
+        let mut config = Config::default();
+        config.policies = crate::config::PoliciesConfig {
+            dir: dir.to_path_buf(),
+            hot_reload: false,
+            ..crate::config::PoliciesConfig::default()
+        };
+        config
     }
 
     #[test]

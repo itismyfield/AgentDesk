@@ -461,7 +461,7 @@ async fn legacy_taking_the_channel_during_the_first_read_leaves_nothing_to_retry
     let candidate = test_override::with_channels(|boot| boot.unwrap().candidate(CHANNEL).cloned());
     let candidate = candidate.unwrap();
     let reached = hook_reached(Step::Snapshot, move || {
-        assert!(!candidate.claim(CHANNEL));
+        assert!(!candidate.claim_for_test(CHANNEL));
     });
     let _tasks = open.start().await;
     assert!(reached.load(Ordering::SeqCst));

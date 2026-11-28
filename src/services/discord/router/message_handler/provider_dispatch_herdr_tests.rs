@@ -1348,11 +1348,11 @@ fn a_judgment_left_by_an_early_exit_admits_no_later_send() {
             assert_eq!(refused, Err(InputRefusal::Conflict));
         }),
         ("paste end marker", &|| {
-            let refused = target.send_paste("a\u{1b}[201~b").unwrap();
+            let refused = target.send_paste_for_test("a\u{1b}[201~b").unwrap();
             assert!(matches!(refused, HostMutation::Refused(_)), "{refused:?}");
         }),
         ("cancel after the buffer load", &|| {
-            HerdrInput::new(&target)
+            HerdrInput::new_for_test(&target)
                 .load_buffer("buffer", "text")
                 .unwrap();
         }),
@@ -1360,7 +1360,7 @@ fn a_judgment_left_by_an_early_exit_admits_no_later_send() {
     for (exit, run) in exits {
         target.pin(HerdrMutation::Input).unwrap();
         run();
-        assert_eq!(target.send_text("x"), unjudged, "{exit}");
+        assert_eq!(target.send_text_for_test("x"), unjudged, "{exit}");
     }
     assert!(rig.sends().is_empty(), "{:?}", rig.sends());
 }

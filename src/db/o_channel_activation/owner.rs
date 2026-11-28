@@ -3,7 +3,7 @@ use super::*;
 use crate::db::channel_custody_lock;
 use crate::domain::intake_identity::OwnerIdentity;
 
-pub(crate) async fn facts(
+pub async fn facts(
     pool: &PgPool,
     provider: &str,
     channel: &str,

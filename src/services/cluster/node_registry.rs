@@ -11,21 +11,21 @@ use crate::db::postgres::AdvisoryLockLease;
 use crate::services::cluster::dispatch_hooks::DispatchQueueHooks;
 use crate::services::cluster::session_routing::worker_api_base_url_from_capabilities;
 
-pub(crate) const CLUSTER_LEADER_ADVISORY_LOCK_ID: i64 = 7_801_100;
+pub const CLUSTER_LEADER_ADVISORY_LOCK_ID: i64 = 7_801_100;
 
-pub(crate) use super::capability_routing::{
+pub use super::capability_routing::{
     CapabilityRouteCandidate, CapabilityRouteDecision, explain_capability_match,
     select_capability_route,
 };
 use super::intake_worker_capabilities::capabilities_with_runtime_state;
-pub(crate) use super::intake_worker_capabilities::{
+pub use super::intake_worker_capabilities::{
     GatewayWaiterGuard, node_awaits_gateway, node_supports_intake_provider,
     node_supports_intake_request, refresh_worker_node_runtime_capabilities,
     register_intake_worker_provider,
 };
 
 #[derive(Clone, Debug)]
-pub(crate) struct ClusterRuntime {
+pub struct ClusterRuntime {
     enabled: bool,
     instance_id: String,
     configured_role: ClusterRole,
@@ -47,7 +47,7 @@ impl ClusterRuntime {
         }
     }
 
-    pub(crate) fn is_leader(&self) -> bool {
+    pub fn is_leader(&self) -> bool {
         !self.enabled || self.leader_active.load(Ordering::Acquire)
     }
 
@@ -55,8 +55,8 @@ impl ClusterRuntime {
     /// caller-provided `leader_active` flag. Lets tests flip leadership at will
     /// to exercise supervised workers across lease takeovers without standing
     /// up a real cluster. See `worker_registry::tests`.
-    #[cfg(test)]
-    pub(crate) fn for_test_with_leader(leader_active: Arc<AtomicBool>) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test_with_leader(leader_active: Arc<AtomicBool>) -> Self {
         Self {
             enabled: true,
             instance_id: "test-node".to_string(),
@@ -66,11 +66,11 @@ impl ClusterRuntime {
         }
     }
 
-    pub(crate) fn instance_id(&self) -> &str {
+    pub fn instance_id(&self) -> &str {
         &self.instance_id
     }
 
-    pub(crate) async fn wait_until_not_leader(&self) {
+    pub async fn wait_until_not_leader(&self) {
         if !self.enabled {
             std::future::pending::<()>().await;
             return;
@@ -119,7 +119,7 @@ fn auto_node_can_attempt_leadership(config: &Config) -> bool {
     })
 }
 
-pub(crate) async fn bootstrap(
+pub async fn bootstrap(
     config: &Config,
     pg_pool: Option<PgPool>,
     hooks: DispatchQueueHooks,
@@ -654,7 +654,7 @@ async fn upsert_worker_mcp_endpoints(
 /// see the SAME id the cluster bootstrap registered with `worker_nodes`,
 /// even when the id was supplied via `ClusterConfig.instance_id` rather
 /// than env or hostname.
-pub(crate) static SELF_INSTANCE_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+pub static SELF_INSTANCE_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// Resolve the self instance_id, preferring the value the cluster
 /// bootstrap registered (config-driven if present), falling back to
@@ -666,7 +666,7 @@ pub(crate) static SELF_INSTANCE_ID: std::sync::OnceLock<String> = std::sync::Onc
 /// classify the leader as self. Otherwise the hook can route a
 /// message to leader's own `instance_id` and the gate then skips
 /// local execution, leaving the row unconsumed.
-pub(crate) fn resolve_self_instance_id_without_config() -> String {
+pub fn resolve_self_instance_id_without_config() -> String {
     if let Some(value) = SELF_INSTANCE_ID.get() {
         return value.clone();
     }
@@ -688,7 +688,7 @@ pub(crate) fn resolve_self_instance_id_without_config() -> String {
 /// hostname+PID fallback. Times out after `max_wait` and falls back to
 /// `resolve_self_instance_id_without_config()` so the caller never blocks
 /// forever in degraded boots.
-pub(crate) async fn wait_for_self_instance_id(max_wait: std::time::Duration) -> String {
+pub async fn wait_for_self_instance_id(max_wait: std::time::Duration) -> String {
     let start = std::time::Instant::now();
     while SELF_INSTANCE_ID.get().is_none() {
         if start.elapsed() >= max_wait {
@@ -724,7 +724,7 @@ fn resolve_instance_id(config: &ClusterConfig) -> String {
     )
 }
 
-pub(crate) async fn list_worker_nodes(
+pub async fn list_worker_nodes(
     pool: &PgPool,
     lease_ttl_secs: u64,
 ) -> Result<Vec<serde_json::Value>, String> {

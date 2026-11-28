@@ -112,7 +112,7 @@ fn clear_missing_pane_keeps_legacy_retirement_pg() {
 
 #[test]
 fn clear_retired_without_endpoint_keeps_legacy_managed_end_pg() {
-    use crate::services::provider_teardown::tests::test_support::FakeTmux;
+    use crate::services::provider_teardown::test_support::FakeTmux;
     use crate::services::session_backend::{SessionHandle, insert_process_session};
 
     let case = Case::launched("rr-legacy-offline");

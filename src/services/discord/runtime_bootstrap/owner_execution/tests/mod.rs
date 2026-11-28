@@ -120,7 +120,7 @@ async fn owner_cleanup_boot_diagnostics_wait_for_execution_read_pg() {
             .unwrap();
         let boot = BootChannels::validate(&config)
             .unwrap()
-            .seeded(&config, |selected, _| {
+            .seeded_for_test(&config, |selected, _| {
                 Ok(crate::services::tui_o::channel_policy::stored(
                     Some(&root),
                     selected,

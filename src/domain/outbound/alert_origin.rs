@@ -25,7 +25,7 @@ fn hidden_operational_alert_origin_marker() -> &'static str {
 
 /// Prefix an operational alert with a provenance marker removed at intake.
 /// The marker is invisible in Discord while remaining stable in message text.
-pub(crate) fn prepend_operational_alert_origin(text: &str) -> String {
+pub fn prepend_operational_alert_origin(text: &str) -> String {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         String::new()
@@ -39,7 +39,7 @@ pub(crate) fn prepend_operational_alert_origin(text: &str) -> String {
 }
 
 /// Keep Discord's subtext prefix before the invisible provenance marker.
-pub(crate) fn prepend_inline_operational_alert_origin(text: &str) -> String {
+pub fn prepend_inline_operational_alert_origin(text: &str) -> String {
     let trimmed = text.trim();
     if strip_operational_alert_origin(trimmed).1 {
         return trimmed.to_string();
@@ -50,7 +50,7 @@ pub(crate) fn prepend_inline_operational_alert_origin(text: &str) -> String {
     }
 }
 
-pub(crate) fn strip_operational_alert_origin<'a>(text: &'a str) -> (Cow<'a, str>, bool) {
+pub fn strip_operational_alert_origin<'a>(text: &'a str) -> (Cow<'a, str>, bool) {
     if let Some(body) = text.strip_prefix("-# ") {
         let (body, marked) = strip_operational_alert_origin(body);
         if marked {

@@ -9,7 +9,7 @@ use super::{
 
 /// Running text alone is insufficient when a modal or prompt draft owns the composer; only the
 /// active compact `›` row with a wholly dim body is Codex's placeholder rather than a draft.
-pub(crate) fn herdr_turn_in_progress(pane_with_escapes: &str) -> bool {
+pub fn herdr_turn_in_progress(pane_with_escapes: &str) -> bool {
     let plain = strip_ansi_escape_sequences(pane_with_escapes);
     recent_codex_active_turn_marker(&plain).is_some()
         && !pane_has_codex_interactive_modal_in_pane(&plain)

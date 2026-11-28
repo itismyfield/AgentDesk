@@ -21,7 +21,7 @@ pub(crate) const BLOCKER_ADMITTING_RUN_STATUSES: &[&str] = &[
 ];
 
 /// Hold the run token for the rest of the caller's transaction without reading the run.
-pub(crate) async fn lock_run_token_on_pg_tx(
+pub async fn lock_run_token_on_pg_tx(
     tx: &mut Transaction<'_, Postgres>,
     run_id: &str,
 ) -> Result<(), String> {
@@ -49,7 +49,7 @@ async fn run_status_under_token_on_pg_tx(
 
 /// Admit a writer only while its run is in `allowed`; otherwise refuse with
 /// `run is <status>: refusing to <action>`, naming a missing row as `missing`.
-pub(crate) async fn admit_run_writer_on_pg_tx(
+pub async fn admit_run_writer_on_pg_tx(
     tx: &mut Transaction<'_, Postgres>,
     run_id: &str,
     allowed: &[&str],

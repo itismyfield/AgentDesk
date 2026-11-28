@@ -356,7 +356,7 @@ fn blocked_telemetry(reason: &IntakeBlockedReason) -> IntakeRoutingTelemetry<'_>
     }
 }
 
-pub(crate) fn record_decision(
+pub fn record_decision(
     mode: IntakeRoutingMode,
     channel_id: &str,
     user_msg_id: &str,

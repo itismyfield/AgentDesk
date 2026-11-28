@@ -200,12 +200,18 @@ impl Phase {
         let shared = &self.shared;
         let key = channel_key(shared, name);
         // The session's canonical Bound record names this case's own execution and pane.
-        use crate::db::dispatched_sessions::hosted_execution::{HostedState, tests};
-        let mut owner = tests::owner(&channel.get().to_string());
+        use crate::db::dispatched_sessions::hosted_execution::{HostedState, test_support};
+        let mut owner = test_support::owner(&channel.get().to_string());
         owner.logical_key = name.to_owned();
-        let record = tests::record(&owner, &execution_nonce(n), HostedState::Bound);
+        let record = test_support::record(&owner, &execution_nonce(n), HostedState::Bound);
         let seed = crate::services::discord::inflight::seed_session_row_keyed;
-        seed(&self.pool, &key, channel.get(), Some(tests::wire(&record))).await;
+        seed(
+            &self.pool,
+            &key,
+            channel.get(),
+            Some(test_support::wire(&record)),
+        )
+        .await;
         let marker = crate::services::tmux_common::session_temp_path(name, "host_kind");
         std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
         std::fs::write(marker, "herdr").unwrap();

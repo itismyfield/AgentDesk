@@ -5,16 +5,16 @@ use std::sync::{LazyLock, Mutex};
 static REVISIONS: LazyLock<Mutex<HashMap<String, Option<u64>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     // REVISIONS critical sections open on this thread; other test threads may hold it meanwhile.
     static REVISIONS_HELD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 struct RevisionsHeld;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl RevisionsHeld {
     fn enter() -> Self {
         REVISIONS_HELD.with(|depth| depth.set(depth.get() + 1));
@@ -22,7 +22,7 @@ impl RevisionsHeld {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for RevisionsHeld {
     fn drop(&mut self) {
         REVISIONS_HELD.with(|depth| depth.set(depth.get() - 1));
@@ -49,14 +49,21 @@ pub(crate) fn revision(key: &str) -> Option<u64> {
         .unwrap_or(Some(0))
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SourcePin {
-    key: String,
-    revision: u64,
+mod source_pin {
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct SourcePin {
+        pub(super) key: String,
+        pub(super) revision: u64,
+    }
 }
 
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use source_pin::SourcePin;
+#[cfg(any(test, feature = "test-support"))]
+pub use source_pin::SourcePin;
+
 impl SourcePin {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn capture(key: String) -> Option<Self> {
         let _held = RevisionsHeld::enter();
         let revision = REVISIONS
@@ -66,6 +73,11 @@ impl SourcePin {
             .copied()
             .unwrap_or(Some(0))?;
         Some(Self { key, revision })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn is_current_for_test(&self) -> bool {
+        self.is_current()
     }
 
     pub(crate) fn is_current(&self) -> bool {
@@ -82,7 +94,7 @@ impl SourcePin {
 }
 
 #[derive(Clone)]
-pub(crate) struct SourceCertificate {
+pub struct SourceCertificate {
     pin: SourcePin,
     end: u64,
     generation: i64,
@@ -93,11 +105,11 @@ pub(crate) struct SourceCertificate {
 
 impl SourceCertificate {
     #[cfg(all(any(test, feature = "test-support"), unix))]
-    pub(crate) fn prefix_is_current(&self) -> bool {
+    pub fn prefix_is_current(&self) -> bool {
         self.seal.is_current()
     }
 
-    pub(crate) fn matches(&self, end: u64, generation: i64, reset: u64) -> bool {
+    pub fn matches(&self, end: u64, generation: i64, reset: u64) -> bool {
         self.end == end
             && self.generation == generation
             && self.reset == reset
@@ -105,12 +117,7 @@ impl SourceCertificate {
     }
 
     #[cfg(all(any(test, feature = "test-support"), unix))]
-    pub(crate) fn confirmed(
-        seal: &PrefixSeal,
-        end: u64,
-        generation: i64,
-        reset: u64,
-    ) -> Option<Self> {
+    pub fn confirmed(seal: &PrefixSeal, end: u64, generation: i64, reset: u64) -> Option<Self> {
         (generation != 0
             && generation == seal.generation
             && reset == seal.reset
@@ -128,7 +135,7 @@ impl SourceCertificate {
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ReadVersion {
+pub struct ReadVersion {
     identity: (u64, u64),
     len: u64,
     modified: (i64, i64),
@@ -137,7 +144,7 @@ pub(crate) struct ReadVersion {
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
 impl ReadVersion {
-    pub(crate) fn from_fd(file: &std::fs::File) -> Option<Self> {
+    pub fn from_fd(file: &std::fs::File) -> Option<Self> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
@@ -159,7 +166,7 @@ impl ReadVersion {
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
 #[derive(Clone)]
-pub(crate) struct SourceReadProof {
+pub struct SourceReadProof {
     file: std::sync::Arc<std::fs::File>,
     path: std::path::PathBuf,
     pin: SourcePin,
@@ -172,7 +179,7 @@ pub(crate) struct SourceReadProof {
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
 impl SourceReadProof {
-    pub(crate) fn capture(
+    pub fn capture(
         file: std::sync::Arc<std::fs::File>,
         path: std::path::PathBuf,
         pin: SourcePin,
@@ -203,6 +210,11 @@ impl SourceReadProof {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn seal_prefix_for_test(&self) -> Option<PrefixSeal> {
+        self.seal_prefix()
+    }
+
     pub(crate) fn seal_prefix(&self) -> Option<PrefixSeal> {
         if self.range.start != 0 || self.range.end == 0 {
             return None;
@@ -223,7 +235,7 @@ impl SourceReadProof {
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
 #[derive(Clone)]
-pub(crate) struct PrefixSeal {
+pub struct PrefixSeal {
     file: std::sync::Arc<std::fs::File>,
     path: std::path::PathBuf,
     pin: SourcePin,
@@ -236,7 +248,7 @@ pub(crate) struct PrefixSeal {
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
 impl PrefixSeal {
-    pub(crate) fn is_current(&self) -> bool {
+    pub fn is_current(&self) -> bool {
         #[cfg(unix)]
         {
             use sha2::{Digest, Sha256};
@@ -292,6 +304,6 @@ pub(crate) fn assert_revision_unlocked_for_tests() {
     );
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "source_read_proof_tests.rs"]
-pub(crate) mod tests;
+pub mod tests;
