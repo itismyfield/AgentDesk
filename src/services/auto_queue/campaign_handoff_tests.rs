@@ -1,5 +1,5 @@
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::db::campaigns::{self, Campaign, CampaignInput};
+use crate::db::campaigns::{self, Campaign, CampaignInput, NodeStatus};
 use crate::engine::PolicyEngine;
 use crate::services::auto_queue::route::campaign_handoff::HandoffReport;
 use crate::services::auto_queue::route::{hand_off_auto_campaigns_pg, hand_off_ready_nodes_pg};
