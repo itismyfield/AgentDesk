@@ -30,6 +30,7 @@ mod managed_reset_port;
 pub(crate) use managed_reset_port::slot_row_host_refusal;
 pub(crate) mod o_transition;
 mod provider_probe;
+pub(crate) mod runtime_registry;
 // #5071 T4-B2c (4987 S1): the relay-reachability observation library and
 // task. Unix-gated because its transcript coordinate is the `(dev, ino)`
 // file identity of 4987 §-1.3, and no stable Windows equivalent exists through
@@ -189,6 +190,7 @@ pub(crate) use recovery::{
 pub(crate) use recovery::{judge_provider_channel_stop, stop_judged_provider_channel};
 #[cfg(test)]
 pub(crate) use runtime_resolve::owner_runtime_for_tests;
+pub(crate) mod routine_ports;
 pub use runtime_resolve::resolve_bot_http;
 use runtime_resolve::{resolve_direct_channel_runtime, resolve_direct_channel_shared};
 pub(crate) use runtime_resolve::{resolve_intake_worker_runtime, resolve_utility_bot_http};
@@ -427,6 +429,7 @@ impl HealthRegistry {
         self.started_at_unix = chrono::Utc::now().timestamp() - seconds;
     }
     pub fn new() -> Self {
+        runtime_registry::install_owner_actor();
         // A live registry implies the observer hook, so every registry install path publishes.
         super::tui_prompt_relay::install_observer_publication();
         // Recorded Herdr turn starts reach their durable rows through this writer.

@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 use crate::services::campaign_execution::{
-    control::{self, tests as domain},
+    control::{self, test_support as domain},
     definition,
     model::{CampaignState, ChangeReason, Command, Decision, RejectionCode},
 };

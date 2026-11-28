@@ -12,7 +12,7 @@ async fn seed_failure_entry(
     run_status: &str,
     retry_count: i64,
 ) {
-    crate::services::krx_db_b_tests::status_check_migration::execute_with_status_check_lifted(
+    crate::db::status_check_test_support::execute_with_status_check_lifted(
         pool,
         "auto_queue_runs",
         &format!("INSERT INTO auto_queue_runs (id, status) VALUES ('{run_id}', '{run_status}')"),

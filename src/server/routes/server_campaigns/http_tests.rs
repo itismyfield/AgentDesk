@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     dispatch::test_support::DispatchPostgresTestDb,
-    services::campaign_execution::{control::tests as domain, model::*},
+    services::campaign_execution::{control::test_support as domain, model::*},
 };
 use axum::{
     body::{Body, to_bytes},

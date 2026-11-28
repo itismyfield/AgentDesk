@@ -1,5 +1,6 @@
 use super::*;
 use crate::domain::campaign::definition::graph_changed;
+use crate::services::campaign_execution::model::Repository;
 use serde_json::{Value, json};
 
 fn input() -> DefinitionInput {

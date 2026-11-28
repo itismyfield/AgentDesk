@@ -154,7 +154,7 @@ pub const FIELDS: &[FieldReload] = &[
     row("routines.max_due_per_tick", Live, "`src/server/mod.rs` routine_runtime_loop (per-tick current())"),
     row("routines.max_agent_polls_per_tick", Live, "`src/server/mod.rs` routine_runtime_loop (per-tick current())"),
     row("routines.default_timezone", Restart, "`src/server/mod.rs` routine_runtime_loop (RoutineStore::new_with_timezone_and_checkpoint_limit)"),
-    row("routines.agent_timeout_secs", Restart, "`src/server/mod.rs` routine_runtime_loop (RoutineAgentExecutor::new)"),
+    row("routines.agent_timeout_secs", Restart, "`src/server/mod.rs` routine_runtime_loop (build_routine_agent_executor)"),
     row("routines.headless_fresh_agents", Restart, "`src/server/mod.rs` routine_runtime_loop (RoutineAgentExecutor::with_headless_fresh_agents)"),
     row("routines.max_checkpoint_bytes", Restart, "`src/server/mod.rs` routine_runtime_loop (RoutineStore)"),
     row("routines.hot_reload", Live, "`src/server/mod.rs` routine_runtime_loop (per-tick current())"),

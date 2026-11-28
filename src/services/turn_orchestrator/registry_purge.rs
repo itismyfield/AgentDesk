@@ -122,7 +122,7 @@ pub(super) fn gate_closed_arm(
         | M::Injection(super::injected_inputs::InjectionMsg::Abandon { .. }) => return Some(msg),
         #[cfg(any(test, feature = "test-support"))]
         M::AgeActiveTurnForTest { .. } | M::AgeInboundWaitsForTest { .. } => return Some(msg),
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         M::AgeValveClearedDispatchForTest { .. } => return Some(msg),
         // Start-like arms would bind work the unlink orphans; callers replay through
         // the `*_with_closed_retry` helpers below.
@@ -164,7 +164,7 @@ pub(super) fn gate_closed_arm(
         | M::CancelActiveTurnIfCurrent { .. }
         | M::CancelActiveTurnIfCurrentWithReason { .. }
         | M::CancelActiveTurnIfCurrentUnlessHerdr { .. } => "CancelActiveTurn",
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         M::CancelActiveTurnIfUserMessageWithReason { .. } => "CancelActiveTurn",
         M::CancelActiveBackgroundTurnIfCurrent { .. } => "CancelActiveBackgroundTurnIfCurrent",
         M::HasPendingSoftQueue { .. } => "HasPendingSoftQueue",

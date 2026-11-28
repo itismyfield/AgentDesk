@@ -614,6 +614,8 @@ fn creation_fault(step: &str) -> io::Result<()> {
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) mod test_support;
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub use test_support::fixture_after_shared_test_env_lock;
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
 pub mod tests {

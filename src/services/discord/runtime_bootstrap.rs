@@ -40,6 +40,8 @@ mod relay_dlq_redelivery;
 mod restored_state;
 mod session_gc;
 mod shared_data;
+#[cfg(all(test, unix))]
+pub(crate) use shared_data::shared_data_without_policy_for_tests;
 mod shutdown;
 mod spawns;
 #[cfg(all(test, unix))]

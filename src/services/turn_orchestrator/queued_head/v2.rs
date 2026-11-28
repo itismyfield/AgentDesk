@@ -352,8 +352,8 @@ impl Owner {
 
     /// Rebuilds a reserved unit whose write permit is not handed over yet over the current front,
     /// keeping originals, tickets and order; the old key can no longer arm, so it never writes.
-    #[cfg(test)]
-    pub(crate) fn reprepare(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn reprepare(
         &mut self,
         key: &AttemptRef,
         nonce: String,
@@ -668,6 +668,8 @@ pub(super) fn front_holds(items: &[PendingQueueItem], input: &InputAttempt) -> b
     front.is_some_and(|front| front.iter().zip(&members).all(|(a, b)| same(a, b)))
 }
 
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(super) mod retry_wait_test_support;
 // Owner fixtures require a confirmed parent directory fsync for adoption and commits.
 #[cfg(all(test, unix))]
 #[path = "v2/owner_tests.rs"]

@@ -6,7 +6,7 @@ description = "AI agent orchestration platform"
 license = "MIT"
 
 [workspace]
-members = ["crates/adk-base", "crates/adk-runtime", "crates/adk-store", "crates/adk-test-support"]
+members = ["crates/adk-base", "crates/adk-engine", "crates/adk-runtime", "crates/adk-store", "crates/adk-test-support"]
 resolver = "3"
 
 [lib]
@@ -39,10 +39,11 @@ type_complexity = "deny"
 [features]
 # Test-only items KE·DL·ROOT tests reach once KRX is its own crate (#7353 KRX-TS). Off by default; the
 # upper packages enable it as a dev-dependency only, so release builds never see it.
-test-support = ["dep:adk-test-support", "tokio/test-util"]
+test-support = ["adk-runtime/test-support", "dep:adk-test-support", "tokio/test-util"]
 
 [dependencies]
 adk-base = { path = "crates/adk-base" }
+adk-engine = { path = "crates/adk-engine" }
 adk-runtime = { path = "crates/adk-runtime" }
 adk-test-support = { path = "crates/adk-test-support", optional = true }
 adk-store = { path = "crates/adk-store" }
@@ -135,6 +136,7 @@ plist = "1.8"
 
 [dev-dependencies]
 adk-base = { path = "crates/adk-base", features = ["test-support"] }
+adk-engine = { path = "crates/adk-engine", features = ["test-support"] }
 adk-runtime = { path = "crates/adk-runtime", features = ["test-support"] }
 adk-test-support = { path = "crates/adk-test-support" }
 flate2 = "1"

@@ -1,7 +1,7 @@
 use super::*;
-use crate::services::discord::router::response_format::retry_prompt_context::Preludes;
 use crate::services::discord::turn_bridge::recovery_text;
 use crate::services::discord::{inflight, make_shared_data_for_tests_with_storage};
+use crate::services::turn_orchestrator::retry_prompt_codec::Preludes;
 use crate::services::turn_orchestrator::{load_channel_pending_queue_checked, save_channel_queue};
 
 fn queued(context: Option<String>, text: &str) -> Intervention {
@@ -84,7 +84,11 @@ async fn borrowed_preludes_survive_six_requeues_disk_restart_and_first_inflight_
             ("session_retry_context", "user: recover"),
         ] {
             assert_eq!(
-                store::peek(Some(&pool), &store::key(kind, &provider, channel.get())).as_deref(),
+                store::peek(
+                    Some(&pool),
+                    &retry_prompt_store::key(kind, &provider, channel.get())
+                )
+                .as_deref(),
                 Some(value),
                 "PRE_INFLIGHT_DURABLE_OWNER attempt={attempt}"
             );
@@ -129,7 +133,7 @@ async fn borrowed_preludes_survive_six_requeues_disk_restart_and_first_inflight_
     }
     let context = prepare(&shared, &provider, channel, context).await.context;
     assert_ne!(context.selected, Preludes::default());
-    store::consume_confirmed(
+    retry_prompt_store::consume_confirmed(
         Some(&pool),
         &provider,
         channel.get(),
@@ -141,7 +145,7 @@ async fn borrowed_preludes_survive_six_requeues_disk_restart_and_first_inflight_
     assert_eq!(
         store::peek(
             Some(&pool),
-            &store::key("turn_end_wip_warning", &provider, channel.get())
+            &retry_prompt_store::key("turn_end_wip_warning", &provider, channel.get())
         ),
         None
     );
@@ -241,7 +245,7 @@ async fn failed_raw_enqueue_and_newer_stash_do_not_lose_borrowed_preludes_pg() {
         )
         .is_err()
     );
-    let key = store::key("turn_end_wip_warning", &provider, channel.get());
+    let key = retry_prompt_store::key("turn_end_wip_warning", &provider, channel.get());
     assert_eq!(
         store::peek(Some(&pool), &key).as_deref(),
         Some("old"),
@@ -249,7 +253,7 @@ async fn failed_raw_enqueue_and_newer_stash_do_not_lose_borrowed_preludes_pg() {
     );
     recovery_text::store_turn_end_wip_warning(Some(&pool), &provider, channel.get(), "newer")
         .unwrap();
-    store::consume_confirmed(
+    retry_prompt_store::consume_confirmed(
         Some(&pool),
         &provider,
         channel.get(),
@@ -264,7 +268,7 @@ async fn failed_raw_enqueue_and_newer_stash_do_not_lose_borrowed_preludes_pg() {
         "COMPARE_DELETE_PRESERVES_NEWER_STASH"
     );
     assert!(
-        store::consume_confirmed(
+        retry_prompt_store::consume_confirmed(
             None,
             &provider,
             channel.get(),
@@ -288,10 +292,7 @@ fn durable_worker_and_exact_retry_preserve_legacy_rendered_bytes() {
     let rendered = "[WIP 리마인더] legacy rendered context";
     let legacy = ingress(Some(rendered.into()), false, true);
     assert!(!legacy.may_select(), "WORKER_LEGACY_DURABLE_PROVENANCE");
-    assert_eq!(
-        legacy.render_with(merge_reply_contexts).as_deref(),
-        Some(rendered)
-    );
+    assert_eq!(render(&legacy).as_deref(), Some(rendered));
     for queued in [false, true] {
         let wire = RetryPromptContext::for_routing(Some(rendered.into()), queued);
         let restored = ingress(wire, false, true);

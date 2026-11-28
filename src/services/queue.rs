@@ -22,7 +22,7 @@ mod http_force;
 
 pub(super) use cancel_effects::force_purge_and_settle;
 #[cfg(any(test, feature = "test-support"))]
-pub(super) use cancel_effects::force_purge_channel_mailbox;
+pub(crate) use cancel_effects::force_purge_channel_mailbox;
 pub(crate) use cancel_effects::schedule_post_cancel_queue_drain;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use cancel_effects::set_pre_purge_hook_for_test;

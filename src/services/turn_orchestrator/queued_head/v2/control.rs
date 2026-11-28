@@ -62,13 +62,13 @@ pub(in crate::services::turn_orchestrator) fn route(
         M::PurgeQueueIfUnchanged(request) => request.run_v2(state, channel_id),
         #[cfg(unix)]
         M::CaptureOwnQueue(request) => request.refuse_v2(),
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         M::CancelActiveTurnIfUserMessageWithReason { .. } => return Some(msg),
         #[cfg(any(test, feature = "test-support"))]
         M::HardStop { .. } => return Some(msg),
         #[cfg(any(test, feature = "test-support"))]
         M::AgeActiveTurnForTest { .. } | M::AgeInboundWaitsForTest { .. } => return Some(msg),
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         M::AgeValveClearedDispatchForTest { .. } => return Some(msg),
         M::Enqueue {
             intervention,

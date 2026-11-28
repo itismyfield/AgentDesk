@@ -1,6 +1,8 @@
+use super::completion_delivery::commit_captured_ready_delivery;
 use super::*;
 #[cfg(unix)]
 use crate::services::cluster::stream_relay::SourceFileIdentity;
+use crate::services::discord::CapturedReadyDeliveryCommit;
 
 #[cfg(unix)]
 #[derive(PartialEq, Eq)]
@@ -354,16 +356,17 @@ async fn settle_captured_ready_delivery(
     snapshot: super::turn_finalizer::SyntheticClaimSnapshot,
     delivery: CapturedRecoveryDelivery,
 ) {
-    let Some(committed) = shared
-        .mailbox(ChannelId::new(state.channel_id))
-        .commit_captured_ready_delivery(CapturedReadyDeliveryCommit {
+    let Some(committed) = commit_captured_ready_delivery(
+        &shared.mailbox(ChannelId::new(state.channel_id)),
+        CapturedReadyDeliveryCommit {
             shared: shared.clone(),
             state: state.clone(),
             actor: actor.cloned(),
             quiet_restart_generation: None,
             delivery,
-        })
-        .await
+        },
+    )
+    .await
     else {
         return;
     };

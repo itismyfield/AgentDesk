@@ -1,4 +1,4 @@
-pub(super) fn is_prompt_too_long_message(text: &str) -> bool {
+pub fn is_prompt_too_long_message(text: &str) -> bool {
     let lower = text.to_lowercase();
     lower.contains("prompt is too long")
         || lower.contains("prompt too long")
@@ -11,29 +11,29 @@ pub(super) fn is_prompt_too_long_message(text: &str) -> bool {
 ///
 /// This type intentionally carries no source text and no terminal authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProviderProseDiagnostic {
+pub enum ProviderProseDiagnostic {
     Authentication,
     Overload,
 }
 
 impl ProviderProseDiagnostic {
-    pub(crate) const COUNT: usize = 2;
+    pub const COUNT: usize = 2;
 
-    pub(crate) const fn index(self) -> usize {
+    pub const fn index(self) -> usize {
         match self {
             Self::Authentication => 0,
             Self::Overload => 1,
         }
     }
 
-    pub(crate) const fn summary(self) -> &'static str {
+    pub const fn summary(self) -> &'static str {
         match self {
             Self::Authentication => "authentication-like provider diagnostic",
             Self::Overload => "overload-like provider diagnostic",
         }
     }
 
-    pub(crate) const fn redacted_content(self) -> &'static str {
+    pub const fn redacted_content(self) -> &'static str {
         match self {
             Self::Authentication => {
                 "Provider emitted authentication-like untyped prose; details redacted."
@@ -43,7 +43,7 @@ impl ProviderProseDiagnostic {
     }
 }
 
-pub(crate) fn classify_provider_prose_diagnostic(text: &str) -> Option<ProviderProseDiagnostic> {
+pub fn classify_provider_prose_diagnostic(text: &str) -> Option<ProviderProseDiagnostic> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return None;
@@ -98,12 +98,12 @@ fn is_overload_like_prose(text: &str) -> bool {
         || lower.contains("please try again later")
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod pure_tests {
-    use super::{ProviderProseDiagnostic, classify_provider_prose_diagnostic};
-
     #[test]
     fn classifies_auth_and_overload_prose_without_retaining_source_text() {
+        use super::{ProviderProseDiagnostic, classify_provider_prose_diagnostic};
+
         assert_eq!(
             classify_provider_prose_diagnostic("refresh token was already used"),
             Some(ProviderProseDiagnostic::Authentication)

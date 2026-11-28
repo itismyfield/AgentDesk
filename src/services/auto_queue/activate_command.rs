@@ -1818,7 +1818,7 @@ mod tests {
         }
 
         async fn set_run_status(pool: &PgPool, status: &str) {
-            crate::services::krx_db_b_tests::status_check_migration::execute_with_status_check_lifted(
+            crate::db::status_check_test_support::execute_with_status_check_lifted(
                 pool,
                 "auto_queue_runs",
                 &format!(

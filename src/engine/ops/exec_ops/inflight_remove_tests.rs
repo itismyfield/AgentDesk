@@ -57,6 +57,7 @@ fn inflight_remove_refuses_receipt_rows_and_never_reports_a_failed_unlink_as_rem
     use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::TempDir::new().expect("temp root");
     let _env = EnvVarOverride::set_path("AGENTDESK_ROOT_DIR", temp.path());
+    crate::services::discord::install_engine_probes();
     let dir = temp.path().join("runtime/discord_inflight/claude");
     std::fs::create_dir_all(&dir).expect("inflight dir");
     let row = |channel: &str, extra: &str| {

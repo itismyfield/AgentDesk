@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 pub(crate) use worker::calendar_loop;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use worker::execute as execute_for_test;
 
 #[derive(Debug, thiserror::Error)]

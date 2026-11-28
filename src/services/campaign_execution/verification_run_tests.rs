@@ -1,14 +1,16 @@
+use super::test_support::{at, environment, input, receipt, result, spec, spec_with_audit};
 use super::*;
-use crate::services::campaign_execution::definition;
-use crate::services::campaign_execution::definition::{PROFILE_VERSION, WORKFLOW_VERSION};
-use crate::services::campaign_execution::model::{Role, SessionIdentity};
-use crate::services::campaign_execution::profile::{Checkout, ResourceKind};
-
-pub(crate) fn at() -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339("2026-10-29T07:00:00Z")
-        .unwrap()
-        .to_utc()
-}
+use crate::services::campaign_execution::{
+    definition::{self, PROFILE_VERSION, WORKFLOW_VERSION},
+    model::{
+        Action, ActionKind, ActionState, AttemptBinding, HostGate, Repository, Role,
+        SessionIdentity, Stage,
+    },
+    profile::{
+        Candidate, EnvironmentComponent, ExecutedTest, ResourceIdentity, ResourceKind, TestOutcome,
+    },
+};
+use std::collections::BTreeMap;
 
 pub(crate) fn gate() -> HostGate {
     HostGate {
@@ -43,50 +45,6 @@ pub(crate) fn binding() -> AttemptBinding {
         candidate_sha: "h0".into(),
         control_version: 1,
     }
-}
-
-fn template(id: &str, kind: PhaseKind, requires: &[&str]) -> PhaseTemplate {
-    PhaseTemplate {
-        id: id.into(),
-        kind,
-        requires: requires.iter().map(|r| r.to_string()).collect(),
-    }
-}
-
-pub(crate) fn spec() -> VerificationSpec {
-    VerificationSpec {
-        version: "adk-v1".into(),
-        repository: Repository::Adk,
-        checks: vec![SpecCheck {
-            id: "lib-tests".into(),
-            kind: CheckKind::Test,
-            required: true,
-            acceptance_ids: vec![],
-            selection: SelectionRule::NonPgClassifier,
-            phases: vec![
-                template("archive", PhaseKind::Archive, &[]),
-                template("list", PhaseKind::List, &["archive"]),
-                template("classify", PhaseKind::Classify, &["list"]),
-                template("plan", PhaseKind::Plan, &["list", "classify"]),
-                template("test", PhaseKind::Test, &["archive", "plan"]),
-            ],
-        }],
-        environment: vec![EnvironmentComponent::Toolchain],
-        command_policy: CommandPolicy {
-            nextest_profile: "ci".into(),
-            no_tests_fail: true,
-            workers: 1,
-        },
-    }
-}
-
-// The full fixed phase set: the audit consumes the test phase's raw result.
-pub(crate) fn spec_with_audit() -> VerificationSpec {
-    let mut spec = spec();
-    spec.checks[0]
-        .phases
-        .push(template("audit", PhaseKind::Audit, &["test"]));
-    spec
 }
 
 pub(crate) fn registration() -> RegistrationInput {
@@ -132,30 +90,6 @@ pub(crate) fn subject() -> BoundSubject {
     }
 }
 
-fn command() -> CommandSpec {
-    CommandSpec {
-        program: "true".into(),
-        argv: vec![],
-        cwd: "/verify".into(),
-        env_identity: BTreeMap::new(),
-    }
-}
-
-pub(crate) fn input(predecessors: &[(&str, Digest)]) -> PhaseInput {
-    PhaseInput {
-        subject_sha: "h1".into(),
-        checkout_path: "/verify".into(),
-        command: command(),
-        predecessors: predecessors
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.clone()))
-            .collect(),
-        preflight: vec![],
-        outputs: vec![],
-        resources: vec![],
-    }
-}
-
 pub(crate) fn authority(
     fence: CurrentFence,
     source: AuthoritySource,
@@ -174,10 +108,6 @@ pub(crate) fn authority(
         run_control_version: fence.run_control_version,
         source,
     }
-}
-
-fn receipt(phase: &str, pid: u32) -> String {
-    format!("{phase}:{pid}:nonce")
 }
 
 fn process(pid: u32) -> ProcessIdentity {
@@ -219,28 +149,6 @@ fn observation(
         outcome,
         evidence: "process table and nonce env read directly".into(),
         observed_at: at(),
-    }
-}
-
-pub(crate) fn result(phase: &str, exit_code: i32, output: PhaseOutput) -> PhaseResult {
-    PhaseResult {
-        receipt: receipt(phase, 7),
-        record: CommandRecord {
-            executable: "true".into(),
-            cwd: "/verify".into(),
-            argv: vec![],
-            env_identity: BTreeMap::new(),
-            phase_id: phase.into(),
-            started_at: at(),
-            finished_at: at(),
-            exit_code: Some(exit_code),
-            signal: None,
-            stdout_ref: format!("/log/{phase}.stdout"),
-            stderr_ref: format!("/log/{phase}.stderr"),
-        },
-        termination: Termination::Exited,
-        artifacts: vec![],
-        output,
     }
 }
 
@@ -368,20 +276,6 @@ fn test_input(run: &VerificationRun) -> PhaseInput {
         });
     }
     input
-}
-
-pub(crate) fn environment() -> ExecutionEnvironment {
-    ExecutionEnvironment {
-        os: "macos".into(),
-        checkout: Checkout {
-            host: "macbook".into(),
-            path: "/verify".into(),
-            observed_sha: "h1".into(),
-            observed_at: at(),
-        },
-        components: vec![],
-        allocations: vec![],
-    }
 }
 
 fn fence() -> CurrentFence {

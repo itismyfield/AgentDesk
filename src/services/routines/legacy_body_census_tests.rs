@@ -1,8 +1,7 @@
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::services::routines::{
-    RoutineDiscordLogger, RoutineScriptLoader, run_due_tick, store::NewRoutine,
-};
+use crate::services::discord::health::routine_ports::build_routine_discord_logger;
+use crate::services::routines::{RoutineScriptLoader, run_due_tick, store::NewRoutine};
 use axum::{
     Router,
     response::IntoResponse,
@@ -66,6 +65,7 @@ async fn server(router: Router) -> (String, Server, std::net::SocketAddr) {
 
 #[tokio::test(flavor = "current_thread")]
 async fn due_census_tick_collects_both_hosts_and_posts_one_verdict_pg() {
+    crate::services::discord::outbound::install_engine_ports();
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
@@ -275,7 +275,7 @@ async fn due_census_tick_collects_both_hosts_and_posts_one_verdict_pg() {
             })
             .await
             .unwrap();
-        let logger = RoutineDiscordLogger::new_with_health_registry(Arc::new(pool.clone()), None);
+        let logger = build_routine_discord_logger(Arc::new(pool.clone()), None);
         let context = session_forwarding::ForwardCallerContext {
             pg_pool: Some(pool.clone()),
             config: Arc::new(config),

@@ -4,7 +4,7 @@ use crate::db::server_campaigns::*;
 use crate::domain::campaign::definition;
 use crate::domain::campaign::definition::DefinitionInput;
 use crate::domain::campaign::model::*;
-use crate::services::campaign_execution::{commands, control::tests as domain};
+use crate::services::campaign_execution::{commands, control::test_support as domain};
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use sqlx::types::Json;

@@ -2,11 +2,12 @@ use crate::db::server_campaigns::evidence_store::*;
 use crate::domain::campaign::evidence::EvidenceDecision;
 use crate::domain::campaign::evidence::EvidenceStatus;
 use crate::services::campaign_execution::{
-    control::tests as domain,
+    control::test_support as domain,
     evidence::EvidenceEnvelope,
     evidence_gate::{
         GATE_RULE_VERSION,
-        tests::{OUTPUT, claim, seal, workspace},
+        test_support::{claim, workspace},
+        tests::{OUTPUT, seal},
     },
 };
 use crate::services::krx_db_tests::server_campaigns_storage::Harness;

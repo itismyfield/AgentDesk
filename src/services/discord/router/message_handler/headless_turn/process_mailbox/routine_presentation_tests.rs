@@ -12,7 +12,7 @@ async fn i8117_actual_bridge_uses_exact_terminal_not_progress_or_preview() {
         let pool = db.connect_and_migrate().await;
         let mut hashes = Vec::new();
         let store = crate::services::routines::RoutineStore::new_with_timezone_and_checkpoint_limit(Arc::new(pool.clone()), "Asia/Seoul", 256*1024);
-        let executor = crate::services::routines::RoutineAgentExecutor::new(Arc::new(pool.clone()), None, 60);
+        let executor = crate::services::discord::health::routine_ports::build_routine_agent_executor(Arc::new(pool.clone()), None, 60);
         for (terminal, quiet, legacy) in [(" NO_reply ", true, false), (" NO_reply ", false, true), ("완료: 인용 NO_REPLY 포함", false, false)] {
             let (fixture, _lease) =
                 Fixture::with_storage(ProviderKind::Claude, USER_MESSAGE, Some(pool.clone())).await;

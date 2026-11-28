@@ -45,9 +45,8 @@ fn decision_source_named_by_a_request_is_self_declared() {
 /// reaches no backend either: the lazy pool below would fail any query.
 #[tokio::test]
 async fn decision_handoff_service_entry_refuses_before_any_backend() {
-    use crate::services::discord::agent_handoff::{
-        AgentHandoffChannelKind, start_agent_handoff_turn,
-    };
+    use crate::domain::agent_handoff::AgentHandoffChannelKind;
+    use crate::services::discord::agent_handoff::start_agent_handoff_turn;
     let registry = crate::services::discord::health::HealthRegistry::new();
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://decision-handoff@127.0.0.1:1/none")

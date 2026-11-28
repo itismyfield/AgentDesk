@@ -1130,7 +1130,7 @@ end
 # Dependency or toolchain changes on main, plus a daily run inside the 7-day cache eviction window.
 trigger = (warm[true] || warm["on"]).then { |value| value.is_a?(Hash) ? value : {} }
 push = trigger["push"].is_a?(Hash) ? trigger["push"] : {}
-warm_paths = ["Cargo.lock", "Cargo.toml", "rust-toolchain.toml", ".cargo/config.toml", ".cargo/config", warm_path]
+warm_paths = ["Cargo.lock", "Cargo.toml", "crates/adk-engine/Cargo.toml", "rust-toolchain.toml", ".cargo/config.toml", ".cargo/config", warm_path]
 errors << "#{warm_path}: triggers must be exactly push, schedule and workflow_dispatch" unless trigger.keys.map(&:to_s).sort == %w[push schedule workflow_dispatch]
 errors << "#{warm_path}: push must run on main only, filtered by paths alone" unless push.keys.sort == %w[branches paths] && push["branches"] == ["main"]
 errors << "#{warm_path}: push paths must be exactly #{warm_paths.inspect}" unless push["paths"] == warm_paths

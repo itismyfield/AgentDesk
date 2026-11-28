@@ -12,7 +12,7 @@ use crate::domain::campaign::{
     model::ReviewedCandidate,
     profile::{Candidate, IntegrationMethod, NodeArtifact, ReviewExtent, ReviewRange},
 };
-use crate::services::campaign_execution::control::{self, tests as domain};
+use crate::services::campaign_execution::control::{self, test_support as domain};
 
 pub(crate) fn sha(c: char) -> String {
     c.to_string().repeat(40)

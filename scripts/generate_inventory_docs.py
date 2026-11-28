@@ -86,6 +86,7 @@ def cfg_requires_test(predicate: str) -> bool:
 
 TOP_LEVEL_MODULE_PURPOSES = {
     "adk_base_lib.rs": "Library root of the `adk-base` workspace crate; builds the seed `domain` value contracts and `utils` pure helpers in place, which the parent re-exports under their old paths.",
+    "adk_engine_lib.rs": "Library root of the `adk-engine` workspace crate, which builds the provider prose and prompt-length diagnostics in place.",
     "adk_runtime_lib.rs": "Library root of the `adk-runtime` workspace crate; builds the runtime modules (config, db, logging, the provider/TUI/session services) in place, which the parent re-exports under their old paths.",
     "adk_test_support_lib.rs": "Library root of the `adk-test-support` workspace crate; builds the `test_support` capped waits, serialized runtimes, lock holder records and source lexer in place for dev-dependencies only, which the parent re-exports under `#[cfg(test)]`.",
     "api_caller_observability.rs": "Request-principal classification and uniform log-only API caller attribution records for identity-consuming mutation paths.",
@@ -105,6 +106,7 @@ TOP_LEVEL_MODULE_PURPOSES = {
     "eventbus.rs": "In-process broadcast event bus (history/replay/batching) shared by the WS server layer and background services without a service→server backflow.",
     "github/": "GitHub sync, issue triage, and Definition-of-Done mirroring.",
     "high_risk_recovery.rs": "PG-only high-risk recovery tests for boot reconciliation and review refire paths.",
+    "ke_assembly_test_host.rs": "Mounts KE assembly tests that use the root Discord registry and runtime fixtures.",
     "ke_routines_tests.rs": "Test-only host that declares KE routine and scheduled-message tests calling root-crate items.",
     "krx_claude_tests.rs": "Test-only host that declares KRX claude tests calling root-crate items, so they leave the KRX crate.",
     "krx_claude_tests/": "Test files moved out of KRX claude modules because they call root-crate items.",

@@ -1,6 +1,11 @@
 use super::*;
-use crate::services::campaign_execution::definition::{WORKFLOW_VERSION, validate_definition};
+use crate::services::campaign_execution::{
+    adk_workspace::WorkspaceObservation,
+    definition::{DefinitionError, WORKFLOW_VERSION, validate_definition},
+};
+use chrono::Utc;
 use serde_json::json;
+use std::collections::BTreeMap;
 
 #[test]
 fn model_preserves_nonempty_fence_ack_and_action_target_for_canonical_json_storage() {

@@ -304,6 +304,7 @@ async fn fixture(
             "actor closing committed before removal"
         );
         assert!(mailbox.has_active_turn().await.unwrap());
+        crate::services::discord::install_engine_probes();
         let rt = rquickjs::Runtime::new().unwrap();
         let ctx = rquickjs::Context::full(&rt).unwrap();
         let remove = || {

@@ -19,7 +19,8 @@ pub(super) fn indeterminate_cases(state: &InflightTurnState) -> Vec<InflightTurn
     changed.turn_start_offset = Some(u64::MAX);
     cases.push(changed);
     let mut changed = state.clone();
-    let mut context = changed.retry_prompt_snapshot().unwrap();
+    let mut context =
+        RetryPromptContext::decode(changed.followup_reply_context.as_deref()).unwrap();
     context.expected_prompt = None;
     changed.followup_reply_context = context.encode();
     cases.push(changed);

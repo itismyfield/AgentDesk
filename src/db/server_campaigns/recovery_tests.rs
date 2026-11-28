@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use crate::db::server_campaigns::*;
 use crate::domain::campaign::model::*;
 use crate::services::campaign_execution::{
-    control::{self, tests as domain},
+    control::{self, test_support as domain},
     view,
 };
 use crate::services::krx_db_tests::server_campaigns_storage::{

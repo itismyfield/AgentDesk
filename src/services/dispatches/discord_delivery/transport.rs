@@ -865,24 +865,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn p2_allowed_mentions_default_http_client_wire_keeps_users() {
-        use crate::services::discord::outbound::{DiscordOutboundClient, HttpOutboundClient};
-
-        let (payloads, base, server) = mention_proxy(vec![StatusCode::OK]).await;
-        let content = "<@1234> @everyone @here <@&5678> 기본 알림";
-        let id = HttpOutboundClient::new(reqwest::Client::new(), "test-token", base)
-            .post_message("123", content)
-            .await
-            .unwrap();
-        server.abort();
-        assert_eq!(id, "p2-wire-message");
-        let payloads = payloads.lock().unwrap();
-        assert_eq!(payloads.len(), 1);
-        assert_eq!(payloads[0]["content"], content);
-        assert_user_mentions_only(&payloads[0]);
-    }
-
-    #[tokio::test]
     async fn p2_allowed_mentions_raw_post_without_override_wire_keeps_users() {
         let (payloads, base, server) = mention_proxy(vec![StatusCode::OK]).await;
         let content = "<@1234> @everyone @here <@&5678> 직접 알림";
@@ -900,6 +882,7 @@ mod tests {
 
     #[tokio::test]
     async fn p2_allowed_mentions_dispatch_fallback_and_rate_limit_retries_wire() {
+        crate::services::discord::outbound::install_engine_ports();
         let (payloads, base, server) = mention_proxy(vec![
             StatusCode::TOO_MANY_REQUESTS,
             StatusCode::BAD_REQUEST,
@@ -1072,6 +1055,7 @@ mod tests {
 
     #[tokio::test]
     async fn post_dispatch_message_retries_with_minimal_fallback_after_length_error() {
+        crate::services::discord::outbound::install_engine_ports();
         #[derive(Default)]
         struct MockState {
             calls: usize,

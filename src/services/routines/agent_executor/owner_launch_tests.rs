@@ -1,14 +1,61 @@
 //! A routine start through the real launch: the run row it plans reaches the owner as the
 //! admitted context, so a persistent routine stays persistent and a fresh one fresh.
 use super::*;
-use crate::services::discord::health::{HealthRegistry, register_bot_auth_for_tests};
+use crate::services::discord::SharedData;
+use crate::services::discord::health::HealthRegistry;
+use crate::services::discord::health::runtime_registry::{
+    RestoreRuntimeRegistry, install_owner_actor,
+};
+#[cfg(unix)]
+use crate::services::discord::shared_data_without_policy_for_tests;
+use crate::services::engine_runtime::health_port::OwnerInputRuntimePort;
+use crate::services::engine_runtime::health_port::owner_input::OwnerInput;
 use crate::services::turn_orchestrator::ChannelMailboxHandle;
+use poise::serenity_prelude::ChannelId;
+use std::cell::Cell;
+
+const CHANNEL: u64 = 7272;
+
+tokio::task_local! { static WAKES: Cell<usize>; }
+
+struct RestoreGeneration;
+
+impl Drop for RestoreGeneration {
+    fn drop(&mut self) {
+        crate::services::discord::runtime_store::set_process_generation_for_tests(None);
+    }
+}
+
+async fn registry_owner(
+    registry: &Arc<HealthRegistry>,
+    pool: &sqlx::PgPool,
+    namespace: &str,
+    wake: fn(&Arc<SharedData>, ChannelId),
+) -> ChannelMailboxHandle {
+    #[cfg(unix)]
+    let shared = shared_data_without_policy_for_tests(registry, Some(pool.clone()), Some(wake));
+    #[cfg(not(unix))]
+    let shared = {
+        let _ = wake;
+        crate::services::discord::health::runtime_registry::publish_runtime_registry(registry);
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()))
+    };
+    registry.register("claude".into(), shared).await;
+    let handle = registry.owner_mailbox("claude", CHANNEL).await.unwrap();
+    let path = crate::services::discord::runtime_store::discord_pending_queue_root()
+        .unwrap()
+        .join(format!("{namespace}.json"));
+    handle.v2_adopt(path, namespace.into()).await.unwrap();
+    handle
+}
 
 /// The context the owner holds for a routine of `strategy` that the launch handed it.
 async fn admitted_context(strategy: &str) -> Value {
     let _root = crate::config::TestRuntimeRootGuard::new();
+    let _restore_registry = RestoreRuntimeRegistry::capture();
+    let _restore_generation = RestoreGeneration;
     settled_generation();
-    let (handle, _) = owner().await;
+    install_owner_actor();
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     sqlx::query("INSERT INTO agents(id,name,provider,discord_channel_cc) VALUES('primary','Primary','claude','7272')")
@@ -16,7 +63,13 @@ async fn admitted_context(strategy: &str) -> Value {
         .await
         .unwrap();
     let registry = Arc::new(HealthRegistry::new());
-    register_bot_auth_for_tests(&registry, "claude", 7272, None, Vec::new(), false).await;
+    let handle = registry_owner(&registry, &pool, "routine-injected", |_, channel| {
+        assert_eq!(channel.get(), CHANNEL);
+        WAKES.with(|count| count.set(count.get() + 1));
+    })
+    .await;
+    let published = Arc::new(HealthRegistry::new());
+    registry_owner(&published, &pool, "routine-published", |_, _| {}).await;
     let store =
         RoutineStore::new_with_timezone_and_checkpoint_limit(Arc::new(pool.clone()), "UTC", 262144);
     store
@@ -44,18 +97,29 @@ async fn admitted_context(strategy: &str) -> Value {
         .execute(&pool)
         .await
         .unwrap();
-    let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), Some(registry), 60);
-    let start = executor.start_agent_run(
-        &store,
-        claimed,
-        "work".into(),
-        None,
-        None,
-        None,
-        None,
-        false,
+    let (_, executor) = crate::server::routine_services::runtime_services(
+        Arc::new(pool.clone()),
+        Some(registry),
+        &crate::config::RoutinesConfig::default(),
     );
-    let result = OWNER.scope(handle.clone(), start).await.unwrap();
+    let (result, wakes) = WAKES
+        .scope(Cell::new(0), async {
+            let result = executor
+                .start_agent_run(
+                    &store,
+                    claimed,
+                    "work".into(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                )
+                .await
+                .unwrap();
+            (result, WAKES.with(Cell::get))
+        })
+        .await;
     assert_eq!(result.status, "running", "{result:?}");
     let run = store
         .list_running_agent_runs(10)
@@ -65,10 +129,16 @@ async fn admitted_context(strategy: &str) -> Value {
         .unwrap();
     let stored = run.result_json.as_ref().unwrap();
     assert_eq!(stored["status"], "accepted", "{stored}");
-    let saved = ChannelMailboxHandle::restore_owner_input(stored["owner_input"].clone()).unwrap();
+    let saved = OwnerInput::restore(stored["owner_input"].clone()).unwrap();
+    assert_eq!(saved.namespace, "routine-injected");
     let original = serde_json::from_value(saved.original.clone()).unwrap();
     let context = handle.v2_admission_context(original, saved.ticket.clone());
     let context = context.await.unwrap().expect("admitted context");
+    assert_eq!(
+        wakes,
+        usize::from(cfg!(unix)),
+        "wakes for the injected mailbox"
+    );
     pool.close().await;
     db.drop().await;
     context

@@ -1,8 +1,8 @@
 use super::*;
-use crate::services::discord::router::response_format::retry_prompt_context::{
-    RetryPromptContext, store,
-};
+use crate::services::discord::router::response_format::retry_prompt_context::{render, store};
 use crate::services::discord::router::turn_start::FormattedSessionRetryContext;
+use crate::services::discord::turn_bridge::retry_prompt_store;
+use crate::services::turn_orchestrator::retry_prompt_codec::RetryPromptContext;
 
 pub(super) struct Prepared {
     pub context: RetryPromptContext,
@@ -31,7 +31,7 @@ pub(super) async fn prepare(
         if context.selected.recovery.is_none() {
             context.selected.recovery = store::peek(
                 shared.pg_pool.as_ref(),
-                &store::key("session_retry_context", provider, channel.get()),
+                &retry_prompt_store::key("session_retry_context", provider, channel.get()),
             );
         }
         if let Some(raw_context) = context.selected.recovery.as_ref() {
@@ -66,7 +66,7 @@ pub(super) async fn prepare(
             context.selected.wip = wip;
         }
     }
-    let rendered = context.render_with(merge_reply_contexts);
+    let rendered = render(&context);
     Prepared {
         context,
         recovery,

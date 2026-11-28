@@ -195,6 +195,23 @@ class FileReferencePolicy(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'canonical mutex'):
             canonical_owners(sources)
 
+    def test_test_support_feature_mount_uses_verified_wrapper(self):
+        self.write("src/services/turn_orchestrator.rs", SUPPORT_DECL.replace(
+            "#[cfg(test)]", '#[cfg(any(test, feature = "test-support"))]\n'))
+        self.check(WRAPPER + WRITE, True)
+
+    def test_unreviewed_test_support_gate_is_unknown_red(self):
+        for gate in ('#[cfg(any(test, feature = "other"))]',
+                     '#[cfg(feature = "test-support")]',
+                     '#[cfg(any(test, feature = "test-support", unix))]'):
+            with self.subTest(gate=gate):
+                self.write("src/services/turn_orchestrator.rs", SUPPORT_DECL.replace(
+                    "#[cfg(test)]", gate))
+                errors, _, _ = audit(self.root)
+                self.assertEqual(errors, [
+                    "UNKNOWN canonical source: test_support must use the reviewed test-only module source",
+                ])
+
     def test_changed_module_path_is_unknown_red(self):
         self.write("src/services/turn_orchestrator.rs", SUPPORT_DECL.replace(
             "test_support_tests.rs", "other.rs"))

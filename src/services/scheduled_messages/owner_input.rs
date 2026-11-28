@@ -1,5 +1,8 @@
 //! Accepted custody preserves the launch barrier; only actual observer evidence may settle it.
 use super::*;
+use crate::services::engine_runtime::health_port::owner_input::{OwnerInput, owner_input_actor};
+use crate::services::engine_runtime::health_port::published_runtime_registry;
+use crate::services::turn_orchestrator::ChannelMailboxHandle;
 use crate::services::turn_orchestrator::{HeadlessTurnStartOutcome, HeadlessTurnStartStatus};
 
 #[derive(Debug)]
@@ -104,16 +107,16 @@ pub(super) async fn may_observe(
         return Ok(true);
     };
     let stored: serde_json::Value = serde_json::from_str(raw)?;
-    use crate::services::turn_orchestrator::ChannelMailboxHandle;
-    let input = ChannelMailboxHandle::restore_owner_input(stored)?;
+    let input = OwnerInput::restore(stored)?;
     if input.context["delivery_id"] != delivery.delivery_id
         || input.context["turn_id"].as_str() != delivery.turn_id.as_deref()
     {
         anyhow::bail!("scheduled owner delivery/turn mismatch");
     }
     let handle = owner(&input.provider, input.channel).await?;
-    if let Some(reason) = input
-        .start_rejection(&handle)
+    let actor = owner_input_actor();
+    if let Some(reason) = actor
+        .start_rejection(&input, &handle)
         .await
         .map_err(anyhow::Error::msg)?
     {
@@ -122,10 +125,10 @@ pub(super) async fn may_observe(
         #[cfg(any(test, feature = "test-support"))]
         let pool = match &test {
             Some((pool, _)) => pool.clone(),
-            None => input.runtime_pool().await.map_err(anyhow::Error::msg)?,
+            None => runtime_pool(&input).await.map_err(anyhow::Error::msg)?,
         };
         #[cfg(not(any(test, feature = "test-support")))]
-        let pool = input.runtime_pool().await.map_err(anyhow::Error::msg)?;
+        let pool = runtime_pool(&input).await.map_err(anyhow::Error::msg)?;
         let delivery = delivery.clone();
         // The poller's transaction already holds this row; close after it releases its locks.
         tokio::spawn(async move {
@@ -142,40 +145,44 @@ pub(super) async fn may_observe(
     }
     // The observer connects to the owner's exact attempt first; a failed projection is
     // repaired under the same ticket on the next poll.
-    if let Some((attempt, source)) = input
-        .unbound_attempt(&handle)
+    if let Some(exact) = actor
+        .unbound_attempt(&input, &handle)
         .await
         .map_err(anyhow::Error::msg)?
     {
-        bind_observer(connection, delivery, &handle, &attempt, source).await?;
+        bind_observer(connection, delivery, &handle, &exact.attempt, exact.turn).await?;
         return Ok(false);
     }
-    let bound = input
-        .may_observe(&handle, started.is_none())
+    let bound = actor
+        .may_observe(&input, &handle, started.is_none())
         .await
         .map_err(anyhow::Error::msg)?;
     Ok(bound && started.is_some_and(|started| delivery.started_at >= started))
 }
 
 /// The owner an intent names: a test's injected mailbox, else the live runtime's.
-async fn owner(
-    provider: &str,
-    channel: u64,
-) -> anyhow::Result<crate::services::turn_orchestrator::ChannelMailboxHandle> {
+async fn owner(provider: &str, channel: u64) -> anyhow::Result<ChannelMailboxHandle> {
     #[cfg(any(test, feature = "test-support"))]
     if let Ok(handle) = OWNER.try_with(Clone::clone) {
         return Ok(handle);
     }
-    let registry = crate::engine::ops::turn_ops::health_registry()
+    let registry = published_runtime_registry()
         .ok_or_else(|| anyhow::anyhow!("scheduled owner unavailable"))?;
-    let mailbox = crate::services::turn_orchestrator::ChannelMailboxHandle::owner_input_mailbox;
-    mailbox(&registry, provider, channel)
+    registry
+        .owner_mailbox(provider, channel)
         .await
         .map_err(anyhow::Error::msg)
 }
 
+async fn runtime_pool(input: &OwnerInput) -> Result<PgPool, String> {
+    let registry = published_runtime_registry().ok_or("owner registry unavailable")?;
+    registry
+        .owner_runtime_pool(&input.provider, input.channel)
+        .await
+}
+
 #[cfg(any(test, feature = "test-support"))]
-tokio::task_local! { pub(crate) static OWNER: crate::services::turn_orchestrator::ChannelMailboxHandle; }
+tokio::task_local! { pub(crate) static OWNER: ChannelMailboxHandle; }
 
 /// The owner's start of a scheduled turn after the launch fence, keeping its metadata, hint and
 /// label; `None` leaves an unowned channel to the legacy start.
@@ -189,13 +196,16 @@ pub(super) async fn owned(
         (Option<&str>, Option<&str>),
     ),
 ) -> anyhow::Result<Option<AgentTurnStartDisposition>> {
-    use crate::services::turn_orchestrator::ChannelMailboxHandle;
     let Ok(handle) = owner(provider.as_str(), channel).await else {
         return Ok(None);
     };
-    let execution = ChannelMailboxHandle::owner_input_execution(provider.as_str(), channel, false);
-    let owned = handle
-        .owned_start(execution, (turn_id, channel, prompt))
+    let owned = owner_input_actor()
+        .owned_start(
+            &handle,
+            provider.as_str(),
+            false,
+            (turn_id, channel, prompt),
+        )
         .await;
     let Some((original, namespace)) = owned.map_err(anyhow::Error::msg)? else {
         return Ok(None);
@@ -213,9 +223,9 @@ pub(super) async fn owned(
     let started = started.await?;
     // The owner runs an accepted start once its drive looks at the queue.
     if let (AgentTurnStartDisposition::Accepted, Some(registry)) =
-        (&started, crate::engine::ops::turn_ops::health_registry())
+        (&started, published_runtime_registry())
     {
-        ChannelMailboxHandle::owner_input_wake(&registry, provider.as_str(), channel).await;
+        registry.wake_owner(provider.as_str(), channel).await;
     }
     Ok(Some(started))
 }
@@ -223,7 +233,7 @@ pub(super) async fn owned(
 pub(crate) async fn start_owned(
     pool: &PgPool,
     fire: &ClaimedFire,
-    handle: &crate::services::turn_orchestrator::ChannelMailboxHandle,
+    handle: &ChannelMailboxHandle,
     turn_id: &str,
     (original, namespace, context): (
         crate::services::turn_orchestrator::PendingQueueItem,
@@ -231,7 +241,6 @@ pub(crate) async fn start_owned(
         serde_json::Value,
     ),
 ) -> anyhow::Result<AgentTurnStartDisposition> {
-    use crate::services::turn_orchestrator::ChannelMailboxHandle;
     let provider = context["provider"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("missing scheduled provider"))?;
@@ -248,7 +257,7 @@ pub(crate) async fn start_owned(
     {
         serde_json::from_str(raw)?
     } else {
-        ChannelMailboxHandle::new_owner_input(&original, &namespace, provider, context.clone())
+        OwnerInput::new(&original, &namespace, provider, context.clone())
     };
     let encoded = format!("owner-input:{}", serde_json::to_string(&input)?);
     let mut committed_input = input.clone();
@@ -259,7 +268,7 @@ pub(crate) async fn start_owned(
     if updated.rows_affected() != 1 {
         anyhow::bail!("scheduled owner intent lost claim fence");
     }
-    let disposition = match input.confirm_admission(handle).await {
+    let disposition = match owner_input_actor().confirm_admission(&input, handle).await {
         Ok(true) => AgentTurnStartDisposition::Accepted,
         Ok(false) => AgentTurnStartDisposition::Pending,
         Err(reason) => {
@@ -297,11 +306,10 @@ pub(crate) async fn start_owned(
 pub(crate) async fn bind_observer(
     connection: &mut sqlx::PgConnection,
     delivery: &RunningAgentDelivery,
-    handle: &crate::services::turn_orchestrator::ChannelMailboxHandle,
+    handle: &ChannelMailboxHandle,
     attempt: &str,
     source: Option<serde_json::Value>,
 ) -> anyhow::Result<bool> {
-    use crate::services::turn_orchestrator::ChannelMailboxHandle;
     let mut tx = sqlx::Connection::begin(connection).await?;
     if !db::lock_active_delivery_tx(
         &mut tx,
@@ -318,7 +326,7 @@ pub(crate) async fn bind_observer(
     let raw = error
         .strip_prefix("owner-input:")
         .ok_or_else(|| anyhow::anyhow!("owner intent missing"))?;
-    let mut input = ChannelMailboxHandle::restore_owner_input(serde_json::from_str(raw)?)?;
+    let mut input = OwnerInput::restore(serde_json::from_str(raw)?)?;
     let turn_id = delivery
         .turn_id
         .as_deref()
@@ -326,8 +334,8 @@ pub(crate) async fn bind_observer(
     if input.context["delivery_id"] != delivery.delivery_id {
         anyhow::bail!("stale scheduled observer");
     }
-    input
-        .bind_observer(handle, attempt, source, turn_id)
+    owner_input_actor()
+        .bind_observer(&mut input, handle, attempt, source, turn_id)
         .await
         .map_err(anyhow::Error::msg)?;
     let encoded = format!("owner-input:{}", serde_json::to_string(&input)?);

@@ -9,6 +9,7 @@ on:
     paths:
       - Cargo.lock
       - Cargo.toml
+      - crates/adk-engine/Cargo.toml
       - rust-toolchain.toml
       - .cargo/config.toml
       - .cargo/config

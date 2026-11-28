@@ -1,5 +1,6 @@
 //! Canonical replay holds admit captured result delivery, while retaining the request episode.
 
+use super::super::completion_delivery::commit_captured_ready_delivery;
 use super::*;
 
 pub(super) fn hold_agy_imessage(state: &inflight::InflightTurnState) -> bool {
@@ -158,16 +159,17 @@ pub(super) async fn deliver_held_debt_checked(
     let text = super::super::formatting::format_for_discord_with_provider(response, provider);
     let delivery =
         relay_captured_recovery_terminal_notice(http, shared, provider, state, &text).await;
-    let committed = shared
-        .mailbox(channel_id)
-        .commit_captured_ready_delivery(CapturedReadyDeliveryCommit {
+    let committed = commit_captured_ready_delivery(
+        &shared.mailbox(channel_id),
+        CapturedReadyDeliveryCommit {
             shared: shared.clone(),
             state: state.clone(),
             actor: owner.cancel_token,
             quiet_restart_generation: None,
             delivery,
-        })
-        .await;
+        },
+    )
+    .await;
     if committed.is_some() {
         ReplayDebtDelivery::Acknowledged
     } else {

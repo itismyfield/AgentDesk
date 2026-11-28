@@ -3,7 +3,6 @@ use std::time::Instant;
 use poise::serenity_prelude::MessageId;
 
 use super::*;
-use crate::services::discord::CapturedReadyDeliveryCommit;
 
 #[derive(Clone, Debug)]
 pub(super) enum TurnNonceGuard {
@@ -36,19 +35,6 @@ pub(super) fn turn_nonce_guard_matches(
 }
 
 impl ChannelMailboxHandle {
-    pub(crate) async fn commit_captured_ready_delivery(
-        &self,
-        commit: CapturedReadyDeliveryCommit,
-    ) -> Option<CapturedReadyDeliveryCommit> {
-        self.request(|reply| ChannelMailboxMsg::CommitCapturedReadyDelivery {
-            commit: Box::new(commit),
-            reply,
-        })
-        .await
-        .unwrap_or(None)
-        .map(|committed| *committed)
-    }
-
     /// One policy close on this actor incarnation only; a lost send and a lost reply stay
     /// apart, and neither is retried on another actor.
     pub(crate) async fn commit_policy_close(

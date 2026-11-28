@@ -254,8 +254,8 @@ impl Owner {
         }
         Ok(())
     }
-    #[cfg(test)]
-    pub(crate) fn bind_source(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn bind_source(
         &mut self,
         key: &super::AttemptRef,
         source: &crate::services::tui_input::human_frame::history::v2::Source,

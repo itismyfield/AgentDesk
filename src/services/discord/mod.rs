@@ -111,6 +111,8 @@ pub(crate) use receipt_settle::settle_v2_drops;
 pub(crate) mod restart_report;
 mod router;
 mod runtime_bootstrap;
+#[cfg(all(test, unix))]
+pub(crate) use runtime_bootstrap::shared_data_without_policy_for_tests;
 pub(crate) use runtime_bootstrap::{GatewayReleaseError, request_gateway_release};
 pub(in crate::services::discord) mod semantic_boundaries;
 mod skills_scan;
@@ -173,11 +175,12 @@ pub(crate) use test_fixtures::resume_owner_channel_for_tests;
 #[cfg(all(test, unix))]
 pub(crate) use test_fixtures::revoke_notice_author_for_test;
 
-mod tmux_error_detect;
+#[cfg(unix)]
+use adk_engine::services::discord::tmux_error_detect;
 mod turn_completion_events;
 mod turn_end_summary;
 pub(in crate::services::discord) mod turn_end_wip_warning;
-pub(crate) use tmux_error_detect::{ProviderProseDiagnostic, classify_provider_prose_diagnostic};
+
 mod live_bridge;
 #[cfg(unix)]
 mod tmux_lifecycle;

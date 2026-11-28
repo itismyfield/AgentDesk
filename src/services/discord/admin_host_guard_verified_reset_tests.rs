@@ -101,6 +101,28 @@ pub(crate) async fn accepted_queue_len(shared: &SharedData, channel: ChannelId) 
         .len()
 }
 
+pub(crate) async fn use_codex_settings_for_reset(shared: &SharedData) {
+    shared.settings.write().await.provider = ProviderKind::Codex;
+}
+
+pub(crate) fn mark_verified_reset_pending(shared: &SharedData, channel: ChannelId) {
+    shared.overrides.session_reset_pending.insert(channel);
+    shared
+        .overrides
+        .codex_goals_session_reset_pending
+        .insert(channel);
+}
+
+pub(crate) fn assert_verified_reset_pending(shared: &SharedData, channel: ChannelId) {
+    assert!(shared.overrides.session_reset_pending.contains(&channel));
+    assert!(
+        shared
+            .overrides
+            .codex_goals_session_reset_pending
+            .contains(&channel)
+    );
+}
+
 pub(crate) async fn seed_reset_race_session(
     shared: &SharedData,
     channel: ChannelId,
@@ -234,7 +256,7 @@ impl Fixture {
         Arc<CancelToken>,
     ) {
         let shared = make_shared_data_for_tests();
-        shared.settings.write().await.provider = ProviderKind::Codex;
+        use_codex_settings_for_reset(&shared).await;
         shared.core.lock().await.sessions.insert(
             self.channel,
             super::super::DiscordSession {

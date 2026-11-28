@@ -300,6 +300,8 @@ pub fn run_from_args() -> Result<()> {
 include!("config/runtime_root_guard/test_process.rs");
 
 #[cfg(test)]
+mod ke_assembly_test_host;
+#[cfg(test)]
 mod ke_routines_tests;
 #[cfg(test)]
 mod krx_claude_tests;
@@ -334,6 +336,8 @@ pub mod campaign_adapter {
     pub use crate::db::server_campaigns::evidence_store;
     pub use crate::domain::campaign::lifecycle::{HoldReason, NextAction, StepKey};
     pub use crate::domain::campaign::{pipeline, pipeline_fields};
+    #[cfg(any(test, feature = "test-support"))]
+    pub use crate::services::campaign_execution::stage_fsm;
     pub use crate::services::campaign_execution::{
         adk_adapter, adk_observe, adk_profile, adk_resources, adk_workspace, candidate_seal,
         ci_exception, deploy_observe, effect_envelope, evidence, evidence_gate, execution_pin,

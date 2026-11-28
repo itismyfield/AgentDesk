@@ -1,7 +1,7 @@
 //! A deferred process run keeps its durable execution mode across executor config changes.
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::discord::health::HealthRegistry;
-use crate::services::routines::agent_executor::RoutineAgentExecutor;
+use crate::services::discord::health::routine_ports::build_routine_agent_executor;
 use crate::services::routines::store::{NewRoutine, RoutineStore};
 use chrono::{Duration, Utc};
 use serde_json::Value;
@@ -38,7 +38,7 @@ async fn deferred_process_run_keeps_mode_after_executor_config_changes_pg() {
     let claimed = store.claim_run_now(&routine.id).await.unwrap().unwrap();
     let run_id = claimed.run_id.clone();
     let registry = Arc::new(HealthRegistry::new());
-    let enabled = RoutineAgentExecutor::new(Arc::new(pool.clone()), Some(registry.clone()), 60)
+    let enabled = build_routine_agent_executor(Arc::new(pool.clone()), Some(registry.clone()), 60)
         .with_headless_fresh_agents(true);
     let outcome = enabled
         .start_agent_run(&store, claimed, "run".into(), None, None, None, None, false)
@@ -53,7 +53,7 @@ async fn deferred_process_run_keeps_mode_after_executor_config_changes_pg() {
     .execute(&pool)
     .await
     .unwrap();
-    let disabled = RoutineAgentExecutor::new(Arc::new(pool.clone()), Some(registry), 60);
+    let disabled = build_routine_agent_executor(Arc::new(pool.clone()), Some(registry), 60);
     let outcomes = disabled.poll_agent_runs(&store, 10, false).await.unwrap();
     assert_eq!(outcomes.len(), 1);
     assert_eq!(outcomes[0].status, "deferred");

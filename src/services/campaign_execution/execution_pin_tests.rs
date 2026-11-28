@@ -1,4 +1,9 @@
 use super::*;
+use crate::services::campaign_execution::{
+    definition::{DefinitionHashes, WORKFLOW_VERSION},
+    model::Repository,
+};
+use chrono::{DateTime, Utc};
 
 fn at() -> DateTime<Utc> {
     DateTime::parse_from_rfc3339("2026-10-29T10:00:00Z")

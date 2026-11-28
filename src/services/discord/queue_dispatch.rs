@@ -11,6 +11,19 @@ pub(super) mod kickoff;
 #[cfg(test)]
 pub(in crate::services::discord) mod input_effect_tests;
 
+#[cfg(all(feature = "test-support", not(test)))]
+const _: fn() = || {
+    use crate::services::discord::busy_followup_retry_store::sweep_test_support as s;
+    let with_root: fn(fn()) = s::with_root;
+    let _ = (
+        s::legacy,
+        with_root,
+        s::save_in_root,
+        s::load_in_root,
+        s::sweep_expired_in_root_at,
+    );
+};
+
 type DispatchLeaseHandle = Arc<crate::services::turn_orchestrator::DispatchLease>;
 
 /// A confirmed active queued execution releases queue custody UI without restarting its turn view.

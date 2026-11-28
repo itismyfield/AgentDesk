@@ -13,7 +13,7 @@ use tokio::sync::Mutex;
 
 pub(crate) mod account;
 pub(crate) mod calendar;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_support;
 mod token_store;
 #[cfg(test)]
@@ -139,7 +139,7 @@ pub struct KakaoClient {
     client_secret: Option<String>,
     tokens: Mutex<TokenState>,
     store: Option<token_store::TokenStore>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     test_origin: Option<String>,
 }
 
@@ -195,7 +195,7 @@ impl KakaoClient {
                 persistence_failed: false,
             }),
             store,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             test_origin: None,
         })
     }
@@ -346,7 +346,7 @@ impl KakaoClient {
     }
 
     fn endpoint(&self, url: &'static str) -> String {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(origin) = &self.test_origin {
             let parsed = reqwest::Url::parse(url).expect("fixed Kakao URL");
             return format!("{}{}", origin, parsed.path());

@@ -62,8 +62,6 @@ impl HttpOutbound {
         intent: OutboundIntent,
         summary: Option<String>,
     ) -> DeliveryResult {
-        #[cfg(test)]
-        crate::services::discord::outbound::install_engine_ports();
         match PORT.get() {
             Some(port) => (port.deliver)(self.clone(), intent, summary).await,
             None => DeliveryResult::PermanentFailure {
