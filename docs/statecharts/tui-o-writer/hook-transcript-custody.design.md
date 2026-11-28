@@ -72,10 +72,12 @@ cursor에 넣지 않는 이유: launch 경로가 launch fence를 쥔 채 writer�
 | # | 진입점 | 언제 | 종료 근거 |
 |---|---|---|---|
 | E1 | Herdr launch: `herdr_launch.rs:492-498` (main `:494-500`). 이미 있는 `takeover_ended` 호출 자리, owner port `herdr_launch/owner_port.rs:20` → `discord/herdr_owner_port.rs:9` | fence 획득(`:455-459`)과 row 읽기(`:460`) 뒤, 후속 Pending이 row를 덮기(`:548-550`, main `:552`) 전 | row가 `Retired`. launch는 `Retired`·`Legacy`가 아니면 `Occupied`로 거절한다(`:508-509`) |
-| E2 | tmux launch: `claude/tui_session_launch.rs:106-124` (fence 획득 `:106`, 옛 marker 삭제 `:122-124` 사이) | create/respawn(`:156-168`) 전 | owner가 비었음: tmux 세션 없음, 또는 pane이 죽음. 판정은 `discord/commands/control/clear_teardown/clear_end_record.rs:133-138`의 `vacant`와 같은 읽기 |
+| E2 | tmux launch: `claude/tui_session_launch.rs:106-124` (fence 획득 `:106`, 옛 marker 삭제 `:122-124` 사이) | create/respawn(`:156-168`) 전 | owner가 비었음: tmux 세션이 없거나(`clear_end_record.rs:133-138`의 `vacant`와 같은 읽기), respawn이 받아들이는 dead pane(`platform/tmux.rs:200-216`) |
 | E3 | legacy wrapper launch: `claude.rs:2600-2608` | 옛 marker 삭제(`:2605-2608`) 전 | E2와 같음 |
 | E4 | 살아 있는 runtime의 종료 확인: native port의 `retry` (`D/native_supply.rs:648-685`), writer poll이 매번 부른다(`W/rotation/owe.rs:579`, `W/actor.rs:441-444`) | outcome 없는 keyed boot input이 있고 그 target의 종료 기록이 없을 때 | Herdr: 현재 hosted row가 그 nonce이고 `execution_end`가 `Ended`(`D/native_terminal.rs:101-137`)이거나 row가 `Retired`. tmux: P5의 owner 최신 Bound가 그 nonce이고 owner가 비었음 |
 
+- 기록할 옛 실행이 없으면(owner의 Bound가 없음) 아무것도 쓰지 않고 진행한다.
+- tmux 근거(빈 owner)는 그 nonce가 tmux에서 돈 실행일 때만 쓴다. 채널의 hosted row가 그 nonce를 가리키면 Herdr에서 돈 실행이므로 Herdr 근거(`Retired` 또는 `execution_end`)만 받는다. Herdr에서 tmux로 돌아오는 launch(`claude/herdr_return.rs:60-99`)에서 tmux owner는 처음부터 비어 있어서, 빈 owner만 보면 살아 있는 Herdr 실행을 끝난 것으로 적게 된다.
 - E1~E3은 기록이 durable하게 써지지 않으면 launch를 거절한다. Herdr launch가 retired hold를 확인하고 실패하면 멈추는 것과 같은 방식이다(`herdr_launch.rs:499-502`).
 - E4는 `RuntimeHintFence::try_acquire`(기다리지 않음, `tmux_common/runtime_hint_fence.rs:345-348`)를 잡고 "현재 실행이 아직 N1인지 → 종료 판독 → stat → 기록" 순서로 한다. fence가 바쁘면 그 poll은 건너뛴다.
 - 어느 진입점도 marker가 없다는 사실만으로 종료를 쓰지 않는다. tmux launch는 create가 실패해도 옛 marker를 지운 채 끝날 수 있어서(`tmux_common.rs:1243-1272`), marker 부재는 종료 증명이 아니다. `EndWithoutProof` 변형이 이 지름길을 `EndProofOwned`로 잡는다.
@@ -132,6 +134,7 @@ outcome이 없는 keyed boot input T에 대해 아래가 모두 성립하면 T�
 - `end_proof`는 E의 식별 필드와 확정 시점의 원본 범위(`through`, prefix hash) 또는 파일 운명을 담는다. `validate_record`(`D/native_restore.rs:585-673`)에 `end_proof` 분기를 더해 target 일치, disposition, `any_key`를 검사한다.
 - `TransferredUnverified`는 새 disposition이 아니다(`H/v2/native.rs:99-107`). 이미 `TerminalOutcome::Failed`로 매핑된다(`D/terminal_handler.rs:548-560`).
 - 대상은 boot input뿐이다. 살아 있는 actor가 있는 live input은 기존 제어 경로가 맡는다(`D/native_policy.rs:23-38`).
+- 구동하는 곳은 둘이다. 원본 범위가 확정된 건은 writer의 offer 순회가 scoped 관측과 같은 자리에서 요청한다. 파일이 Gone·Replaced·Changed인 건은 writer가 그 source를 읽을 수 없으므로 native port의 `retry`(`D/native_supply.rs:648-685`)가 관측 없이 요청한다. 둘 다 같은 CAS로 끝난다.
 - 다른 key·channel·namespace의 ticket은 조건 1에서 걸러진다. `AnyTarget` 변형이 `ExactTarget`을 깬다.
 
 ### 2.5 파일 운명과 PendingRead의 끝
@@ -399,6 +402,7 @@ fixture는 먼저 writer와 native history가 둘 다 새 dev를 본다는 것�
 ## 7. 남은 위험
 
 - **Herdr endpoint가 돌아오지 않는 경우.** Herdr N1의 종료는 pane 판독 또는 `Retired` row로만 증명한다. 재부팅 뒤 Herdr 서버가 끝내 뜨지 않고 기존 server-replaced·restart 복구도 row를 `Retired`로 만들지 못하면 종료 기록이 생기지 않고 그 채널 gate는 닫힌 채다. 증명 없이 여는 대안은 `EndProofOwned`를 깬다. 모델은 "host 판독이 결국 답한다"를 공정성으로 가정했다.
+- **실행의 host 구분.** tmux 근거와 Herdr 근거를 가르는 기준을 "채널 hosted row가 그 nonce를 가리키는가"로 적었다. ticket target 안에서 host를 직접 가르는 필드가 있는지는 확인하지 못했다. s3-a에서 실행 context와 대조해 정한다.
 - **`Retired` 근거의 표본 확인.** `Retired`를 쓰는 8곳 가운데 `root_replaced`와 `herdr_server_replaced`는 판독 내용을 호출 이름과 주변 코드로만 확인했다. s3-a 구현 전에 두 곳의 종료 판독을 끝까지 읽어야 한다.
 - **`end_len`을 재지 못한 종료 기록.** 파일이 그 시점에 없거나 inode가 다르면 `end_len`이 빈다. 그 뒤 파일이 온전하게 돌아와도 원본 범위는 N2 시작 시점에서 멈추고, 그 뒤의 closer는 귀속되지 않는다. 이때의 턴은 결과 없이 정산된다.
 - **`Gone` 판정.** 부모 디렉터리가 있고 파일만 없으면 확정으로 본다. 파일이 나중에 같은 path로 돌아오는 환경에서는 completion 기록을 잃는다. 돌아온 파일의 출처를 증명할 방법이 없어서 기다리지 않기로 했다.
