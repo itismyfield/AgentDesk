@@ -11,6 +11,8 @@ use crate::services::discord::outbound::body_census::{BodyOffer, BodySource};
 use crate::services::tui_o::cutover::{
     BodyClaim, BodySend, BodySite, IdentityError, claim_then_send_at,
 };
+use crate::services::turn_orchestrator::captured_ready_delivery::CapturedReadyDeliveryWrite;
+use tokio::sync::oneshot;
 
 pub(super) const RECOVERY_NEUTRAL_NOTICE: &str = "ℹ️ 이전 실행은 종료됐거나 입력 가능한 상태지만, 이전 요청의 완료 여부는 확인하지 못했습니다. 요청을 자동으로 다시 실행하지는 않았습니다.";
 
@@ -48,16 +50,8 @@ pub(crate) struct CapturedReadyDeliveryCommit {
 }
 
 impl CapturedReadyDeliveryCommit {
-    /// The channel actor executes this synchronously, so recovery kickoff cannot
-    /// replace the actor between its comparison, fallback bind and terminal save.
-    pub(crate) fn commit(mut self, current: Option<&Arc<CancelToken>>) -> Option<Self> {
-        if !match (self.actor.as_ref(), current) {
-            (Some(expected), Some(current)) => Arc::ptr_eq(expected, current),
-            (None, None) => true,
-            _ => false,
-        } {
-            return None;
-        }
+    /// Runs in the actor step that checked the token.
+    fn commit(mut self, current: Option<&Arc<CancelToken>>) -> Option<Self> {
         if let Some(generation) = self.quiet_restart_generation {
             self.state = super::restore_inflight::adopt_quiet_drain_restart(
                 &self.state,
@@ -98,6 +92,35 @@ impl CapturedReadyDeliveryCommit {
         ) && self.state.terminal_delivery_completed())
         .then_some(self)
     }
+}
+
+struct CapturedDeliveryWrite {
+    payload: CapturedReadyDeliveryCommit,
+    reply: oneshot::Sender<Box<CapturedReadyDeliveryCommit>>,
+}
+
+impl CapturedReadyDeliveryWrite for CapturedDeliveryWrite {
+    fn expected_actor(&self) -> Option<&Arc<CancelToken>> {
+        self.payload.actor.as_ref()
+    }
+
+    fn commit(self: Box<Self>, current: Option<&Arc<CancelToken>>) {
+        let Self { payload, reply } = *self;
+        if let Some(committed) = payload.commit(current) {
+            let _ = reply.send(Box::new(committed));
+        }
+    }
+}
+
+pub(super) async fn commit_captured_ready_delivery(
+    mailbox: &ChannelMailboxHandle,
+    payload: CapturedReadyDeliveryCommit,
+) -> Option<CapturedReadyDeliveryCommit> {
+    let (reply, answer) = oneshot::channel();
+    mailbox
+        .enqueue_captured_ready_delivery(Box::new(CapturedDeliveryWrite { payload, reply }))
+        .ok()?;
+    answer.await.ok().map(|committed| *committed)
 }
 
 impl From<RecoveryRelayOutcome> for CapturedRecoveryDelivery {
