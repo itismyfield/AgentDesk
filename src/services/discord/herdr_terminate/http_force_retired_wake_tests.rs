@@ -57,6 +57,7 @@ async fn wakes(rig: &herdr::P11TerminationRig, clear: bool) -> (usize, usize) {
                 });
                 assert_eq!(cleared.await, Ok(()));
             }
+            NoopPostlude
         }
         .boxed()
     })

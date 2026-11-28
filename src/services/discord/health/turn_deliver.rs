@@ -2,7 +2,7 @@
 //! the input on the channel mailbox with the reason it could not start.
 
 pub(crate) mod decision_target;
-mod inject;
+pub(in crate::services) mod inject;
 #[cfg(all(test, unix))]
 mod inject_codex_tests;
 #[cfg(all(test, unix))]

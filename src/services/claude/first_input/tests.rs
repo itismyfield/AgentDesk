@@ -2,6 +2,8 @@
 use crate::services::claude::first_input::*;
 use crate::services::claude_tui::guarded_outcome::SubmissionError;
 use crate::services::claude_tui::input::submission::tests::{frame_renderer, screen};
+use crate::services::discord::health::turn_deliver::inject::first_input::pg_tests::v2_cold_fixture;
+use crate::services::discord::health::turn_deliver::inject::first_input::v2_cold_bootstrap;
 use crate::services::provider::CancelToken;
 use crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture;
 
@@ -30,12 +32,15 @@ fn cold_claude_submit_returns_before_missing_source_and_keeps_payload_once() {
     let _entered = runtime.enter();
     let registry = crate::services::turn_orchestrator::ChannelMailboxRegistry::default();
     let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(727395));
-    runtime.block_on(mailbox.v2_cold_fixture(f.root.path().join("cold-owner.json"),serde_json::json!({"nonce":"claude-cold-scope","provider":"claude","target":{"host":"tmux","owner":name,"root":owner_root,"execution_nonce":nonce},"source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}}),prompt.into(),727395)).unwrap();
+    runtime.block_on(v2_cold_fixture(&mailbox, f.root.path().join("cold-owner.json"),serde_json::json!({"nonce":"claude-cold-scope","provider":"claude","target":{"host":"tmux","owner":name,"root":owner_root,"execution_nonce":nonce},"source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}}),prompt.into(),727395)).unwrap();
     session_started(name, nonce, &transcript, "not-created");
     let transcript_for_submit = transcript.display().to_string();
     let (_, outcome) = runtime
-        .block_on(
-            mailbox.v2_cold_bootstrap(1, std::sync::Arc::new(|| 10000), move |frame| {
+        .block_on(v2_cold_bootstrap(
+            &mailbox,
+            1,
+            std::sync::Arc::new(|| 10000),
+            move |frame| {
                 assert!(
                     crate::services::tui_input::human_frame::history::v2::scoped_source().is_some(),
                     "actual Claude submit requires exact source scope"
@@ -45,8 +50,8 @@ fn cold_claude_submit_returns_before_missing_source_and_keeps_payload_once() {
                     "actual Claude submit requires owner scope"
                 );
                 submit(&transcript_for_submit, 0, None, name, &frame).map_err(|e| format!("{e:?}"))
-            }),
-        )
+            },
+        ))
         .unwrap();
     let owner_snapshot = runtime
         .block_on(mailbox.v2_request(|s| s.as_ref().unwrap().json()))

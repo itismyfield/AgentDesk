@@ -65,7 +65,7 @@ mod placeholder_live_events;
 mod placeholder_sweeper;
 pub(crate) mod prompt_builder;
 mod queue_dispatch;
-mod queue_io;
+pub(crate) mod queue_io;
 mod queue_marker;
 mod queue_overflow_dlq;
 mod queue_reactions;
