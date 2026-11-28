@@ -3863,6 +3863,7 @@ src/
 │   │   │   │   ├── recovery_markers.rs
 │   │   │   │   ├── restore.rs
 │   │   │   │   ├── restore_core.rs
+│   │   │   │   ├── restore_hook_test_support.rs
 │   │   │   │   ├── restore_legacy_tests.rs
 │   │   │   │   ├── restore_mapping.rs
 │   │   │   │   ├── restore_retry.rs
@@ -3872,7 +3873,8 @@ src/
 │   │   │   │   ├── tests.rs
 │   │   │   │   ├── watch_host.rs
 │   │   │   │   ├── watch_host_tests.rs
-│   │   │   │   └── watcher_install_fixture_tests.rs
+│   │   │   │   ├── watcher_install_fixture_tests.rs
+│   │   │   │   └── watcher_install_process_test_support.rs
 │   │   │   ├── codex_tui_restore.rs
 │   │   │   ├── dispatched_origin_ghost.rs
 │   │   │   ├── dispatched_origin_ghost_tests.rs
@@ -3911,6 +3913,8 @@ src/
 │   │   ├── dispatch_policy.rs
 │   │   ├── dl_herdr_terminate_test_host.rs
 │   │   ├── dl_herdr_terminate_unix_test_host.rs
+│   │   ├── dl_tmux_watcher_test_host.rs
+│   │   ├── dl_tmux_watcher_unix_test_host.rs
 │   │   ├── dl_turn_bridge_test_host.rs
 │   │   ├── dl_turn_bridge_unix_test_host.rs
 │   │   ├── dl_turn_finalizer_test_host.rs
