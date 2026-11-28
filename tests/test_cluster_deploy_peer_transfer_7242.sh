@@ -87,6 +87,10 @@ export FAKE_SIGNATURE="${PEER_SIGNATURE:-ok}"
 case "$remote" in
     *'bash scripts/deploy-release.sh'*)
         [ "${LAUNCH_FAIL:-0}" != 1 ] || exit 255
+        if [ -n "${EXPECTED_PEER_FALLBACK:-}" ] \
+            && [[ "$remote" != *" AGENTDESK_DEPLOY_PEER_BUILD_FALLBACK=$EXPECTED_PEER_FALLBACK "* ]]; then
+            exit 2
+        fi
         export FAKE_MACOS="${PEER_RUNTIME_MACOS:-$FAKE_MACOS}" BUILD_NODE=build
         ;;
     *_cleanup_peer_binary*) echo remote-cleanup >>"$TRACE" ;;
@@ -220,14 +224,17 @@ REL_LAUNCHD_ENV_FILE="$WORK/release-env-fixture"
 _self_hosted_release_session() { return 1; }
 _acquire_release_deploy_lock() { :; }
 _resolve_release_server_port() { echo 1; }
-_release_config_path() { echo "$ADK_REL/fixture-config.yml"; }
+_release_config_path() { printf '%s\n' "${AGENTDESK_CONFIG:-$ADK_REL/fixture-config.yml}"; }
 wait_for_release_runtime_boot() { :; }
 curl() { return 1; }
 _check_repo_remote_freshness() { :; }
 _schema_order_guard_before_build() { :; }
 setup_sccache_env() { return 1; }
 _ensure_dashboard_dependencies() { echo dependencies >>"$TRACE"; }
-_resolve_default_release_binary() { echo "$WORK/built"; }
+_resolve_default_release_binary() {
+    [ -z "${AGENTDESK_CONFIG:-}" ] || return 1
+    echo "$WORK/built"
+}
 _cleanup_owned_pg_tunnel_preflight() { :; }
 _rollback_pg_tunnel_migration() { :; }
 _preflight_builder_pids() { :; }
@@ -341,10 +348,12 @@ run_case() (
     local scenario=$1
     export PEER_ARCH=arm64 PEER_RUSTC=1.92.0 PEER_MACOS=15.6 PEER_SIGNATURE=ok
     export TRANSFER_FAIL=0 CORRUPT="" LAUNCH_FAIL=0
-    unset PEER_RUNTIME_MACOS PEER_RUNTIME_HEAD
+    unset PEER_RUNTIME_MACOS PEER_RUNTIME_HEAD EXPECTED_PEER_FALLBACK
     unset AGENTDESK_DEPLOY_BINARY AGENTDESK_DEPLOY_PEER_ARTIFACT_DIR
     case "$scenario" in
         success|codesign-verbosity|stages|concurrency|detach|leader-staged|leader-live|unavailable) ;;
+        default-success) export EXPECTED_PEER_FALLBACK=0 ;;
+        fallback-value-not-one) export CORRUPT=hash EXPECTED_PEER_FALLBACK=true ;;
         no-fallback) export CORRUPT=hash ;;
         no-fallback-old-checkout) export OLD_PEER_CHECKOUT=1 ;;
         no-fallback-unavailable) ;;
@@ -360,11 +369,11 @@ run_case() (
         transfer) export TRANSFER_FAIL=1 ;;
         *) fail "unknown case $scenario" ;;
     esac
-    if [[ "$scenario" == no-fallback* ]]; then
-        unset AGENTDESK_DEPLOY_PEER_BUILD_FALLBACK
-    else
-        export AGENTDESK_DEPLOY_PEER_BUILD_FALLBACK=1
-    fi
+    case "$scenario" in
+        default-success|no-fallback*) unset AGENTDESK_DEPLOY_PEER_BUILD_FALLBACK ;;
+        fallback-value-not-one) export AGENTDESK_DEPLOY_PEER_BUILD_FALLBACK=true ;;
+        *) export AGENTDESK_DEPLOY_PEER_BUILD_FALLBACK=1 ;;
+    esac
     export AGENTDESK_DEPLOY_TEST_MODE=1
     : >"$TRACE"
     cp "$WORK/good-binary" "$WORK/leader/bin/signed"
@@ -437,7 +446,7 @@ PROBE
             _deploy_to_one_peer peer >"$WORK/$scenario.log" 2>&1 || deploy_rc=$?
             ;;
     esac
-    if [[ "$scenario" == no-fallback* ]]; then
+    if [[ "$scenario" == no-fallback* || "$scenario" = fallback-value-not-one ]]; then
         local reason='verification failed: SHA256'
         case "$scenario" in
             no-fallback-unavailable) reason='artifact unavailable' ;;
@@ -471,7 +480,8 @@ PROBE
     grep -qx activate "$TRACE" || fail "$scenario did not activate"
     grep -qx peer-smoke "$TRACE" || fail "$scenario skipped peer smoke"
     grep -qx peer-health "$TRACE" || fail "$scenario skipped peer health"
-    if [ "$scenario" = success ] || [ "$scenario" = codesign-verbosity ] || [ "$scenario" = stages ] || [ "$scenario" = witness-mismatch ] || [[ "$scenario" == leader-* ]]; then
+    if [[ "$scenario" == success || "$scenario" == default-success || "$scenario" == codesign-verbosity \
+        || "$scenario" == stages || "$scenario" == witness-mismatch || "$scenario" == leader-* ]]; then
         grep -qx transfer "$TRACE" || fail "$scenario did not transfer"
         ! grep -qx build "$TRACE" || fail "$scenario rebuilt on peer"
         cmp -s "$WORK/good-binary" "$PEER_ROOT/bin/agentdesk" || fail "$scenario activated different bytes"
@@ -527,7 +537,7 @@ PY
 )
 
 run_entry_case() (
-    local scenario=$1 rc=0 expected_rc=1 reason='load average'
+    local scenario=$1 rc=0 expected_rc=1 reason='load average' expected_builds=0
     local source="$WORK/leader/bin/agentdesk" deployed="$WORK/leader/runtime/release-source.json"
     local stdout="$WORK/$scenario.log" expected_leg=""
     local -a args=()
@@ -536,7 +546,7 @@ run_entry_case() (
     export AGENTDESK_ROOT_DIR="$WORK/leader" AGENTDESK_REPO_DIR="$WORK/repo"
     export FAKE_RELEASE_DB_ROUTE=shell
     export AGENTDESK_DEPLOY_PEERS=peer FAKE_LOAD=9 FAKE_PENDING='[]'
-    unset AGENTDESK_DEPLOY_BINARY AGENTDESK_DEPLOY_PEER_ARTIFACT_DIR AGENTDESK_DEPLOY_TARGET_SHA
+    unset AGENTDESK_CONFIG AGENTDESK_DEPLOY_BINARY AGENTDESK_DEPLOY_PEER_ARTIFACT_DIR AGENTDESK_DEPLOY_TARGET_SHA
     unset AGENTDESK_DEPLOY_PEER_INVOCATION AGENTDESK_DEPLOY_ALL_NODES AGENTDESK_DEPLOY_PEER_BUILD_FALLBACK
     : >"$TRACE"
     mkdir -p "$WORK/leader/"{dashboard/dist,runtime}
@@ -581,6 +591,31 @@ PYMANIFEST
             export FAKE_LOAD=1
             printf 'cluster:\n  enabled: true\n  role: runner\n' >"$WORK/leader/fixture-config.yml"
             reason='Deploy from the primary or provide AGENTDESK_DEPLOY_BINARY'
+            ;;
+        release-env-*|standalone-source)
+            export FAKE_LOAD=1 AGENTDESK_DEPLOY_SKIP_BUILD_CACHE_CLEANUP=1
+            local selected_config="$WORK/selected-config.yml"
+            rm -f "$WORK/leader/fixture-config.yml" "$selected_config"
+            printf 'AGENTDESK_CONFIG=%s\n' "$selected_config" >"$WORK/release-env-fixture"
+            case "$scenario" in
+                release-env-runner)
+                    printf 'cluster: {enabled: true, role: runner}\n' >"$selected_config"
+                    reason='Deploy from the primary or provide AGENTDESK_DEPLOY_BINARY'
+                    ;;
+                release-env-hub)
+                    printf 'cluster: {enabled: true, role: runner}\n' >"$WORK/leader/fixture-config.yml"
+                    printf 'cluster: {enabled: true, role: hub}\n' >"$selected_config"
+                    expected_rc=0; expected_builds=1; reason='Building release binary'
+                    ;;
+                release-env-missing)
+                    reason='Cannot determine the cluster role'
+                    ;;
+                standalone-source)
+                    rm -f "$WORK/release-env-fixture"
+                    expected_rc=0; expected_builds=1; reason='Building release binary'
+                    ;;
+                *) fail "unknown entry case $scenario" ;;
+            esac
             ;;
         peers-only*)
             export FAKE_LOAD=1
@@ -628,9 +663,13 @@ PYMANIFEST
             grep -qx restart "$TRACE" || fail "$scenario did not reach activation"
             ! grep -qx dependencies "$TRACE" || fail "$scenario installed dashboard dependencies"
             ;;
+        release-env-hub|standalone-source)
+            grep -qx restart "$TRACE" || fail "$scenario did not reach activation"
+            ;;
         *) ! grep -Ex 'stage|restart' "$TRACE" || fail "$scenario reached local staging or restart" ;;
     esac
-    ! grep -Ex 'build|dashboard-build' "$TRACE" || fail "$scenario unexpectedly built"
+    [ "$(grep -cx build "$TRACE" || true)" = "$expected_builds" ] || fail "$scenario expected $expected_builds source builds"
+    ! grep -qx dashboard-build "$TRACE" || fail "$scenario unexpectedly built the dashboard"
     if [ -n "$expected_leg" ]; then
         [ "$(grep '^peer-leg ' "$TRACE")" = "$expected_leg" ] || fail "$scenario did not run exactly one peer stage with the deployed profile"
     else
@@ -641,7 +680,7 @@ PYMANIFEST
 
 run_scenario() {
     case "$1" in
-        high-load-*|direct-peer|peers-only*) run_entry_case "$1" ;;
+        high-load-*|direct-peer|release-env-*|standalone-source|peers-only*) run_entry_case "$1" ;;
         *) run_case "$1" ;;
     esac
 }
@@ -652,7 +691,8 @@ else
     count=0
     for scenario in success codesign-verbosity hash arch transfer stages size signature execute runtime toolchain os format source profile signature-meta optimized-hash concurrency detach leader-staged leader-live witness-mismatch unavailable launch-fail peer-platform head-target \
         high-load-install high-load-source high-load-dashboard no-fallback no-fallback-unavailable no-fallback-old-checkout \
-        direct-peer peers-only peers-only-fast peers-only-wrong-head peers-only-migration peers-only-checksum \
+        default-success fallback-value-not-one direct-peer release-env-runner release-env-hub release-env-missing standalone-source \
+        peers-only peers-only-fast peers-only-wrong-head peers-only-migration peers-only-checksum \
         peers-only-bad-signature peers-only-no-source; do
         run_scenario "$scenario"
         count=$((count + 1))
