@@ -1,49 +1,66 @@
 -------------------------- MODULE CatchUpFrontier --------------------------
-\* One V2-queue channel's inputs in message order and the durable catch-up cursor.
-\* Merge picks how the scan reads the V2 file: "main" holds every V2 id as queued,
-\* "fixed" lets a delivered (terminal) id pass, "pendingpass" also passes queued ids.
+\* Source ids in one V2 snapshot in Discord message order.
 EXTENDS Naturals
 CONSTANTS N, Merge
-VARIABLES st, cursor
-vars == <<st, cursor>>
+VARIABLES st, cursor, reinjected
+vars == <<st, cursor, reinjected>>
 Inputs == 1..N
-\* queued: V2 items; attempt: V2 head injection (dispatched, not settled);
-\* retained: V2 retained input (owed); settled: V2 terminal identity;
-\* lost: dropped before dispatch, so no source holds it and the scan must recover it.
-States == {"queued", "attempt", "retained", "settled", "lost"}
 
-\* May the frontier pass this id? Retained and attempted ids stay V2-held as queued in every mode.
-Pass(i) == CASE Merge = "main" -> FALSE
-           [] Merge = "fixed" -> st[i] = "settled"
-           [] Merge = "pendingpass" -> st[i] \in {"settled", "queued"}
+\* A cleared unsent record still reads as owed. A cleared unconfirmed record does not.
+ClosedRetention == {"toldUnsent", "toldUnconfirmed", "clearedUnconfirmed"}
+OwedRetention == {"unsent", "unconfirmed", "clearedUnsent"}
+States == {"queued", "attempt", "settled", "lost"} \cup ClosedRetention \cup OwedRetention
+Finished(i) == st[i] = "settled" \/ st[i] \in ClosedRetention
 
-\* Longest run of passing ids right after the cursor; the scan stops at the first Open id.
+Arm(i) ==
+    CASE st[i] = "lost" -> "Unknown"
+      [] Merge = "main" -> "Queued"
+      [] st[i] = "settled" -> "V2Delivered"
+      [] st[i] \in ClosedRetention ->
+          CASE Merge = "before" -> "Queued"
+            [] Merge = "filteronly" -> "Unknown"
+            [] OTHER -> "V2Delivered"
+      [] Merge = "pendingpass" /\ st[i] = "queued" -> "V2Delivered"
+      [] OTHER -> "Queued"
+
+\* An unknown eligible original within the age window is recoverable.
+Pass(i) == Arm(i) = "V2Delivered"
 RECURSIVE Frontier(_)
 Frontier(k) == IF k < N /\ Pass(k + 1) THEN Frontier(k + 1) ELSE k
 
-Init == st = [i \in Inputs |-> "queued"] /\ cursor = 0
+Init == st = [i \in Inputs |-> "queued"] /\ cursor = 0 /\ reinjected = {}
+Change(i, state) == st' = [st EXCEPT ![i] = state] /\ UNCHANGED <<cursor, reinjected>>
+Dispatch(i) == st[i] = "queued" /\ Change(i, "attempt")
+Deliver(i) == st[i] \in ({"attempt"} \cup OwedRetention \cup ClosedRetention)
+              /\ Change(i, "settled")
+Unconfirm(i) == st[i] = "attempt" /\ Change(i, "unconfirmed")
+RetainUnsent(i) == st[i] \in {"queued", "attempt"} /\ Change(i, "unsent")
+Requeue(i) == st[i] = "unsent" /\ Change(i, "queued")
+Drop(i) == st[i] = "queued" /\ Change(i, "lost")
+Tell(i) == \/ st[i] = "unconfirmed" /\ Change(i, "toldUnconfirmed")
+           \/ st[i] = "unsent" /\ Change(i, "toldUnsent")
+Clear(i) == \/ st[i] \in {"unconfirmed", "toldUnconfirmed"} /\ Change(i, "clearedUnconfirmed")
+            \/ st[i] \in {"unsent", "toldUnsent"} /\ Change(i, "clearedUnsent")
 
-Dispatch(i) == st[i] = "queued" /\ st' = [st EXCEPT ![i] = "attempt"] /\ UNCHANGED cursor
-Deliver(i) == st[i] \in {"attempt", "retained"} /\ st' = [st EXCEPT ![i] = "settled"] /\ UNCHANGED cursor
-Unconfirm(i) == st[i] = "attempt" /\ st' = [st EXCEPT ![i] = "retained"] /\ UNCHANGED cursor
-Requeue(i) == st[i] = "retained" /\ st' = [st EXCEPT ![i] = "queued"] /\ UNCHANGED cursor
-Drop(i) == st[i] = "queued" /\ st' = [st EXCEPT ![i] = "lost"] /\ UNCHANGED cursor
-
-\* Phase 1 scan: a lost id after the cursor is recovered (queued again), and the cursor moves
-\* to the end of the contiguous passing run.
 Scan ==
     /\ cursor' = Frontier(cursor)
     /\ st' = [i \in Inputs |-> IF i > cursor /\ st[i] = "lost" THEN "queued" ELSE st[i]]
+    /\ reinjected' = reinjected \cup {i \in Inputs : i > cursor /\ st[i] \in ClosedRetention
+                                                        /\ Arm(i) = "Unknown"}
     /\ vars' # vars
 
-Done == (\A i \in Inputs : st[i] = "settled") /\ UNCHANGED vars
-
-Input == \E i \in Inputs : Dispatch(i) \/ Deliver(i) \/ Unconfirm(i) \/ Requeue(i) \/ Drop(i)
+Done == (\A i \in Inputs : Finished(i) \/ st[i] = "clearedUnsent") /\ UNCHANGED vars
+Input == \E i \in Inputs : Dispatch(i) \/ Deliver(i) \/ Unconfirm(i) \/ RetainUnsent(i)
+                           \/ Requeue(i) \/ Drop(i) \/ Tell(i) \/ Clear(i)
 Next == Input \/ Scan \/ Done
 Spec == Init /\ [][Next]_vars /\ WF_vars(Scan)
 
-\* The cursor never sits past an input that is not delivered.
-NoUndeliveredBehindCursor == \A i \in 1..cursor : st[i] = "settled"
-\* Once every input is delivered the cursor reaches the newest one.
-DeliveredInputsAdvanceCursor == (\A i \in Inputs : st[i] = "settled") ~> (cursor = N)
+\* Clear can change a previously passed told-unsent record into a cleared one.
+NoUndeliveredBehindCursor == \A i \in 1..cursor : Finished(i) \/ st[i] = "clearedUnsent"
+ClosedRetentionDoesNotSeal == \A i \in Inputs : st[i] \in ClosedRetention => Pass(i)
+NoClosedRetentionReinjection == reinjected = {}
+OwedRetentionStaysOpen == \A i \in Inputs : st[i] \in OwedRetention => Arm(i) = "Queued"
+
+DeliveredInputsAdvanceCursor ==
+    \A k \in Inputs : ([] (\A i \in 1..k : Finished(i))) ~> (cursor >= k)
 =============================================================================
