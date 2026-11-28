@@ -318,3 +318,24 @@ pub(crate) async fn runtime_state(shared: &SharedData, channel_id: ChannelId) ->
     let mailbox = (snapshot.active_user_message_id, cancelled);
     format!("{:?}", (mailbox, active, watcher, session, bytes))
 }
+
+/// A claude runtime on `pool` whose registry also holds a second claude bot hashed `other`.
+#[cfg(unix)]
+pub(crate) async fn with_second_bot(
+    pool: &PgPool,
+    other: &str,
+) -> (Arc<SharedData>, Arc<HealthRegistry>) {
+    let mut shared = shared_on(pool).await;
+    let registry = Arc::new(HealthRegistry::new());
+    let own = Arc::get_mut(&mut shared).expect("an unshared runtime");
+    own.health_registry = (&registry).into();
+    let mut second = crate::services::discord::make_shared_data_for_tests();
+    Arc::get_mut(&mut second)
+        .expect("an unshared runtime")
+        .token_hash = other.to_string();
+    registry
+        .register("claude".to_string(), shared.clone())
+        .await;
+    registry.register("claude".to_string(), second).await;
+    (shared, registry)
+}

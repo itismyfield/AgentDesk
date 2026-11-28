@@ -2,16 +2,13 @@
 
 use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;
-use std::sync::Arc;
 
 use poise::serenity_prelude::ChannelId;
 use sqlx::PgPool;
 
 use crate::db::dispatched_sessions::hosted_execution::test_support::{owner, pending, wire};
-use crate::services::discord::health::HealthRegistry;
-use crate::services::discord::host_teardown_gate::test_support::{
-    Stored, channel_key, seed, shared_on,
-};
+pub(crate) use crate::services::discord::host_teardown_gate::test_support::with_second_bot;
+use crate::services::discord::host_teardown_gate::test_support::{Stored, seed};
 use crate::services::discord::{DiscordSession, SharedData, inflight};
 use crate::services::provider::ProviderKind;
 
@@ -66,26 +63,6 @@ pub(crate) async fn postgres() -> (crate::db::auto_queue::test_support::TestPost
 
 pub(in crate::services::discord) fn isolated_runtime_root() -> crate::config::TestRuntimeRootGuard {
     crate::config::TestRuntimeRootGuard::new()
-}
-
-/// A claude runtime on `pool` whose registry also holds a second claude bot hashed `other`.
-pub(crate) async fn with_second_bot(
-    pool: &PgPool,
-    other: &str,
-) -> (Arc<SharedData>, Arc<HealthRegistry>) {
-    let mut shared = shared_on(pool).await;
-    let registry = Arc::new(HealthRegistry::new());
-    let own = Arc::get_mut(&mut shared).expect("an unshared runtime");
-    own.health_registry = (&registry).into();
-    let mut second = crate::services::discord::make_shared_data_for_tests();
-    Arc::get_mut(&mut second)
-        .expect("an unshared runtime")
-        .token_hash = other.to_string();
-    registry
-        .register("claude".to_string(), shared.clone())
-        .await;
-    registry.register("claude".to_string(), second).await;
-    (shared, registry)
 }
 
 /// Maps `channel` to `channel_name` in the runtime's session table.
