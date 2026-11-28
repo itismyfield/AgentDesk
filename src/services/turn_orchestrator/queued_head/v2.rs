@@ -672,6 +672,8 @@ pub(super) fn front_holds(items: &[PendingQueueItem], input: &InputAttempt) -> b
 #[cfg(all(test, unix))]
 #[path = "v2/owner_tests.rs"]
 mod tests;
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(super) mod retry_wait_test_support;
 // Unit fixtures adopt real owner files, which need a confirmed parent directory fsync.
 #[cfg(all(test, unix))]
 #[path = "v2/retry_wait_tests.rs"]

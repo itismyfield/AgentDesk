@@ -426,7 +426,7 @@ pub(super) fn abandon(
         channel,
         "injection handback abandoned; its order reservation ends"
     );
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     super::test_support::note_injection_abandon(channel_id);
 }
 

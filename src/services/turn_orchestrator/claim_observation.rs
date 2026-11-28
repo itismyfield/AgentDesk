@@ -191,7 +191,7 @@ impl ChannelMailboxState {
 
 impl ChannelMailboxHandle {
     /// Live-intake enqueue (no CAS); production goes through the registry.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn enqueue(
         &self,
         intervention: Intervention,

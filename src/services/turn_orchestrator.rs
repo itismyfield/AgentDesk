@@ -130,7 +130,7 @@ pub(crate) use queued_head::HandoffHeld;
 pub(crate) use queued_head::PreKeyPin;
 #[cfg(unix)]
 pub(crate) use queued_head::RetryWaitCause;
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) use queued_head::assert_original_and_ticket_kept;
 pub(crate) use queued_head::effort_intent;
 #[cfg(unix)]
@@ -621,7 +621,7 @@ impl ChannelMailboxHandle {
     /// Returns `token: None` when the active turn's `user_message_id`
     /// does not match `expected_user_message_id` (or no active turn
     /// exists at all).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn cancel_active_turn_if_user_message_with_reason(
         &self,
         expected_user_message_id: MessageId,
@@ -1020,7 +1020,7 @@ impl ChannelMailboxHandle {
             .await;
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn hydrate_pending_queue_from_disk(
         &self,
         persistence: QueuePersistenceContext,
@@ -1083,7 +1083,7 @@ impl ChannelMailboxHandle {
             .await;
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn age_valve_cleared_dispatch_for_test(&self, age: Duration) {
         let _ = self
             .request(|reply| ChannelMailboxMsg::AgeValveClearedDispatchForTest { age, reply })
@@ -1303,7 +1303,7 @@ enum ChannelMailboxMsg {
     /// #2374 Codex round-1 fix (HIGH-1) — identity-guarded cancel by
     /// active `user_message_id`. See
     /// `ChannelMailboxHandle::cancel_active_turn_if_user_message_with_reason`.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     CancelActiveTurnIfUserMessageWithReason {
         expected_user_message_id: MessageId,
         reason: String,
@@ -1510,7 +1510,7 @@ enum ChannelMailboxMsg {
         age: Duration,
         reply: oneshot::Sender<()>,
     },
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     AgeValveClearedDispatchForTest {
         age: Duration,
         reply: oneshot::Sender<()>,
@@ -1902,7 +1902,7 @@ fn input_mailbox_step(
             let token = matching_cancel_token(&state, &expected_token);
             let _ = reply.send(StopCancel::decide(token, reason));
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         ChannelMailboxMsg::CancelActiveTurnIfUserMessageWithReason {
             expected_user_message_id,
             reason,
@@ -2636,7 +2636,7 @@ fn input_mailbox_step(
             }
             let _ = reply.send(());
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         ChannelMailboxMsg::AgeValveClearedDispatchForTest { age, reply } => {
             if let Some((message_id, _)) = state.recently_valve_cleared_dispatch {
                 state.recently_valve_cleared_dispatch = Some((message_id, Instant::now() - age));
@@ -2660,7 +2660,7 @@ fn input_mailbox_step(
 // test in module B (e.g. `purge_queue_tests`) relied on → spurious failures.
 // All env-touching test modules below now share THIS one lock, so any two such
 // tests are mutually exclusive regardless of which module they live in.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "turn_orchestrator/test_support_tests.rs"]
 pub(crate) mod test_support;
 

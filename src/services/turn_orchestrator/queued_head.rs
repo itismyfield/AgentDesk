@@ -97,8 +97,8 @@ pub(crate) use v2::claude_handoff::Held as HandoffHeld;
 pub(super) use v2::clear::clear_channel as clear_v2_channel;
 pub(crate) use v2::decision::Held as DecisionHeld;
 pub(crate) use v2::origin::{Waiting, waiting_origin};
-#[cfg(all(test, unix))]
-pub(crate) use v2::retry_wait_tests::assert_original_and_ticket_kept;
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub use v2::retry_wait_test_support::assert_original_and_ticket_kept;
 pub(crate) use v2::routine_settlement::Disposition as RoutineInputSettlement;
 pub(crate) use v2::source_admission::TurnBind;
 pub(crate) use v2::source_admission::restart_seed::{

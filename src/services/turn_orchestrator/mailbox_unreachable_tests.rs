@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use super::actor_hydrate_regression_tests::make_intervention;
+use super::test_support::closed_handle;
 use super::{
     ChannelMailboxHandle, ChannelMailboxRegistry, EnqueueRefusalReason, GLOBAL_CHANNEL_MAILBOXES,
     MailboxUnreachable, QueuePersistenceContext, RecoveryDoneSignal, save_channel_queue,
@@ -13,15 +14,6 @@ use poise::serenity_prelude::ChannelId;
 
 #[cfg(unix)]
 mod health_barrier_tests;
-
-pub(crate) fn closed_handle() -> ChannelMailboxHandle {
-    let (sender, receiver) = mpsc::unbounded_channel();
-    drop(receiver);
-    ChannelMailboxHandle {
-        sender,
-        recovery_done: Arc::new(RecoveryDoneSignal::new()),
-    }
-}
 
 impl ChannelMailboxRegistry {
     pub(crate) fn queued_for_test(message_id: u64) -> super::Intervention {
