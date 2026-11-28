@@ -213,13 +213,13 @@ function createAgentdeskMock(options) {
       state.registeredPolicies.push(policy);
     },
     db: {
-      query(sql, params) {
+      query(sql, params, reserveMs) {
         state.queries.push({ sql, params: params || [] });
-        return clone(dbQuery(sql, params || [], state));
+        return clone(dbQuery(sql, params || [], state, reserveMs));
       },
-      execute(sql, params) {
+      execute(sql, params, reserveMs) {
         state.executions.push({ sql, params: params || [] });
-        return dbExecute(sql, params || [], state);
+        return dbExecute(sql, params || [], state, reserveMs);
       }
     },
     exec(cmd, args, execOptions) {

@@ -127,7 +127,8 @@ fn invoke_localhost_get(url: &str) -> String {
         Err(message) => return format!(r#"{{"error":"{}"}}"#, escape_for_json(&message)),
     };
     std::thread::spawn(move || {
-        match loopback_http_request_inner(&parsed, "", || Instant::now() + timeout, "GET") {
+        match loopback_http_request_inner(&parsed, "", || Instant::now() + timeout, "GET", || true)
+        {
             Ok(body) => body,
             Err(error) => format!(r#"{{"error":"{}"}}"#, escape_for_json(&error.message())),
         }
@@ -169,7 +170,7 @@ fn loopback_http_post_inner(
     body: &str,
     timeout: std::time::Duration,
 ) -> Result<String, String> {
-    loopback_http_request_inner(url, body, || Instant::now() + timeout, "POST")
+    loopback_http_request_inner(url, body, || Instant::now() + timeout, "POST", || true)
         .map_err(HttpFailure::message)
 }
 
@@ -358,7 +359,7 @@ fn ureq_localhost_post(url: &str, body: &str, timeout: std::time::Duration) -> S
 
 #[cfg(test)]
 mod tests {
-    use super::loopback::{HttpFailure, connect_first_reachable};
+    use super::loopback::connect_first_reachable;
     use super::*;
     use std::io::{Read, Write};
     use std::time::{Duration, Instant};
@@ -716,11 +717,11 @@ mod tests {
         let deadline = Instant::now()
             .checked_sub(Duration::from_millis(5))
             .unwrap();
-        let stream = connect_first_reachable(&[good], deadline);
-        assert!(
-            matches!(&stream, Err(HttpFailure::Deadline(message)) if message == "connect deadline exceeded"),
-            "a passed deadline must stop the walk, got {:?}",
-            stream.map(|_| ())
+        assert_eq!(
+            connect_first_reachable(&[good], deadline)
+                .unwrap_err()
+                .message(),
+            "connect deadline exceeded"
         );
     }
 

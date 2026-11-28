@@ -117,7 +117,7 @@ test("idle-kill advances past a repeatedly timed-out POST and rechecks it on the
     dbQuery(sql, params) { return readPage(rows, sql, params); },
     httpPost(url) {
       if (url.includes("-slow/")) {
-        return { error: "read response: Resource temporarily unavailable (os error 35)", deadline_exceeded: true };
+        return { error: "read response: Resource temporarily unavailable (os error 35)", deadline_exceeded: true, request_started: true };
       }
       return { ok: true, tmux_was_alive: true, tmux_killed: true };
     }
@@ -138,6 +138,70 @@ test("idle-kill advances past a repeatedly timed-out POST and rechecks it on the
   ]);
   assert.equal(state.logs.error.length, 0);
 });
+
+test("idle-kill retries the unsent candidate first on the next tick", () => {
+  const rows = orderedRows([idleRow("first"), idleRow("deferred"), idleRow("later")]);
+  let actualPosts = [];
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    config: { server_port: 8791 },
+    dbQuery(sql, params) { return readPage(rows, sql, params); },
+    httpPost(url) {
+      const key = decodeURIComponent(url.split("/").at(-2));
+      if (key === rows[1].session_key && actualPosts.length) {
+        return { error: "work cutoff before send", deadline_exceeded: true, request_started: false };
+      }
+      actualPosts.push(key);
+      return { ok: true, skipped_provider_activity_guard: true };
+    }
+  });
+
+  for (let cycle = 0; cycle < 3; cycle++) {
+    actualPosts = [];
+    policy.onTick5min({});
+    assert.deepEqual(actualPosts, [rows[0].session_key]);
+    actualPosts = [];
+    policy.onTick5min({});
+    assert.deepEqual(actualPosts, [rows[1].session_key, rows[2].session_key]);
+  }
+  assert.equal(state.logs.warn.filter((line) => line.includes("deadline reached")).length, 3);
+  assert.equal(state.logs.error.length, 0);
+});
+
+for (const phase of ["agents", "owners", "page", "auxiliary"]) {
+  test(`idle-kill settles the ${phase} DB deadline and resumes on the next tick`, () => {
+    const rows = orderedRows([
+      { ...idleRow("lookup"), active_dispatch_id: "fixture-dispatch" },
+      idleRow("ready")
+    ]);
+    let delayed = false;
+    const { policy, state } = loadPolicy("policies/timeouts.js", {
+      config: { server_port: 8791 },
+      dbQuery(sql, params, _state, reserveMs) {
+        const stage = sql.includes("FROM agents") ? "agents"
+          : sql.startsWith("SELECT DISTINCT s.instance_id") ? "owners"
+          : sql.includes("idle_cursor_at") ? "page"
+          : sql.startsWith("SELECT to_agent_id FROM task_dispatches") ? "auxiliary" : null;
+        if (reserveMs === 200 && stage === phase && !delayed) {
+          delayed = true;
+          throw Object.assign(new Error("work cutoff"), { deadline_exceeded: true });
+        }
+        return readPage(rows, sql, params);
+      },
+      httpPost() { return { ok: true, tmux_was_alive: true, tmux_killed: true }; }
+    });
+    const targets = () => state.httpPosts.map(({ url }) => decodeURIComponent(url.split("/").at(-2)));
+    const summaries = () => state.logs.warn.filter((line) => line.includes("deadline reached"));
+
+    policy.onTick5min({});
+    assert.equal(delayed, true);
+    assert.equal(summaries().length, 1);
+    assert.deepEqual(targets(), phase === "auxiliary" ? [rows[0].session_key] : []);
+    policy.onTick5min({});
+    assert.deepEqual(targets(), rows.map(({ session_key }) => session_key));
+    assert.equal(summaries().length, 1);
+    assert.equal(state.logs.error.length, 0);
+  });
+}
 
 test("idle-kill caps supported candidates at 50 across read pages", () => {
   const rows = orderedRows(Array.from({ length: 120 }, (_, index) => idleRow(String(index))));

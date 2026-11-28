@@ -1,5 +1,11 @@
 use sqlx::PgPool;
-use std::{any::Any, future::Future, pin::Pin, time::Duration};
+use std::{
+    any::Any,
+    future::Future,
+    pin::Pin,
+    sync::mpsc,
+    time::{Duration, Instant},
+};
 
 fn panic_payload_to_string(payload: &(dyn Any + Send + 'static)) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {
@@ -213,6 +219,82 @@ where
             "tokio bridge thread panicked: {}",
             panic_payload_to_string(payload.as_ref())
         ))),
+    }
+}
+
+pub enum PgWorkError {
+    Deadline,
+    Other(String),
+}
+
+pub fn block_on_pg_result_before<F, T>(
+    pool: &PgPool,
+    reserve: Duration,
+    future_factory: impl FnOnce(PgPool) -> F + Send + 'static,
+) -> Result<T, PgWorkError>
+where
+    F: Future<Output = Result<T, String>> + Send + 'static,
+    T: Send + 'static,
+{
+    let deadline = match super::bridge_deadline::work_deadline(reserve) {
+        Some(deadline) if Instant::now() < deadline => deadline,
+        Some(_) => return Err(PgWorkError::Deadline),
+        None => return block_on_pg_result(pool, future_factory, PgWorkError::Other),
+    };
+    let pool = pool.clone();
+    let (reply, result) = mpsc::channel();
+    // Bound the caller even when runtime setup or connection cleanup overruns.
+    let wait = move || match result.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+    {
+        Ok(outcome) if Instant::now() < deadline => outcome,
+        Ok(_) => Err(PgWorkError::Deadline),
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(PgWorkError::Deadline),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(PgWorkError::Other(
+            "postgres bridge worker stopped".to_string(),
+        )),
+    };
+    if let Ok(handle) = tokio::runtime::Handle::try_current()
+        && handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+        && tokio::task::try_id().is_some()
+    {
+        let _task = handle.spawn(async move {
+            let outcome = run_pg_work_before(deadline, async move {
+                future_factory(pool).await.map_err(PgWorkError::Other)
+            })
+            .await;
+            let _ = reply.send(outcome);
+        });
+        return tokio::task::block_in_place(wait);
+    }
+
+    let timing = crate::logging::intake_timing::carry();
+    std::thread::spawn(move || {
+        let _timing = timing.entered();
+        let outcome = build_runtime(PgWorkError::Other).and_then(|runtime| {
+            runtime.block_on(run_pg_work_before(deadline, async move {
+                let bridge_pool = build_bridge_pg_pool(&pool, PgWorkError::Other).await?;
+                let result = future_factory(bridge_pool.clone())
+                    .await
+                    .map_err(PgWorkError::Other);
+                bridge_pool.close().await;
+                result
+            }))
+        });
+        let _ = reply.send(outcome);
+    });
+    wait()
+}
+
+async fn run_pg_work_before<T>(
+    deadline: Instant,
+    future: impl Future<Output = Result<T, PgWorkError>>,
+) -> Result<T, PgWorkError> {
+    if Instant::now() >= deadline {
+        return Err(PgWorkError::Deadline);
+    }
+    match tokio::time::timeout_at(deadline.into(), future).await {
+        Ok(outcome) if Instant::now() < deadline => outcome,
+        _ => Err(PgWorkError::Deadline),
     }
 }
 

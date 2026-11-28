@@ -29,15 +29,25 @@ module.exports = function attachIdleKill(timeouts, helpers) {
   var _flushPMDecisions = helpers._flushPMDecisions;
 
   timeouts._section_O = function() {
+    try {
+      runIdleScan();
+    } catch (error) {
+      if (!error || error.deadline_exceeded !== true) throw error;
+      var remaining = typeof error.remaining === "number" ? error.remaining : "unknown";
+      agentdesk.log.warn("[idle-kill] kill-tmux deadline reached; remaining=" + remaining);
+    }
+  };
+
+  function runIdleScan() {
       var apiPort = agentdesk.config.get("server_port");
       if (!apiPort) {
         agentdesk.log.error("[idle-kill] server_port missing — cannot call kill-tmux API");
         return;
       }
-      var ownerEligible = loadOwnerGuard(apiPort, deadlineReserveMs, logDeadline);
+      var ownerEligible = loadOwnerGuard(apiPort, deadlineReserveMs);
       if (!ownerEligible) return;
-      var agents = loadAgentDirectory();
-      backfillMissingSessionAgentIds(agents);
+      var agents = loadAgentDirectory(deadlineReserveMs);
+      backfillMissingSessionAgentIds(agents, deadlineReserveMs);
 
       // Sessions table is PostgreSQL (SQLite path retired in #1239 series).
       // Threshold raised from 60min → 6h: shorter values churn through
@@ -67,7 +77,7 @@ module.exports = function attachIdleKill(timeouts, helpers) {
         "AND latest.last_seen_at < NOW() - INTERVAL '6 hours' ";
       // Exclude unavailable owners before LIMIT so an offline node's backlog
       // cannot occupy all 50 slots and starve healthy/local owners (#5714).
-      var owners = agentdesk.db.query("SELECT DISTINCT s.instance_id " + idleFromWhere);
+      var owners = agentdesk.db.query("SELECT DISTINCT s.instance_id " + idleFromWhere, [], deadlineReserveMs);
       ownerEligible.retainOwners(owners);
       var excludedOwners = owners.filter(function(s) { return !ownerEligible(s.instance_id); })
         .map(function(s) { return s.instance_id.trim(); });
@@ -81,12 +91,9 @@ module.exports = function attachIdleKill(timeouts, helpers) {
           "SELECT s.session_key, s.agent_id, s.provider, s.instance_id, s.active_dispatch_id, s.thread_channel_id, latest.last_seen_at, " +
           "latest.last_seen_at::text AS idle_cursor_at, s.id::text AS idle_cursor_id " +
           idleFromWhere + ownerSqlGuard + after + "ORDER BY latest.last_seen_at ASC, s.id ASC LIMIT 64",
-          scanAfter ? excludedOwners.concat(scanAfter) : excludedOwners
+          scanAfter ? excludedOwners.concat(scanAfter) : excludedOwners,
+          deadlineReserveMs
         );
-      }
-
-      function logDeadline(remaining) {
-        agentdesk.log.warn("[idle-kill] kill-tmux deadline reached; remaining=" + remaining);
       }
 
       function formatIdleDuration(idleMin) {
@@ -118,6 +125,7 @@ module.exports = function attachIdleKill(timeouts, helpers) {
           if (checkedCount >= 50) return false;
 
           var s = sessions[i];
+          var previous = scanAfter;
           scanAfter = [s.idle_cursor_at, s.idle_cursor_id];
           var decision = decisions[s.session_key];
           if (!decision || decision.supported !== true) {
@@ -148,9 +156,12 @@ module.exports = function attachIdleKill(timeouts, helpers) {
           }
 
           if (killResp && killResp.deadline_exceeded === true) {
-            // Revisit this request with fresh admission on the next full sweep.
-            logDeadline(remaining);
-            return false;
+            if (killResp.request_started === false) {
+              scanAfter = previous;
+              remaining++;
+            }
+            killResp.remaining = remaining;
+            throw killResp;
           }
 
           // A host-guard refusal (Herdr or unresolved host) keeps the session and is not a failure.
@@ -228,22 +239,14 @@ module.exports = function attachIdleKill(timeouts, helpers) {
             "[idle-kill] Killed idle tmux after " + idleMin + "min (" + reasonLabel + "): " + s.session_key
           );
 
-          var agentContext = resolveSessionAgentContext(s, agents);
+          var agentContext = resolveSessionAgentContext(s, agents, deadlineReserveMs);
           agentdesk.log.info("[timeouts] idle kill: " + (agentContext.agent_id || "unknown") + " idle=" + idleMin + "m reason=" + reasonLabel);
         }
         return true;
       }
 
       for (;;) {
-        var page;
-        try {
-          page = readPage();
-        } catch (error) {
-          if (error.message !== "bridge deadline passed before async bridge started" &&
-              error.message !== "bridge deadline exceeded during async bridge operation") throw error;
-          logDeadline("unknown");
-          return;
-        }
+        var page = readPage();
         var keys = page.filter(function(s) {
           return s.session_key && !s.thread_channel_id &&
             !parseSessionThreadId(s.session_key, s.provider) && ownerEligible(s.instance_id);
@@ -253,8 +256,8 @@ module.exports = function attachIdleKill(timeouts, helpers) {
           var candidates = agentdesk.http.post("http://127.0.0.1:" + apiPort +
             "/api/sessions/idle-cleanup-candidates", { keys: keys }, deadlineReserveMs);
           if (candidates && candidates.deadline_exceeded === true) {
-            logDeadline(keys.length);
-            return;
+            candidates.remaining = keys.length;
+            throw candidates;
           }
           if (!candidates || !candidates.decisions) {
             agentdesk.log.warn("[idle-kill] cleanup candidate check failed: " + JSON.stringify(candidates));
@@ -268,5 +271,5 @@ module.exports = function attachIdleKill(timeouts, helpers) {
           return;
         }
       }
-    };
+    }
 };

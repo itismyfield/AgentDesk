@@ -74,9 +74,10 @@ function parseSessionThreadId(sessionKey, provider) {
   return match ? match[1] : null;
 }
 
-function loadAgentDirectory() {
+function loadAgentDirectory(reserveMs) {
   return agentdesk.db.query(
-    "SELECT id, name, name_ko, discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx FROM agents"
+    "SELECT id, name, name_ko, discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx FROM agents",
+    [], reserveMs
   );
 }
 
@@ -144,32 +145,32 @@ function resolveAgentNotifyTarget(agent, provider) {
   return null;
 }
 
-function lookupDispatchTargetAgentId(dispatchId) {
+function lookupDispatchTargetAgentId(dispatchId, reserveMs) {
   var target = normalizedText(dispatchId);
   if (!target) return null;
   var rows = agentdesk.db.query(
     "SELECT to_agent_id FROM task_dispatches WHERE id = ? LIMIT 1",
-    [target]
+    [target], reserveMs
   );
   return rows.length > 0 ? normalizedText(rows[0].to_agent_id) : null;
 }
 
-function lookupThreadTargetAgentId(threadId) {
+function lookupThreadTargetAgentId(threadId, reserveMs) {
   var target = normalizedText(threadId);
   if (!target) return null;
   var rows = agentdesk.db.query(
     "SELECT to_agent_id FROM task_dispatches " +
     "WHERE thread_id = ? AND to_agent_id IS NOT NULL AND TRIM(to_agent_id) != '' " +
     "ORDER BY created_at DESC LIMIT 1",
-    [target]
+    [target], reserveMs
   );
   return rows.length > 0 ? normalizedText(rows[0].to_agent_id) : null;
 }
 
-function resolveSessionAgentContext(sessionRow, agents) {
+function resolveSessionAgentContext(sessionRow, agents, reserveMs) {
   var storedAgentId = normalizedText(sessionRow.agent_id);
   var resolvedAgent = findAgentById(agents, storedAgentId);
-  var dispatchAgentId = lookupDispatchTargetAgentId(sessionRow.active_dispatch_id);
+  var dispatchAgentId = lookupDispatchTargetAgentId(sessionRow.active_dispatch_id, reserveMs);
   if (!resolvedAgent && dispatchAgentId) {
     resolvedAgent = findAgentById(agents, dispatchAgentId);
   }
@@ -179,7 +180,7 @@ function resolveSessionAgentContext(sessionRow, agents) {
   if (!resolvedAgent && threadChannelId) {
     resolvedAgent = findAgentByChannelValue(agents, threadChannelId);
     if (!resolvedAgent) {
-      var threadAgentId = lookupThreadTargetAgentId(threadChannelId);
+      var threadAgentId = lookupThreadTargetAgentId(threadChannelId, reserveMs);
       if (threadAgentId) {
         resolvedAgent = findAgentById(agents, threadAgentId);
       }
@@ -213,19 +214,20 @@ function resolveSessionAgentContext(sessionRow, agents) {
   };
 }
 
-function backfillMissingSessionAgentIds(agents) {
+function backfillMissingSessionAgentIds(agents, reserveMs) {
   var rows = agentdesk.db.query(
     "SELECT session_key, agent_id, provider, active_dispatch_id, thread_channel_id " +
     "FROM sessions " +
     "WHERE provider IN ('claude', 'codex', 'qwen') " +
-    "AND (agent_id IS NULL OR TRIM(agent_id) = '')"
+    "AND (agent_id IS NULL OR TRIM(agent_id) = '')",
+    [], reserveMs
   );
   for (var i = 0; i < rows.length; i++) {
-    var resolved = resolveSessionAgentContext(rows[i], agents);
+    var resolved = resolveSessionAgentContext(rows[i], agents, reserveMs);
     if (!resolved.agent_id) continue;
     agentdesk.db.execute(
       "UPDATE sessions SET agent_id = ? WHERE session_key = ? AND (agent_id IS NULL OR TRIM(agent_id) = '')",
-      [resolved.agent_id, rows[i].session_key]
+      [resolved.agent_id, rows[i].session_key], reserveMs
     );
   }
 }

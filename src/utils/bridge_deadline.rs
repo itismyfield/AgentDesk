@@ -38,6 +38,10 @@ pub fn current() -> Option<Instant> {
     CURRENT.with(|cell| cell.get())
 }
 
+pub fn work_deadline(reserve: Duration) -> Option<Instant> {
+    current().map(|deadline| deadline.checked_sub(reserve).unwrap_or_else(Instant::now))
+}
+
 /// The remaining budget: `Some(Duration::ZERO)` once the deadline has passed, `None` when unarmed.
 pub fn remaining() -> Option<Duration> {
     current().map(|deadline| {

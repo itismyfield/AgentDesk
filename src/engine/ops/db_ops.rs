@@ -1,7 +1,6 @@
 use crate::engine::sql_guard::detect_core_table_write;
 use crate::error::{AppError, ErrorCode};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
-use rquickjs::{Ctx, Function, Object, Result as JsResult};
 use sqlx::encode::IsNull;
 use sqlx::error::BoxDynError;
 use sqlx::postgres::{PgArgumentBuffer, PgArguments, PgPool, PgTypeInfo};
@@ -9,6 +8,13 @@ use sqlx::{AssertSqlSafe, Column, Encode, Postgres, Row, Type, TypeInfo};
 use std::collections::HashMap;
 use std::future::Future;
 use std::time::Duration;
+
+#[path = "db_ops/register.rs"]
+mod register;
+pub(super) use register::register_db_ops;
+#[path = "db_ops/work_deadline.rs"]
+mod work_deadline;
+use work_deadline::{encode_query_rows, run_pg, work_error_json};
 
 // ── DB ops ───────────────────────────────────────────────────────
 //
@@ -23,89 +29,6 @@ enum JsonColumnMode {
     Typed,
 }
 
-pub(super) fn register_db_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) -> JsResult<()> {
-    let ad: Object<'js> = ctx.globals().get("agentdesk")?;
-    let db_obj = Object::new(ctx.clone())?;
-
-    // Internal: __db_query_raw(sql, params_json) → json_string
-    let pg_q = pg_pool.clone();
-    let query_raw = Function::new(
-        ctx.clone(),
-        rquickjs::function::MutFn::from(move |sql: String, params_json: String| -> String {
-            db_query_raw(pg_q.clone(), &sql, &params_json)
-        }),
-    )?;
-    db_obj.set("__query_raw", query_raw)?;
-
-    // Internal: __db_query_json_raw(sql, params_json) → json_string
-    let pg_q_json = pg_pool.clone();
-    let query_json_raw = Function::new(
-        ctx.clone(),
-        rquickjs::function::MutFn::from(move |sql: String, params_json: String| -> String {
-            db_query_json_raw(pg_q_json.clone(), &sql, &params_json)
-        }),
-    )?;
-    db_obj.set("__query_json_raw", query_json_raw)?;
-
-    // Internal: __db_execute_raw(sql, params_json) → json_string
-    let pg_e = pg_pool.clone();
-    let execute_raw = Function::new(
-        ctx.clone(),
-        rquickjs::function::MutFn::from(move |sql: String, params_json: String| -> String {
-            db_execute_raw(pg_e.clone(), &sql, &params_json)
-        }),
-    )?;
-    db_obj.set("__execute_raw", execute_raw)?;
-
-    let guard_raw = Function::new(ctx.clone(), move |sql: String| -> String {
-        db_guard_raw(&sql, "agentdesk.db.execute")
-    })?;
-    db_obj.set("__guard_raw", guard_raw)?;
-
-    ad.set("db", db_obj)?;
-
-    // JS wrappers that do JSON marshaling
-    let _: rquickjs::Value = ctx.eval(
-        r#"
-        (function() {
-            agentdesk.db.query = function(sql, params) {
-                var result = JSON.parse(
-                    agentdesk.db.__query_raw(sql, JSON.stringify(params || []))
-                );
-                if (result.error) throw new Error(result.error);
-                return result;
-            };
-            agentdesk.db.queryJson = function(sql, params) {
-                var result = JSON.parse(
-                    agentdesk.db.__query_json_raw(sql, JSON.stringify(params || []))
-                );
-                if (result.error) throw new Error(result.error);
-                return result;
-            };
-            agentdesk.db.execute = function(sql, params) {
-                var guard = JSON.parse(agentdesk.db.__guard_raw(sql));
-                if (guard.blocked) {
-                    agentdesk.log.warn(guard.warning);
-                    throw new Error(guard.error);
-                }
-                // Direct write — db.execute remains synchronous by design.
-                // dispatch.create and kanban.setStatus use intent/transition model;
-                // converting db.execute to intents requires typed intents for each
-                // mutation pattern (card_review_state, kv_meta, agents, etc.).
-                var result = JSON.parse(
-                    agentdesk.db.__execute_raw(sql, JSON.stringify(params || []))
-                );
-                if (result.error) throw new Error(result.error);
-                return result;
-            };
-        })();
-        undefined;
-    "#,
-    )?;
-
-    Ok(())
-}
-
 fn db_guard_raw(sql: &str, origin: &str) -> String {
     match detect_core_table_write(sql) {
         Some(violation) => serde_json::json!({
@@ -118,13 +41,19 @@ fn db_guard_raw(sql: &str, origin: &str) -> String {
     }
 }
 
-fn db_query_raw(pg_pool: Option<PgPool>, sql: &str, params_json: &str) -> String {
+fn db_query_raw(
+    pg_pool: Option<PgPool>,
+    sql: &str,
+    params_json: &str,
+    reserve: Duration,
+) -> String {
     db_query_raw_with_json_mode(
         pg_pool,
         sql,
         params_json,
         JsonColumnMode::LegacyString,
         "agentdesk.db.query",
+        reserve,
     )
 }
 
@@ -135,6 +64,7 @@ fn db_query_json_raw(pg_pool: Option<PgPool>, sql: &str, params_json: &str) -> S
         params_json,
         JsonColumnMode::Typed,
         "agentdesk.db.queryJson",
+        Duration::ZERO,
     )
 }
 
@@ -144,6 +74,7 @@ fn db_query_raw_with_json_mode(
     params_json: &str,
     json_column_mode: JsonColumnMode,
     origin: &str,
+    reserve: Duration,
 ) -> String {
     let started = std::time::Instant::now();
     emit_raw_db_audit(origin, sql);
@@ -163,7 +94,15 @@ fn db_query_raw_with_json_mode(
         );
     };
 
-    db_query_raw_pg_with_json_mode(&pg_pool, sql, &params, started, json_column_mode, origin)
+    db_query_raw_pg_with_json_mode(
+        &pg_pool,
+        sql,
+        &params,
+        started,
+        json_column_mode,
+        origin,
+        reserve,
+    )
 }
 
 #[cfg(test)]
@@ -180,6 +119,7 @@ fn db_query_raw_pg(
         started,
         JsonColumnMode::LegacyString,
         "agentdesk.db.query",
+        Duration::ZERO,
     )
 }
 
@@ -190,6 +130,7 @@ fn db_query_raw_pg_with_json_mode(
     started: std::time::Instant,
     json_column_mode: JsonColumnMode,
     origin: &str,
+    reserve: Duration,
 ) -> String {
     let prepared_sql = match prepare_policy_sql_for_pg(sql, params) {
         Ok(prepared) => prepared,
@@ -202,48 +143,47 @@ fn db_query_raw_pg_with_json_mode(
     let pool = pg_pool.clone();
     let query_sql = prepared_sql.sql.clone();
     let bind_params = prepared_sql.params.clone();
-    let rows = match run_async_bridge_pg(&pool, move |pool| async move {
-        bind_policy_sql_params(sqlx::query(AssertSqlSafe(query_sql)), bind_params)
+    let (body, row_count) = match run_pg(&pool, reserve, move |pool| async move {
+        let rows = bind_policy_sql_params(sqlx::query(AssertSqlSafe(query_sql)), bind_params)
             .fetch_all(&pool)
             .await
-            .map_err(|error| format!("query: {error}"))
+            .map_err(|error| format!("query: {error}"))?;
+        Ok((encode_query_rows(&rows, json_column_mode), rows.len()))
     }) {
-        Ok(rows) => rows,
+        Ok(result) => result,
         Err(error) => {
             let operation = format!("{origin}.fetch_all_pg");
-            return policy_db_error_json(&operation, sql, error);
+            return work_error_json(&operation, sql, error);
         }
     };
 
-    let mut result = Vec::with_capacity(rows.len());
-    for row in &rows {
-        match pg_row_to_json(row, json_column_mode) {
-            Ok(value) => result.push(value),
-            Err(error) => {
-                let operation = format!("{origin}.collect_rows_pg");
-                return policy_db_error_json(&operation, sql, error);
-            }
+    let body = match body {
+        Ok(encoded) => encoded,
+        Err((phase, error)) => {
+            return policy_db_error_json(&format!("{origin}.{phase}"), sql, error);
         }
-    }
+    };
 
     let elapsed = started.elapsed();
     if elapsed >= POLICY_DB_WARN_THRESHOLD {
         tracing::warn!(
             elapsed_ms = elapsed.as_millis(),
-            row_count = result.len(),
+            row_count,
             sql = %compact_sql(sql),
             translated_sql = %compact_sql(&prepared_sql.sql),
             "policy db query slow"
         );
     }
 
-    serde_json::to_string(&result).unwrap_or_else(|error| {
-        let operation = format!("{origin}.serialize_pg");
-        policy_db_error_json(&operation, sql, format!("serialize query result: {error}"))
-    })
+    body
 }
 
-fn db_execute_raw(pg_pool: Option<PgPool>, sql: &str, params_json: &str) -> String {
+fn db_execute_raw(
+    pg_pool: Option<PgPool>,
+    sql: &str,
+    params_json: &str,
+    reserve: Duration,
+) -> String {
     let started = std::time::Instant::now();
     emit_raw_db_audit("agentdesk.db.execute", sql);
     if let Some(violation) = detect_core_table_write(sql) {
@@ -264,7 +204,7 @@ fn db_execute_raw(pg_pool: Option<PgPool>, sql: &str, params_json: &str) -> Stri
         );
     };
 
-    db_execute_raw_pg(&pg_pool, sql, &params, started)
+    db_execute_raw_pg(&pg_pool, sql, &params, started, reserve)
 }
 
 pub(crate) fn execute_policy_sql(
@@ -298,6 +238,7 @@ fn db_execute_raw_pg(
     sql: &str,
     params: &[serde_json::Value],
     started: std::time::Instant,
+    reserve: Duration,
 ) -> String {
     let prepared_sql = match prepare_policy_sql_for_pg(sql, params) {
         Ok(prepared) => prepared,
@@ -309,7 +250,7 @@ fn db_execute_raw_pg(
     let pool = pg_pool.clone();
     let execute_sql = prepared_sql.sql.clone();
     let bind_params = prepared_sql.params.clone();
-    let changes = match run_async_bridge_pg(&pool, move |pool| async move {
+    let changes = match run_pg(&pool, reserve, move |pool| async move {
         bind_policy_sql_params(sqlx::query(AssertSqlSafe(execute_sql)), bind_params)
             .execute(&pool)
             .await
@@ -318,7 +259,7 @@ fn db_execute_raw_pg(
     }) {
         Ok(changes) => changes,
         Err(error) => {
-            return policy_db_error_json("agentdesk.db.execute.execute_pg", sql, error);
+            return work_error_json("agentdesk.db.execute.execute_pg", sql, error);
         }
     };
 
@@ -1758,6 +1699,7 @@ mod tests {
              VALUES (?1, json_extract(?2, '$.payload.value'), datetime('now', '+' || ?3 || ' seconds'))",
             &[json!("pg-db-compat"), json!({"payload": {"value": "hello-pg"}}), json!(600)],
             std::time::Instant::now(),
+            Duration::ZERO,
         );
         let execute_json: serde_json::Value =
             serde_json::from_str(&execute).expect("parse execute json");
@@ -1855,6 +1797,7 @@ mod tests {
                 json!("card-json-param"),
             ],
             std::time::Instant::now(),
+            Duration::ZERO,
         );
         let metadata_update_json: serde_json::Value =
             serde_json::from_str(&metadata_update).expect("parse metadata update json");

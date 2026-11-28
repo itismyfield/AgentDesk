@@ -4,13 +4,12 @@ module.exports = function createIdleKillOwnerGuard() {
   var warnedOwners = Object.create(null);
   var lastUnavailableWarningAt = null;
 
-  return function loadOwnerGuard(apiPort, deadlineReserveMs, logDeadline) {
+  return function loadOwnerGuard(apiPort, deadlineReserveMs) {
     var snapshot;
     try {
       snapshot = agentdesk.http.get("http://127.0.0.1:" + apiPort + "/api/cluster/nodes", deadlineReserveMs);
       if (snapshot && snapshot.deadline_exceeded === true) {
-        logDeadline("unknown");
-        return null;
+        throw snapshot;
       }
       if (!snapshot || !snapshot.cluster || !Array.isArray(snapshot.nodes)
           || !Array.isArray(snapshot.cluster.configured_forward_owner_ids)
@@ -18,6 +17,7 @@ module.exports = function createIdleKillOwnerGuard() {
         throw new Error("cluster owner configuration unavailable");
       }
     } catch (error) {
+      if (error && error.deadline_exceeded === true) throw error;
       var unavailableAt = Date.now();
       if (lastUnavailableWarningAt === null || unavailableAt < lastUnavailableWarningAt
           || unavailableAt - lastUnavailableWarningAt >= 60 * 60 * 1000) {
