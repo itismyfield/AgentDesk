@@ -23,6 +23,10 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 
+use adk_engine::services::discord::tmux_error_detect::{
+    ProviderProseDiagnostic, classify_provider_prose_diagnostic,
+};
+
 use crate::services::claude_command::ClaudeCommandBuilder;
 use crate::utils::format::safe_prefix;
 
@@ -714,18 +718,15 @@ fn monitor_stderr_diagnostics<R: BufRead>(
     reader: R,
     exited: &AtomicBool,
     mut observe_line: impl FnMut(&str),
-) -> [bool; crate::services::discord::ProviderProseDiagnostic::COUNT] {
-    let mut diagnostic_categories =
-        [false; crate::services::discord::ProviderProseDiagnostic::COUNT];
+) -> [bool; ProviderProseDiagnostic::COUNT] {
+    let mut diagnostic_categories = [false; ProviderProseDiagnostic::COUNT];
     for line in reader.lines() {
         if exited.load(Ordering::Relaxed) {
             break;
         }
         let Ok(line) = line else { break };
         observe_line(&line);
-        if let Some(diagnostic) =
-            crate::services::discord::classify_provider_prose_diagnostic(&line)
-        {
+        if let Some(diagnostic) = classify_provider_prose_diagnostic(&line) {
             let recorded = &mut diagnostic_categories[diagnostic.index()];
             if !*recorded {
                 *recorded = true;
@@ -741,8 +742,7 @@ fn monitor_stderr_diagnostics<R: BufRead>(
 
 #[cfg(test)]
 mod stderr_redaction_tests {
-    use super::{monitor_stderr_diagnostics, redacted_stderr_line};
-    use crate::services::discord::ProviderProseDiagnostic;
+    use super::{ProviderProseDiagnostic, monitor_stderr_diagnostics, redacted_stderr_line};
     use std::io::Cursor;
     use std::sync::atomic::AtomicBool;
 
