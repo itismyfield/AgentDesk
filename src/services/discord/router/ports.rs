@@ -27,6 +27,24 @@ pub(in crate::services::discord) const ROUTER_PORTS: RouterPorts = RouterPorts {
     inject_queued_head,
     owned_original: super::input_payload::owned_original,
     #[cfg(unix)]
+    capture_dormant_partial: |shared, row, output| {
+        Box::pin(crate::services::discord::tui_prompt_relay::capture_dormant_partial(shared, row, output))
+    },
+    #[cfg(unix)]
+    attach_restarted_herdr_source: |pool, owner, channel, reader| {
+        Box::pin(crate::services::discord::tui_prompt_relay::herdr_source::attach_restarted_herdr_source(
+            pool, owner, channel, reader,
+        ))
+    },
+    #[cfg(unix)]
+    rehydrate_codex_rollout: crate::services::discord::tui_prompt_relay::rehydration::codex_tui_rehydrated_binding_from_rollout_path,
+    #[cfg(unix)]
+    other_session_claimed_claude_transcripts: crate::services::discord::tui_prompt_relay::other_session_claimed_transcripts,
+    #[cfg(unix)]
+    resolve_rehydrated_claude_channel: crate::services::discord::tui_prompt_relay::resolve_rehydrated_claude_tmux_channel_id,
+    #[cfg(unix)]
+    claude_tui_launch_context: crate::services::discord::tui_prompt_relay::claude_tui_launch_context,
+    #[cfg(unix)]
     owner_start_session_key,
 };
 

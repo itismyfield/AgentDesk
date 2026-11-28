@@ -330,6 +330,7 @@ async fn restore_selected_tmux_watchers(
                             &provider,
                             session_name,
                             *channel_id,
+                            &shared.router_ports,
                         )
                         .or_else(|| {
                             codex_restore::rollout_fallback_for_rehydrated_binding(
@@ -552,6 +553,7 @@ async fn restore_selected_tmux_watchers(
                 initial_offset,
                 codex_source_binding.as_ref(),
                 restored_turn.is_some(),
+                shared.router_ports.rehydrate_codex_rollout,
             ) else {
                 continue;
             };

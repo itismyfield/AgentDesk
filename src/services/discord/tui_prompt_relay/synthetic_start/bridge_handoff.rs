@@ -6,15 +6,13 @@ use crate::db::dispatched_session_canonical_identity::{
 };
 use crate::services::discord::inflight::{GuardedSaveOutcome, InflightEpisodePin};
 
-#[derive(Clone)]
-struct Witness {
-    episode: InflightEpisodePin,
-    actor: std::sync::Weak<CancelToken>,
-    pg_pin: Option<HookSessionActorPin>,
-}
-
-static CLAIMS: LazyLock<Mutex<std::collections::HashMap<(String, u64), Witness>>> =
-    LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+#[cfg(unix)]
+use crate::services::discord::inflight::synthetic_claim::DormantSyntheticClaim;
+use crate::services::discord::inflight::synthetic_claim::{CLAIMS, Witness};
+#[cfg(test)]
+pub(in crate::services::discord::tui_prompt_relay) use crate::services::discord::inflight::synthetic_claim::{
+    preserve_admitted_source, preserve_stamped_source,
+};
 
 /// Actor proof of a claim delegated to a non-bridge owner. Kept apart from `CLAIMS`
 /// so capture and dormant resume still refuse the row; only `reown` reads it.
@@ -406,65 +404,6 @@ pub(super) fn retained_actor(row: &InflightTurnState) -> Result<Option<Arc<Cance
     Ok(Some(actor))
 }
 
-/// Successful typed admission can learn the native SID and canonical source
-/// path. Advance only its existing allocation witness under the same lock;
-/// a missing witness or a successor allocation cannot be replaced here.
-/// The admission caller still holds its durable row and source guards.
-pub(in crate::services::discord) fn preserve_admitted_source(
-    before: &InflightEpisodePin,
-    admitted: &InflightTurnState,
-    actor: &Arc<CancelToken>,
-) {
-    let mut claims = CLAIMS.lock().unwrap_or_else(|error| error.into_inner());
-    if let Some(witness) = claims
-        .get_mut(&(admitted.provider.clone(), admitted.channel_id))
-        .filter(|witness| {
-            witness.episode == *before
-                && witness
-                    .actor
-                    .upgrade()
-                    .is_some_and(|saved| Arc::ptr_eq(&saved, actor))
-        })
-    {
-        witness.episode = InflightEpisodePin::from_state(admitted);
-    }
-}
-
-/// #5981 — a stream tick persists the native SID (and any other field the live
-/// turn has learned) onto the durable row long before the terminal stamp runs.
-/// `preserve_admitted_source` then compares an already-advanced row against a
-/// birth-time witness and declines, leaving the allocation proof stale for the
-/// rest of the episode; the dormant claim that a lost source falls back on then
-/// refuses its own row. Carry the witness with the write instead.
-///
-/// Unlike `preserve_admitted_source` the caller holds no actor handle here.
-/// Exact equality against `before` proves the row is still the one the witness
-/// describes, and `is_same_episode_as` proves the write did not install a
-/// successor allocation; a missing witness or a dead one is left untouched.
-/// `is_same_episode_as` deliberately ignores relay ownership, so the same
-/// delegation gate `record` applies at insert is re-applied here: a tick that
-/// hands the relay to a watcher or a concurrent owner must not carry a witness
-/// onto a row `record` would have refused to witness at all.
-pub(in crate::services::discord) fn preserve_stamped_source(
-    before: &InflightEpisodePin,
-    stamped: &InflightTurnState,
-) {
-    if stamped.effective_relay_owner_kind() != RelayOwnerKind::None {
-        return;
-    }
-    let advanced = InflightEpisodePin::from_state(stamped);
-    if !before.is_same_episode_as(&advanced) {
-        return;
-    }
-    let mut claims = CLAIMS.lock().unwrap_or_else(|error| error.into_inner());
-    if let Some(witness) = claims
-        .get_mut(&(stamped.provider.clone(), stamped.channel_id))
-        .filter(|witness| witness.episode == *before && witness.actor.upgrade().is_some())
-    {
-        witness.episode = advanced;
-    }
-}
-
 pub(super) fn record(
     row: &InflightTurnState,
     actor: Option<&Arc<CancelToken>>,
@@ -722,14 +661,6 @@ pub(in crate::services::discord::tui_prompt_relay) async fn resume_unpublished(
 ) -> Option<ExternalInputRelayLease> {
     let claim = capture_dormant(shared, row, output, true).await?;
     Some(claim.lease.clone())
-}
-
-pub(in crate::services::discord) struct DormantSyntheticClaim {
-    pub(in crate::services::discord) row: InflightTurnState,
-    pub(in crate::services::discord) actor: Arc<CancelToken>,
-    lease: ExternalInputRelayLease,
-    _lease: Option<TuiDirectExternalInputLeaseGuard>,
-    _serial: tokio::sync::OwnedMutexGuard<()>,
 }
 
 #[cfg(unix)]

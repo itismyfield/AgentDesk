@@ -85,6 +85,8 @@ mod circuit_removal;
 mod episode_guard;
 mod managed_submission;
 mod process_driver_start;
+pub(in crate::services::discord) mod relay_circuit_evidence;
+pub(in crate::services::discord) mod synthetic_claim;
 pub(in crate::services::discord) use process_driver_start::{
     StartEntry, stamp_process_driver_start,
 };
@@ -634,7 +636,7 @@ fn bump_save_generation_for_write(
     {
         return Err("circuit evidence row cannot be parsed".into());
     }
-    super::relay_recovery::circuit_evidence::carry_forward(existing.as_ref(), state)?;
+    relay_circuit_evidence::carry_forward(existing.as_ref(), state)?;
     managed_submission::carry_forward(existing.as_ref(), state);
     native_stop_pin::carry_forward(existing.as_ref(), state);
     herdr_turn_evidence::carry_forward(existing.as_ref(), state);

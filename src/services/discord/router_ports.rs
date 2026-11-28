@@ -1,14 +1,31 @@
 //! Router entry points the Discord runtime reaches through `SharedData`; the bootstrap installs
 //! the router's own functions so this side never names the router module.
 
+#[cfg(unix)]
+use std::collections::HashSet;
 use std::future::Future;
+#[cfg(unix)]
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
 use poise::serenity_prelude::{self as serenity, ChannelId, UserId};
 
+#[cfg(unix)]
+use crate::db::dispatched_sessions::hosted_execution::HostedOwner;
 use crate::services::cluster::attachment_transfer::uploads::PendingUploads;
 use crate::services::cluster::intake_turn::{IntakeExecution, IntakeRequest};
+#[cfg(unix)]
+use crate::services::discord::inflight::{
+    InflightTurnState, synthetic_claim::DormantSyntheticClaim,
+};
+#[cfg(unix)]
+use crate::services::discord::recovery_engine::herdr_attach::HerdrSourceAttach;
+#[cfg(unix)]
+use crate::services::session_host::HerdrExecutionReader;
+#[cfg(unix)]
+use crate::services::tui_prompt_dedupe::TuiRuntimeBinding;
+
 use crate::services::discord::queue_io::human_input::{HumanInputRequest, InjectAttempt};
 use crate::services::discord::queue_io::transport::IntakeDeps;
 use crate::services::discord::replay_policy::{ExactHandoff, ExactRetry};
@@ -24,6 +41,22 @@ pub(in crate::services::discord) type PromoteBlockedFuture<'a> =
 /// A router future borrowed from its arguments.
 pub(in crate::services::discord) type PortFuture<'a, T> =
     Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+#[cfg(unix)]
+type CaptureDormantPartial = for<'a> fn(
+    &'a Arc<SharedData>,
+    &'a InflightTurnState,
+    &'a Path,
+) -> PortFuture<'a, Option<DormantSyntheticClaim>>;
+
+#[cfg(unix)]
+type AttachRestartedHerdrSource =
+    for<'a> fn(
+        &'a sqlx::PgPool,
+        &'a HostedOwner,
+        u64,
+        &'a dyn HerdrExecutionReader,
+    ) -> Pin<Box<dyn Future<Output = HerdrSourceAttach> + 'a>>;
 
 type QueuedHeadGate = fn(ChannelId, Option<ChannelId>) -> bool;
 
@@ -96,6 +129,20 @@ pub(in crate::services::discord) struct RouterPorts {
     ) -> PortFuture<'a, InjectAttempt>,
     /// The intervention an intake request becomes when the input owner admits it.
     pub owned_original: fn(&IntakeRequest, bool, PendingUploads, bool) -> Intervention,
+    /// Captures the admitted actor and holds its leases through partial delivery.
+    #[cfg(unix)]
+    pub capture_dormant_partial: CaptureDormantPartial,
+    /// Proves the logged source before reconnecting an existing Herdr execution.
+    #[cfg(unix)]
+    pub attach_restarted_herdr_source: AttachRestartedHerdrSource,
+    #[cfg(unix)]
+    pub rehydrate_codex_rollout: fn(&str, &Path, Option<String>) -> Option<TuiRuntimeBinding>,
+    #[cfg(unix)]
+    pub other_session_claimed_claude_transcripts: fn(&Arc<SharedData>, &str) -> HashSet<PathBuf>,
+    #[cfg(unix)]
+    pub resolve_rehydrated_claude_channel: fn(&str) -> Option<u64>,
+    #[cfg(unix)]
+    pub claude_tui_launch_context: fn(&str) -> Option<(PathBuf, std::time::SystemTime)>,
     /// The session key a kept start's headless turn runs under.
     #[cfg(unix)]
     pub owner_start_session_key: for<'a> fn(

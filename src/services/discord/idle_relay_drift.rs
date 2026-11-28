@@ -495,9 +495,7 @@ async fn attempt_drift_repair(
     // Claude has settings + sessions-table repair sources. Codex still runs the
     // same bounded liveness/accounting path; it simply has no promotable source.
     let settings_channel = (provider == ProviderKind::Claude)
-        .then(|| {
-            super::tui_prompt_relay::resolve_rehydrated_claude_tmux_channel_id(tmux_session_name)
-        })
+        .then(|| (shared.router_ports.resolve_rehydrated_claude_channel)(tmux_session_name))
         .flatten();
 
     let (db_channel, db_instance) = if provider == ProviderKind::Claude {

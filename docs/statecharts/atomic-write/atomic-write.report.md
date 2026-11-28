@@ -34,7 +34,7 @@
 | `src/services/discord/outbound/completed_turn_ledger/o_pending.rs:73` | 기존 관측 함수 호출; 이번 consumer 전환 없음 |
 | `src/services/discord/queued_placeholders_store.rs:108` | 기존 관측 함수 호출; 이번 consumer 전환 없음 |
 | `src/services/discord/queued_placeholders_store.rs:131` | 기존 관측 함수 호출; 이번 consumer 전환 없음 |
-| `src/services/discord/relay_recovery_circuit_evidence.rs:285` | 기존 관측 함수 호출; 이번 consumer 전환 없음 |
+| `src/services/discord/inflight/relay_circuit_evidence.rs` `persist_evidence` | 기존 관측 함수 호출; 이번 consumer 전환 없음 |
 | `src/services/discord/restart_report.rs:144` | 기존 관측 함수 호출; 이번 consumer 전환 없음 |
 | `src/services/discord/runtime_bootstrap/gateway_handback_breaker.rs:119` | 기존 관측 함수 호출; 이번 consumer 전환 없음 |
 | `src/services/discord/runtime_bootstrap/gateway_lease_recovery.rs:344` | 기존 관측 함수 호출; 이번 consumer 전환 없음 |

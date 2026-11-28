@@ -380,6 +380,7 @@ pub use handoff::{durable_handoff_present_for_tests, held_handoff_inputs_for_tes
 pub use injected_steer::retain_injected_steer;
 use injected_steer::{Claim, InjectedSteer, claim_injected_steer};
 pub use injected_steer::{register_injected_steer, withdraw_injected_steer};
+pub use observation::clear_external_input_relay_lease_if_matches;
 use observation::clear_ssh_direct_observation_pending;
 pub use observation::*;
 #[cfg(any(test, feature = "test-support"))]

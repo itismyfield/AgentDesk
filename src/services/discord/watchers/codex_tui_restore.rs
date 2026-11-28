@@ -1,3 +1,4 @@
+use crate::services::discord::shared_state::RouterPorts;
 use crate::services::{
     agent_protocol::RuntimeHandoffKind,
     provider::ProviderKind,
@@ -7,12 +8,17 @@ use crate::services::{
 use poise::serenity_prelude::ChannelId;
 
 #[cfg(unix)]
+type CodexRolloutRehydrate =
+    fn(&str, &std::path::Path, Option<String>) -> Option<TuiRuntimeBinding>;
+
+#[cfg(unix)]
 pub(super) fn native_initial_offset(
     tmux: &str,
     output: &str,
     offset: u64,
     binding: Option<&TuiRuntimeBinding>,
     continuation: bool,
+    rehydrate_rollout: CodexRolloutRehydrate,
 ) -> Option<u64> {
     let native = binding.is_none_or(|binding| binding.output_path == output);
     if !native || continuation || dedupe::codex_verified_requires_proof(tmux) {
@@ -22,16 +28,13 @@ pub(super) fn native_initial_offset(
         )
         .ok();
     }
-    let _ = codex_tui_rehydrated_binding_from_rollout_path(
+    let _ = rehydrate_rollout(
         tmux,
         std::path::Path::new(output),
         binding.and_then(|binding| binding.session_id.clone()),
     )?;
     dedupe::codex_restore_checkpoint(tmux, std::path::Path::new(output))
 }
-
-#[cfg(unix)]
-use crate::services::discord::tui_prompt_relay::rehydration::codex_tui_rehydrated_binding_from_rollout_path;
 
 #[derive(Debug)]
 pub(super) struct DirectResumeFallback {
@@ -46,7 +49,7 @@ pub(super) struct DirectResumeFallback {
 #[cfg(unix)]
 #[derive(Debug, Clone, Copy)]
 enum FallbackOrigin {
-    DirectResume,
+    DirectResume(CodexRolloutRehydrate),
     RehydratedBinding,
 }
 
@@ -89,10 +92,11 @@ pub(super) fn rollout_fallback_for_live_direct_resume(
     provider: &crate::services::provider::ProviderKind,
     tmux_session_name: &str,
     _channel_id: ChannelId,
+    ports: &RouterPorts,
 ) -> Option<DirectResumeFallback> {
     #[cfg(not(unix))]
     {
-        let _ = (provider, tmux_session_name);
+        let _ = (provider, tmux_session_name, ports);
         return None;
     }
 
@@ -101,20 +105,24 @@ pub(super) fn rollout_fallback_for_live_direct_resume(
         if *provider != ProviderKind::Codex {
             return None;
         }
-        let session_id = codex_resume_session_id_from_tmux_pane(tmux_session_name)?;
-        let rollout =
-            crate::services::codex_tui::rollout_tail::find_rollout_by_session_id(&session_id)?;
-        let binding = codex_tui_rehydrated_binding_from_rollout_path(
-            tmux_session_name,
-            &rollout,
-            Some(session_id),
-        )?;
-        Some(DirectResumeFallback {
-            output_path: rollout.display().to_string(),
-            binding,
-            origin: FallbackOrigin::DirectResume,
-        })
+        live_direct_resume_fallback(tmux_session_name, ports.rehydrate_codex_rollout)
     }
+}
+
+#[cfg(unix)]
+fn live_direct_resume_fallback(
+    tmux_session_name: &str,
+    rehydrate_rollout: CodexRolloutRehydrate,
+) -> Option<DirectResumeFallback> {
+    let session_id = codex_resume_session_id_from_tmux_pane(tmux_session_name)?;
+    let rollout =
+        crate::services::codex_tui::rollout_tail::find_rollout_by_session_id(&session_id)?;
+    let binding = rehydrate_rollout(tmux_session_name, &rollout, Some(session_id))?;
+    Some(DirectResumeFallback {
+        output_path: rollout.display().to_string(),
+        binding,
+        origin: FallbackOrigin::DirectResume(rehydrate_rollout),
+    })
 }
 
 /// Idle fresh Codex panes leave no inflight row and no `codex resume` argv, so restore
@@ -272,11 +280,9 @@ pub(super) fn commit_live_direct_resume_fallback(
                 return false;
             }
             let current = match fallback.origin {
-                FallbackOrigin::DirectResume => rollout_fallback_for_live_direct_resume(
-                    &ProviderKind::Codex,
-                    tmux_session_name,
-                    channel_id,
-                ),
+                FallbackOrigin::DirectResume(rehydrate_rollout) => {
+                    live_direct_resume_fallback(tmux_session_name, rehydrate_rollout)
+                }
                 FallbackOrigin::RehydratedBinding => rehydrated_binding_fallback(
                     tmux_session_name,
                     dedupe::runtime_binding_for_tmux_session_under_source_authority(authority),

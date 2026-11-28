@@ -5,7 +5,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::super::inflight::InflightTurnState;
+use super::InflightTurnState;
 use crate::services::provider::ProviderKind;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -83,7 +83,9 @@ pub(in crate::services::discord) enum CircuitPendingEvidence {
 }
 
 impl<'de> Deserialize<'de> for CircuitPendingEvidence {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Self, <D as serde::Deserializer<'de>>::Error> {
         let value = Value::deserialize(deserializer)?;
         if value.get("version").and_then(Value::as_u64) == Some(1)
             && let Ok(evidence) = serde_json::from_value::<CircuitDeliveryEvidence>(value.clone())
@@ -100,62 +102,6 @@ impl CircuitPendingEvidence {
             Self::Known(evidence) => Some(&evidence.evidence_id),
             Self::Opaque(value) => value.get("evidence_id").and_then(Value::as_str),
         }
-    }
-}
-
-#[cfg(test)]
-impl CircuitEvidenceOrigin {
-    pub(in crate::services::discord) fn capture(
-        state: &InflightTurnState,
-        source: CircuitSourceDescriptor,
-        delivery_authority: &str,
-        open_obligation_id: Option<i64>,
-    ) -> Self {
-        Self {
-            episode_key: episode_key(state),
-            provider: state.provider.clone(),
-            channel_id: state.channel_id,
-            offset_authority_channel_id: state.delivery_record_owner_channel_id(),
-            open_obligation_id,
-            open_baseline: None,
-            open_generation: None,
-            open_reason: None,
-            admission_id: Some(uuid::Uuid::new_v4()),
-            source,
-            delivery_authority: delivery_authority.into(),
-            binding: CircuitCoordinateBinding::Unresolved,
-            extra: BTreeMap::new(),
-        }
-    }
-}
-
-#[cfg(test)]
-impl CircuitDeliveryEvidence {
-    pub(in crate::services::discord) fn from_success(
-        origin: CircuitEvidenceOrigin,
-        range: (u64, u64),
-        producer: &str,
-        confirmed_at: String,
-    ) -> Option<Self> {
-        if range.1 <= range.0 {
-            return None;
-        }
-        let admission = origin.admission_id?;
-        let mut identity = blake3::Hasher::new();
-        identity.update(admission.as_bytes());
-        identity.update(&range.0.to_be_bytes());
-        identity.update(&range.1.to_be_bytes());
-        identity.update(producer.as_bytes());
-        Some(Self {
-            version: 1,
-            evidence_id: identity.finalize().to_hex().to_string(),
-            origin,
-            range_start: range.0,
-            confirmed_end_exclusive: range.1,
-            producer: producer.into(),
-            confirmed_at: Some(confirmed_at),
-            extra: BTreeMap::new(),
-        })
     }
 }
 
@@ -230,7 +176,15 @@ pub(in crate::services::discord) fn handoff(
         }
         Err(journal) => persist_evidence(runtime, "discord_circuit_evidence_escrow", evidence)
             .map(|()| CircuitEvidenceHandoff::Escrowed)
-            .map_err(|escrow| format!("circuit journal: {journal}; escrow: {escrow}")),
+            .map_err(|escrow| {
+                [
+                    "circuit journal: ",
+                    &journal.to_string(),
+                    "; escrow: ",
+                    &escrow.to_string(),
+                ]
+                .concat()
+            }),
     }
 }
 
@@ -266,7 +220,7 @@ fn persist_evidence(
         .map_err(|error| error.to_string())?;
     lock.lock().map_err(|error| error.to_string())?;
     let identity = blake3::hash(evidence.evidence_id.as_bytes()).to_hex();
-    let path = directory.join(format!("{identity}.json"));
+    let path = directory.join(identity.as_str()).with_extension("json");
     match fs::read(&path) {
         Ok(bytes) => {
             let stored: CircuitDeliveryEvidence =
@@ -314,7 +268,10 @@ pub(in crate::services::discord) fn episode_key(state: &InflightTurnState) -> St
             .unwrap_or("")
             .as_bytes(),
         state.effective_relay_owner_kind().as_str().as_bytes(),
-        &state.turn_start_offset.unwrap_or(u64::MAX).to_be_bytes(),
+        &state
+            .turn_start_offset
+            .unwrap_or(std::primitive::u64::MAX)
+            .to_be_bytes(),
         &state.born_generation.to_be_bytes(),
         state.turn_nonce.as_deref().unwrap_or("").as_bytes(),
     ] {

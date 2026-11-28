@@ -119,8 +119,7 @@ pub(in crate::services::discord) async fn recover_idle_partial_response_from_rea
     {
         return false;
     }
-    let Some(claim) =
-        super::super::tui_prompt_relay::capture_dormant_partial(shared, row, output).await
+    let Some(claim) = (shared.router_ports.capture_dormant_partial)(shared, row, output).await
     else {
         return false;
     };
