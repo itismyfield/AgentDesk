@@ -38,7 +38,7 @@ def install_guard(repo):
     scripts = repo.root / "scripts/ci"
     scripts.mkdir(exist_ok=True, parents=True)
     for name in ("list_merge_guard.py", "statecharts_tlc.py", "nextest_ci.py", "nextest_required.py",
-                 "pr_nextest.py", "merge_candidate.py"):
+                 "nextest_removal.py", "pr_nextest.py", "merge_candidate.py"):
         source = ROOT / "scripts/ci" / name
         if source.exists():
             shutil.copyfile(source, scripts / name)
