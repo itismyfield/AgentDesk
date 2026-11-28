@@ -1,11 +1,11 @@
 ---
-title: "전사 크기 세션 회전 (design-2)"
+title: "전사 크기 세션 회전 (design-3)"
 ---
 stateDiagram-v2
   state "Legend" as legend {
-    lg0: Breaks InputExactlyOneSession or SeedFirst
-    lg1: Breaks LatchOnlyIfAsked or NoScheduleLoss or NoTurnCut or NoUnflushedCut in some cases
-    lg2: Path to the InputExactlyOneSession or LatchOnlyIfAsked or NoScheduleLoss or NoTurnCut or NoUnflushedCut or SeedFirst bug
+    lg0: Breaks InputExactlyOneSession or LatchDurable or NoStrayEffect or SingleExecution
+    lg1: Breaks LatchOnlyIfAsked or NoScheduleLoss or NoUnflushedCut in some cases
+    lg2: Path to the InputExactlyOneSession or LatchDurable or LatchOnlyIfAsked or NoScheduleLoss or NoStrayEffect or NoUnflushedCut or SingleExecution bug
   }
   class lg0 breaks
   class lg1 mayBreak
@@ -15,32 +15,38 @@ stateDiagram-v2
   s2: 인수인계 요청 보냄 #183; 선택 Old #183; 실행 Old
   s3: 인수인계 요청 보냄 #183; 선택 Old #183; 실행 Old #183; 턴 열림
   s4: 인수인계 요청 보냄 #183; 선택 Other #183; 실행 Other #183; 턴 열림
-  s5: 본문 저장됨 #183; 선택 Old #183; 실행 Old #183; 턴 열림
-  s6: 본문 저장됨 #183; 선택 Old #183; 실행 Old
-  s7: 입력 배리어 #183; 선택 Old #183; 실행 Old #183; 배리어
-  s8: /exit 보냄 #183; 선택 Old #183; 실행 Old #183; 배리어
-  s9: /exit 보냄 #183; 선택 Old #183; 실행 실행 없음 #183; 배리어
-  s10: /exit 보냄 #183; 선택 Old #183; 실행 Old #183; 배리어 #183; 턴 열림
-  s11: 옛 CLI 종료 #183; 선택 Old #183; 실행 실행 없음 #183; 배리어
-  s12: 새 UUID 기동 중 #183; 선택 Old #183; 실행 실행 없음 #183; 배리어
-  s13: 새 UUID 기동 중 #183; 선택 Old #183; 실행 New #183; 배리어
-  s14: 새 UUID 기동 중 #183; 선택 Old #183; 실행 New #183; 배리어 #183; 턴 열림
+  s5: 인수인계 요청 보냄 #183; 선택 Other #183; 실행 실행 없음
+  s6: 본문 저장됨 #183; 선택 Old #183; 실행 Old #183; 턴 열림
+  s7: 본문 저장됨 #183; 선택 Old #183; 실행 Old
+  s8: 입력 배리어 #183; 선택 Old #183; 실행 Old #183; 배리어
+  s9: /exit 보냄 #183; 선택 Old #183; 실행 Old #183; 배리어
+  s10: /exit 보냄 #183; 선택 Old #183; 실행 실행 없음 #183; 배리어
+  s11: /exit 보냄 #183; 선택 Old #183; 실행 Old #183; 배리어 #183; 효과 불명
+  s12: 옛 CLI 종료 #183; 선택 Old #183; 실행 실행 없음 #183; 배리어
+  s13: 배리어 영구 보류 #183; 선택 Old #183; 실행 Old #183; 배리어 #183; 효과 불명
+  s14: 배리어 영구 보류 #183; 선택 Old #183; 실행 실행 없음 #183; 배리어
+  s15: 새 UUID 기동 중 #183; 선택 Old #183; 실행 실행 없음 #183; 배리어
+  s16: 새 UUID 기동 중 #183; 선택 Old #183; 실행 New #183; 배리어
+  s17: 배리어 영구 보류 #183; 선택 Old #183; 실행 New #183; 배리어
   [*] --> s0
   s0 --> s1: 회전 예약
   s1 --> s2: 요청 보냄(래치 소진)
   s2 --> s3: 전달 결과
   s2 --> s4: 전달 결과
-  s3 --> s5: 인수인계 API
-  s5 --> s6: 턴 끝
-  s6 --> s7: 배리어 커밋
-  s7 --> s8: /exit 보냄
-  s8 --> s9: /exit 결과
-  s8 --> s10: /tui/send 입력
-  s9 --> s11: 종료 증명
-  s10 --> s9: /exit 결과
-  s11 --> s12: 새 UUID 기동
-  s12 --> s13: 기동 결과
-  s13 --> s14: /tui/send 입력
+  s2 --> s5: 제3 UUID 선택
+  s3 --> s6: 인수인계 API
+  s6 --> s7: 턴 끝
+  s7 --> s8: 배리어 커밋
+  s8 --> s9: /exit 보냄
+  s9 --> s10: /exit 결과
+  s9 --> s11: /exit 결과
+  s10 --> s12: 종료 증명
+  s11 --> s13: 자동 해제
+  s12 --> s15: 새 UUID 기동
+  s13 --> s14: 불명 /exit 정산
+  s15 --> s16: 기동 결과
+  s16 --> s16: 명시 stop
+  s16 --> s17: 자동 해제
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
   class s0 bugPath
@@ -50,15 +56,20 @@ stateDiagram-v2
   class s3 bugPath
   class s4 breaks
   class s4 bugPath
+  class s5 breaks
   class s5 bugPath
   class s6 bugPath
   class s7 bugPath
   class s8 bugPath
-  class s9 mayBreak
   class s9 bugPath
+  class s10 mayBreak
   class s10 bugPath
   class s11 bugPath
   class s12 bugPath
   class s13 bugPath
   class s14 breaks
   class s14 bugPath
+  class s15 bugPath
+  class s16 bugPath
+  class s17 breaks
+  class s17 bugPath

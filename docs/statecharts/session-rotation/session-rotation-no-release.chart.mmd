@@ -1,5 +1,5 @@
 ---
-title: "전사 크기 세션 회전 (design-2)"
+title: "전사 크기 세션 회전 (design-3)"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -9,40 +9,26 @@ stateDiagram-v2
   class lg0 bugPath
   class lg1 repeats
   s0: 회전 없음 #183; 선택 Old #183; 실행 Old
-  s1: 회전 없음 #183; 선택 Old #183; 실행 Old #183; 턴 열림
-  s2: 요청 예약 #183; 선택 Old #183; 실행 Old
-  s3: 회전 없음 #183; 선택 Old #183; 실행 실행 없음
-  s4: 요청 예약 #183; 선택 Old #183; 실행 Old #183; 턴 열림
-  s5: 인수인계 요청 보냄 #183; 선택 Old #183; 실행 Old
-  s6: 인수인계 요청 보냄 #183; 선택 Old #183; 실행 Old #183; 턴 열림
-  s7: 본문 저장됨 #183; 선택 Old #183; 실행 Old #183; 턴 열림
-  s8: 본문 저장됨 #183; 선택 Old #183; 실행 Old
-  s9: 입력 배리어 #183; 선택 Old #183; 실행 Old #183; 배리어
-  s10: 입력 배리어 #183; 선택 Old #183; 실행 실행 없음 #183; 배리어
-  s11: 배리어 영구 보류 #183; 선택 Old #183; 실행 실행 없음 #183; 배리어
-  s12: 배리어 영구 보류 #183; 선택 Old #183; 실행 Old #183; 배리어
+  s1: 요청 예약 #183; 선택 Old #183; 실행 Old
+  s2: 인수인계 요청 보냄 #183; 선택 Old #183; 실행 Old
+  s3: 인수인계 요청 보냄 #183; 선택 Old #183; 실행 Old #183; 턴 열림
+  s4: 본문 저장됨 #183; 선택 Old #183; 실행 Old #183; 턴 열림
+  s5: 본문 저장됨 #183; 선택 Old #183; 실행 Old
+  s6: 입력 배리어 #183; 선택 Old #183; 실행 Old #183; 배리어
+  s7: 입력 배리어 #183; 선택 Old #183; 실행 실행 없음 #183; 배리어
+  s8: 배리어 영구 보류 #183; 선택 Old #183; 실행 실행 없음 #183; 배리어
   [*] --> s0
-  s0 --> s0: dcserver 중단 or dcserver 부팅 or 일반 입력 전달 시작 or O 출력 배출
-  s0 --> s1: /tui/send 입력 or 전달 결과
-  s0 --> s2: 회전 예약
-  s1 --> s3: 외부 종료
-  s2 --> s4: /tui/send 입력
-  s3 --> s3: 일반 입력 도착
-  s4 --> s2: 턴 끝
-  s3 --> s0: 선택 UUID 재기동
-  s2 --> s2: O 출력 배출
-  s2 --> s5: 요청 보냄(래치 소진)
-  s5 --> s6: 전달 결과
-  s6 --> s7: 인수인계 API
-  s1 --> s0: 턴 끝
-  s7 --> s8: 턴 끝
-  s8 --> s8: O 출력 배출
-  s8 --> s9: 배리어 커밋
-  s9 --> s10: 외부 종료
-  s10 --> s10: 일반 입력 도착
-  s10 --> s11: 자동 해제
-  s9 --> s9: 명시 명령
-  s9 --> s12: 자동 해제
+  s0 --> s1: 회전 예약
+  s0 --> s0: 일반 입력 도착 or 일반 입력 전달 시작 or 전달 결과
+  s1 --> s2: 요청 보냄(래치 소진)
+  s2 --> s3: 전달 결과
+  s3 --> s4: 인수인계 API
+  s4 --> s5: 턴 끝
+  s5 --> s5: O 출력 배출
+  s5 --> s6: 배리어 커밋
+  s6 --> s6: 일반 입력 도착
+  s6 --> s7: 외부 종료
+  s7 --> s8: 자동 해제
   class s0 bugPath
   class s1 bugPath
   class s2 bugPath
@@ -51,8 +37,4 @@ stateDiagram-v2
   class s5 bugPath
   class s6 bugPath
   class s7 bugPath
-  class s8 bugPath
-  class s9 bugPath
-  class s10 bugPath
-  class s11 repeats
-  class s12 repeats
+  class s8 repeats
