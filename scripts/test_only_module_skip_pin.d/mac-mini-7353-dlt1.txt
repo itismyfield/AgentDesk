@@ -1,0 +1,8 @@
+resolver | src/services/discord/queue_dispatch/owner_race_hook_test_support.rs
+resolver | src/services/discord/turn_presence/activity/unbound/dormancy_hook_test_support.rs
+resolver | src/services/discord/turn_presence/activity/unbound/live_fixture_test_support.rs
+resolver | src/services/discord/turn_presence/activity/unbound/live_snapshot_hook_test_support.rs
+resolver | src/services/discord/turn_presence/activity/unbound/publication_hook_test_support.rs
+resolver | src/services/discord/turn_presence/activity_fixture_test_support.rs
+resolver | src/services/discord/turn_presence/activity_observation_hook_test_support.rs
+resolver | src/services/discord/turn_presence/supervisor_fixture_test_support.rs

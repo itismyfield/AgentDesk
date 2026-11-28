@@ -24,7 +24,7 @@ use super::controller_heartbeat::WatcherPostHeartbeat;
 pub(in crate::services::discord) use super::terminal_delivery_types::WatcherShortReplaceResult;
 
 #[path = "committed_placeholder_cleanup.rs"]
-pub(super) mod committed_placeholder_cleanup;
+pub(in crate::services::discord) mod committed_placeholder_cleanup;
 
 /// #3089 A4/#3998 S1-d: watcher terminal controller cut-over decision.
 /// Computed at the lease acquire site so the watcher's own acquire/heartbeat/

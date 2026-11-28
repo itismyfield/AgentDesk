@@ -37,7 +37,7 @@ pub(super) fn native_initial_offset(
 }
 
 #[derive(Debug)]
-pub(super) struct DirectResumeFallback {
+pub(in crate::services::discord) struct DirectResumeFallback {
     output_path: String,
     #[cfg(unix)]
     binding: TuiRuntimeBinding,
@@ -127,7 +127,7 @@ fn live_direct_resume_fallback(
 
 /// Idle fresh Codex panes leave no inflight row and no `codex resume` argv, so restore
 /// adopts the rollout boot rehydration already published for this exact owner channel.
-pub(super) fn rollout_fallback_for_rehydrated_binding(
+pub(in crate::services::discord) fn rollout_fallback_for_rehydrated_binding(
     provider: &ProviderKind,
     tmux_session_name: &str,
     channel_id: ChannelId,
@@ -190,7 +190,7 @@ fn rehydrated_binding_fallback(
     })
 }
 
-pub(super) fn commit_live_direct_resume_fallback(
+pub(in crate::services::discord) fn commit_live_direct_resume_fallback(
     tmux_session_name: &str,
     channel_id: ChannelId,
     fallback: Option<DirectResumeFallback>,

@@ -582,6 +582,6 @@ pub(in crate::services::discord) async fn headless_outbox(
     Some(TailCovered { _private: () })
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "o_delivery_evidence_tests.rs"]
 pub(in crate::services::discord) mod tests;

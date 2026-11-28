@@ -1000,7 +1000,7 @@ mod post_loop_identity_guard_tests;
 /// The heavier tests below require fixtures that still are not available in
 /// plain `cargo test --bin agentdesk` invocations.
 #[cfg(any(test, feature = "test-support"))]
-#[path = "inflight/synthetic_carry_forward_fixture_tests.rs"]
+#[path = "inflight/synthetic_carry_forward_fixture_test_support.rs"]
 pub(in crate::services::discord) mod synthetic_carry_forward_fixture_tests;
 
 #[cfg(test)]

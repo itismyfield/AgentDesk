@@ -117,7 +117,7 @@ impl Rig {
         let turn = b2b_active(&f, &shared).await;
         b2b_row(&f);
         let capture = SupplyCapture::new(&f, &runtime.path().join("kept-port-store"), true);
-        let real = super::super::native_supply::port(
+        let real = crate::services::discord::turn_finalizer::terminal_handler::native_supply::port(
             f.ticket.channel_id,
             shared.clone(),
             capture.bindings.clone(),

@@ -57,11 +57,11 @@ pub(in crate::services::discord) fn spawn_placeholder_sweeper(
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(in crate::services::discord) struct TickReport {
-    pub(in crate::services::discord) pass: SweepPassReport,
-    pub(in crate::services::discord) drained_abort_markers: usize,
-    pub(in crate::services::discord) swept_orphan_anchors: usize,
-    pub(in crate::services::discord) drained_abandon_requests: usize,
-    pub(in crate::services::discord) swept_busy_retry_bindings: usize,
+    pass: SweepPassReport,
+    drained_abort_markers: usize,
+    swept_orphan_anchors: usize,
+    drained_abandon_requests: usize,
+    swept_busy_retry_bindings: usize,
 }
 
 impl TickReport {

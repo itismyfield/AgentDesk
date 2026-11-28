@@ -1,3 +1,7 @@
+#[cfg(all(unix, any(test, feature = "test-support")))]
+#[path = "queued_head_inject_hook_test_support.rs"]
+pub(in crate::services::discord) mod hook_tests;
+
 use std::time::Duration;
 
 use super::super::{mailbox_snapshot, session_runtime};
@@ -67,8 +71,8 @@ impl AttemptRow {
             head_state = self.head_state,
             "queued_head_attempt"
         );
-        #[cfg(all(test, unix))]
-        tests::ATTEMPT_ROWS.lock().unwrap().push(self.clone());
+        #[cfg(all(unix, any(test, feature = "test-support")))]
+        hook_tests::attempt(self);
     }
 }
 
@@ -129,8 +133,8 @@ pub(in crate::services::discord) async fn try_busy(
         metadata: None,
         channel_name_hint: None,
     };
-    #[cfg(all(test, unix))]
-    tests::OFFERED_HEADS.lock().unwrap().push(head.message_id);
+    #[cfg(all(unix, any(test, feature = "test-support")))]
+    hook_tests::offer(channel, head.message_id);
     let attempt =
         (ports.inject_queued_head)(deps.shared, &request, QueueIdentity::of(head), parent, gate)
             .await;
@@ -179,7 +183,3 @@ fn preparation_veto(veto: &str) -> bool {
             | "lock_contended"
     )
 }
-
-#[cfg(all(test, unix))]
-#[path = "queued_head_inject_tests.rs"]
-mod tests;

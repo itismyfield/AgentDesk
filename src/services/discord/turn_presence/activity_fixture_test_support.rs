@@ -661,5 +661,5 @@ pub(super) fn resumed_notice_observations(
 #[path = "activity_tests/native_input_tests.rs"]
 mod native_input_tests;
 
-use super::observation_hook_tests::ReadTrace;
-pub(crate) use super::observation_hook_tests::ReadyPane;
+use super::observation_hook_test_support::ReadTrace;
+pub(crate) use super::observation_hook_test_support::ReadyPane;

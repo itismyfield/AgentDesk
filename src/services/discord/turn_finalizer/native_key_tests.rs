@@ -131,7 +131,7 @@ async fn key_and_bind(order: Order) {
             Arc::new(|_| Ok(())),
             || {
                 let mut pane = UnixStream::connect(socket).unwrap();
-                pane.set_read_timeout(Some(crate::test_support::wait::WAIT_CAP))
+                pane.set_read_timeout(Some(adk_test_support::test_support::wait::WAIT_CAP))
                     .unwrap();
                 owner_input::keyed();
                 writeln!(
@@ -149,15 +149,18 @@ async fn key_and_bind(order: Order) {
                 );
                 tx.send(()).unwrap();
                 finish
-                    .recv_timeout(crate::test_support::wait::WAIT_CAP)
+                    .recv_timeout(adk_test_support::test_support::wait::WAIT_CAP)
                     .unwrap();
                 handle.finish()
             },
         )
     });
-    crate::test_support::wait::await_within(sent, crate::test_support::wait::WAIT_CAP)
-        .await
-        .unwrap();
+    adk_test_support::test_support::wait::await_within(
+        sent,
+        adk_test_support::test_support::wait::WAIT_CAP,
+    )
+    .await
+    .unwrap();
     assert_eq!(rig.sends().len(), 1);
     f.transcript();
     f.project_submitted().await;
@@ -197,10 +200,12 @@ async fn key_and_bind(order: Order) {
         "a key needs the finalizer witness"
     );
     proceed.send(()).unwrap();
-    let result =
-        crate::test_support::wait::await_within(producer, crate::test_support::wait::WAIT_CAP)
-            .await
-            .unwrap();
+    let result = adk_test_support::test_support::wait::await_within(
+        producer,
+        adk_test_support::test_support::wait::WAIT_CAP,
+    )
+    .await
+    .unwrap();
     assert!(
         BIND_ON_READ.with(|slot| slot.take().is_none()),
         "the requested boundary ran"

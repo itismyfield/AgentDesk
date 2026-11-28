@@ -1,5 +1,5 @@
 use super::*;
-mod backstop;
+pub(in crate::services::discord) mod backstop;
 pub(super) mod held_sources;
 pub(in crate::services::discord) mod human_input;
 pub(crate) mod input_owner;
@@ -24,7 +24,7 @@ pub(in crate::services::discord) use backstop::{
     idle_queue_backstop_delay_for_tests, idle_queue_backstop_fires_for_tests,
 };
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "queue_io/cancel_reclaim_support_test.rs"]
 pub(in crate::services::discord) mod cancel_backstop_test_support;
 
@@ -45,58 +45,13 @@ tokio::task_local! {
     static SUPPRESS_POST_ENQUEUE_IDLE_QUEUE_KICK: bool;
 }
 
-#[cfg(test)]
-pub(in crate::services::discord) type IdleQueueKickHookForTests = std::sync::Arc<
-    dyn Fn(
-            Arc<SharedData>,
-            ProviderKind,
-            ChannelId,
-            &'static str,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Option<IdleQueueKickoffChannelOutcome>> + Send>,
-        > + Send
-        + Sync,
->;
-
-#[cfg(test)]
-static IDLE_QUEUE_KICK_HOOK_FOR_TESTS: std::sync::Mutex<Option<IdleQueueKickHookForTests>> =
-    std::sync::Mutex::new(None);
-
-#[cfg(test)]
-pub(in crate::services::discord) struct IdleQueueKickHookResetForTests;
-
-#[cfg(test)]
-impl Drop for IdleQueueKickHookResetForTests {
-    fn drop(&mut self) {
-        *IDLE_QUEUE_KICK_HOOK_FOR_TESTS
-            .lock()
-            .expect("idle queue kick hook lock") = None;
-    }
-}
-
-#[cfg(test)]
-pub(in crate::services::discord) fn set_idle_queue_kick_hook_for_tests(
-    hook: IdleQueueKickHookForTests,
-) -> IdleQueueKickHookResetForTests {
-    *IDLE_QUEUE_KICK_HOOK_FOR_TESTS
-        .lock()
-        .expect("idle queue kick hook lock") = Some(hook);
-    IdleQueueKickHookResetForTests
-}
-
-#[cfg(test)]
-async fn idle_queue_kick_hook_outcome_for_tests(
-    shared: Arc<SharedData>,
-    provider: ProviderKind,
-    channel_id: ChannelId,
-    reason: &'static str,
-) -> Option<IdleQueueKickoffChannelOutcome> {
-    let hook = IDLE_QUEUE_KICK_HOOK_FOR_TESTS
-        .lock()
-        .expect("idle queue kick hook lock")
-        .clone();
-    hook?(shared, provider, channel_id, reason).await
-}
+#[cfg(any(test, feature = "test-support"))]
+#[path = "queue_io/idle_queue_kick_hook_test_support.rs"]
+mod idle_queue_kick_hook_tests;
+#[cfg(any(test, feature = "test-support"))]
+pub(in crate::services::discord) use idle_queue_kick_hook_tests::{
+    IdleQueueKickHookForTests, IdleQueueKickHookResetForTests, set_idle_queue_kick_hook_for_tests,
+};
 
 pub(in crate::services::discord) async fn mailbox_cancel_queued_primary_message(
     shared: &SharedData,
@@ -445,7 +400,7 @@ pub(super) fn schedule_post_enqueue_idle_queue_kick(
             )
             .await;
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         cancel_backstop_test_support::post_enqueue_snapshot_finished(
             channel_id,
             snapshot.intervention_queue.len(),
@@ -482,10 +437,14 @@ async fn kick_queue_channel_if_context_available(
     reason: &'static str,
     lane: KickoffLane,
 ) -> IdleQueueKickoffChannelOutcome {
-    #[cfg(test)]
-    if let Some(outcome) =
-        idle_queue_kick_hook_outcome_for_tests(shared.clone(), provider.clone(), channel_id, reason)
-            .await
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(outcome) = idle_queue_kick_hook_tests::idle_queue_kick_hook_outcome_for_tests(
+        shared.clone(),
+        provider.clone(),
+        channel_id,
+        reason,
+    )
+    .await
     {
         return outcome;
     }
@@ -514,21 +473,17 @@ async fn kick_queue_channel_if_context_available(
             lane => kickoff_queue_channel(&deps, provider, channel_id, lane).await,
         }
     };
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
         queue_dispatch::kickoff::cancel_backstop_test_support::with_origin(reason, kickoff).await
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     kickoff.await
 }
 
 #[cfg(test)]
 #[path = "queue_io/ledger_settlement_tests.rs"]
 mod ledger_settlement_tests;
-
-#[cfg(all(test, unix))]
-#[path = "queue_io/cancel_backstop_tests.rs"]
-mod cancel_backstop_tests;
 
 #[cfg(test)]
 #[path = "queue_io/idle_queue_tests.rs"]

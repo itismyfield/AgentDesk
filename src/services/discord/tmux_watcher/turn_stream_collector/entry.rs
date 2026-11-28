@@ -6,7 +6,7 @@ use super::*;
 // Keep reading until result or timeout
 // Check if a Discord turn claimed this data since our epoch snapshot
 
-pub(in crate::services::discord::tmux::tmux_watcher) async fn collect_turn_stream_until_terminal(
+pub(in crate::services::discord) async fn collect_turn_stream_until_terminal(
     ctx: &TurnStreamCollectorContext,
     io: TurnStreamCollectorIo,
     parser: &mut TurnParseState<'_>,

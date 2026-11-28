@@ -17,7 +17,7 @@ use super::*;
 /// `clear_inflight (per-site) + mailbox_finish_turn + counter-- + trailing
 /// terminal side-effects` sequence so each routed call-site stays
 /// behaviourally identical during the incremental landing.
-pub(super) async fn do_finalize(
+pub(in crate::services::discord) async fn do_finalize(
     key: TurnKey,
     provider: ProviderKind,
     event: &TerminalEvent,
@@ -682,6 +682,4 @@ mod tests {
             "no removed thread-parent mapping means no parent kick"
         );
     }
-
-    mod residue_tests;
 }

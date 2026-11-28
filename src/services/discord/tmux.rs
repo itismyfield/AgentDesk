@@ -95,14 +95,12 @@ mod tmux_reattach_offsets;
 #[path = "tmux_session_files.rs"]
 mod tmux_session_files;
 #[path = "watchers/lifecycle.rs"]
-mod watcher_lifecycle;
+pub(in crate::services::discord) mod watcher_lifecycle;
 #[cfg(all(test, unix))]
 pub(crate) use watcher_lifecycle::commit_codex_watcher_restore_for_tests;
 #[cfg(all(test, unix))]
 pub(crate) use watcher_lifecycle::commit_codex_watcher_restore_to_empty_registry_for_tests;
 
-#[cfg(test)]
-pub(in crate::services::discord) use watcher_lifecycle::InstallFixture;
 #[cfg(test)]
 pub(in crate::services::discord) use watcher_lifecycle::watcher_install_fixture;
 
@@ -131,6 +129,8 @@ pub(in crate::services::discord) use self::watcher_lifecycle::{
     thread_follow_up_parent_channel_id, thread_follow_up_parent_from_live, watch_host_of,
 };
 use super::watcher_lifecycle_decision::*;
+#[cfg(all(unix, any(test, feature = "test-support")))]
+pub(in crate::services::discord) use watcher_lifecycle::ReaderStartObservation;
 const READY_FOR_INPUT_IDLE_PROBE_INTERVAL: Duration = Duration::from_secs(2);
 const SOFT_TERMINAL_DEBOUNCE: Duration = Duration::from_millis(1500);
 pub(super) const WATCHER_ACTIVITY_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);

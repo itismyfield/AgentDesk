@@ -20,7 +20,7 @@ pub(super) fn watcher_commit_should_advance_runtime_binding(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn mark_watcher_terminal_delivery_committed(
+pub(in crate::services::discord) fn mark_watcher_terminal_delivery_committed(
     provider: &ProviderKind,
     channel_id: ChannelId,
     tmux_session_name: &str,

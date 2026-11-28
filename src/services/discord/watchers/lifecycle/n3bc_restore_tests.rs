@@ -1,10 +1,14 @@
 //! Legacy restore effects are observed through the public entry in a child with fake tmux.
-use super::super::watcher_install_fixture::{fixture_with_pool, isolated, list_sessions};
-use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::services::discord::dl_tmux_watcher_test_host::watcher_install_fixture::{
+    InstallFixture, fixture_with_pool,
+};
 use crate::services::discord::health::test_support;
 use crate::services::discord::inflight::InflightTurnState;
 use crate::services::discord::task_supervisor::watcher_spawn_observation::Scope;
+use crate::services::discord::tmux::restore_tmux_watchers;
+use crate::services::discord::tmux::watcher_install_fixture::{isolated, list_sessions};
+use crate::services::provider::ProviderKind;
 use crate::services::tmux_common as tc;
 use std::path::{Path, PathBuf};
 

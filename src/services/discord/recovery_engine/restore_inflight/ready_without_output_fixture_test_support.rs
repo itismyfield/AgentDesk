@@ -10,8 +10,7 @@ use std::sync::Arc;
 pub(in crate::services::discord) struct Fixture {
     pub(in crate::services::discord) state: inflight::InflightTurnState,
     pub(in crate::services::discord) shared: Arc<SharedData>,
-    _env: crate::config::TestEnvVarGuard,
-    _root: tempfile::TempDir,
+    _owned_root: Option<(crate::config::TestEnvVarGuard, tempfile::TempDir)>,
 }
 
 impl Fixture {
@@ -21,11 +20,23 @@ impl Fixture {
         env: crate::config::TestEnvVarGuard,
         shared: Arc<SharedData>,
     ) -> Self {
+        let fixture = Self::with_root(channel, root.path(), shared);
+        Self {
+            _owned_root: Some((env, root)),
+            ..fixture
+        }
+    }
+
+    pub(in crate::services::discord) fn with_root(
+        channel: u64,
+        root: &std::path::Path,
+        shared: Arc<SharedData>,
+    ) -> Self {
         let mut state = recovery_state(ProviderKind::Claude, channel);
         state.born_generation = 0;
         state.full_response = "published prefix\nunposted suffix".to_string();
         state.response_sent_offset = "published prefix\n".len();
-        let output = root.path().join("source.jsonl");
+        let output = root.join("source.jsonl");
         std::fs::write(&output, b"{\"type\":\"assistant\"}\n").expect("source");
         state.output_path = Some(output.to_string_lossy().into_owned());
         state.last_offset = std::fs::metadata(&output).expect("source EOF").len();
@@ -33,8 +44,7 @@ impl Fixture {
         Self {
             state,
             shared,
-            _env: env,
-            _root: root,
+            _owned_root: None,
         }
     }
 

@@ -7,7 +7,7 @@ use crate::services::cluster::stream_relay::{ReadSource, SourceFileIdentity};
 use crate::services::discord::tmux::tmux_watcher::loop_poll_prologue::WatcherSourceAuthority;
 
 #[derive(Clone, Copy)]
-pub(in crate::services::discord::tmux::tmux_watcher) struct SupervisorFrameSourceAuthority {
+pub(in crate::services::discord) struct SupervisorFrameSourceAuthority {
     pub(in crate::services::discord::tmux::tmux_watcher) generation_mtime_ns: i64,
     pub(in crate::services::discord::tmux::tmux_watcher) source_stamp:
         Option<crate::services::cluster::stream_relay::SourceStamp>,

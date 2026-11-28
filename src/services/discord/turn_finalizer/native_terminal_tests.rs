@@ -44,7 +44,9 @@ async fn stored_interrupt_barrier_replays(boot: bool) {
     let barrier: Barrier = serde_json::from_value(serde_json::json!({"namespace":"native-fixture","ticket":f.ticket,"membership_range":[0,own],"membership_row":"own","foreign_range":[own,end],"foreign_row":"stop","foreign_hashes":hashes,"through":end,"registrations_fingerprint":stamp})).unwrap();
     assert!(f.history.record_native_barrier(&barrier).unwrap());
     if boot {
-        let inputs = super::super::native_prepare::BootInputs::prepare(&root, 2).unwrap();
+        let inputs =
+            crate::services::discord::turn_finalizer::native_prepare::BootInputs::prepare(&root, 2)
+                .unwrap();
         shared = b2b_shared(Some(pool.clone()));
         Arc::get_mut(&mut shared)
             .unwrap()
@@ -76,7 +78,7 @@ async fn stored_interrupt_barrier_replays(boot: bool) {
         .history
         .native_boot_record("native-fixture", &f.ticket)
         .unwrap();
-    let validate = super::super::native_prepare::validate_saved_record;
+    let validate = crate::services::discord::turn_finalizer::native_prepare::validate_saved_record;
     validate(&record).unwrap();
     record.settlement.extra["foreign_prompt_barrier"]["foreign_row"] = "other".into();
     let refused = validate(&record).unwrap_err();
@@ -147,7 +149,7 @@ async fn native_8148_terminal_raw_eof_waits_for_the_execution_end_pg() {
     assert_eq!(outcome.disposition, Disposition::Executed);
     assert!(outcome.extra["native_proof"]["raw"].is_null());
     assert!(saved.cleanup_complete && row().is_none());
-    let validate = super::super::native_prepare::validate_saved_record;
+    let validate = crate::services::discord::turn_finalizer::native_prepare::validate_saved_record;
     for (execution, accepted) in [(nonce, true), ("another-execution", false)] {
         let mut record = f
             .history
@@ -279,7 +281,7 @@ impl RawCapture {
             binding_seq: 1,
             execution_nonce: NONCE.into(),
         };
-        let port = super::super::native_supply::port(
+        let port = crate::services::discord::turn_finalizer::terminal_handler::native_supply::port(
             f.ticket.channel_id,
             shared.clone(),
             capture.bindings.clone(),
@@ -597,7 +599,7 @@ fn recording_port(
     capture: &SupplyCapture,
     append_after_proof: Option<PathBuf>,
 ) -> (NativePort, Arc<Mutex<PollCalls>>) {
-    let port = super::super::native_supply::port(
+    let port = crate::services::discord::turn_finalizer::terminal_handler::native_supply::port(
         f.ticket.channel_id,
         shared.clone(),
         capture.bindings.clone(),
@@ -644,7 +646,7 @@ async fn check_writer_rejection(fault: PollFault) {
     let append_path = match fault {
         PollFault::AppendAfterProof => Some(path.clone()),
         PollFault::EofRead => {
-            super::super::native_supply::native_terminal::read_probe::after_next_read(|bytes| {
+            crate::services::discord::turn_finalizer::terminal_handler::native_supply::native_terminal::read_probe::after_next_read(|bytes| {
                 assert_eq!(
                     bytes,
                     RAW_TAIL.as_bytes(),

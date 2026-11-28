@@ -23,7 +23,7 @@ use super::supervisor_relay::SessionBoundRelayAckTarget;
 /// §3.2 SAFETY INVARIANT: `NotDelivered` and every `Unknown`-class arm route
 /// through `watcher_terminal_resend_action` — no blind skip, no blind re-send.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum SessionBoundRelayAckOutcome {
+pub(in crate::services::discord) enum SessionBoundRelayAckOutcome {
     Delivered,
     FreshDelivered {
         committed_to: Option<u64>,
@@ -412,7 +412,7 @@ pub(super) fn watcher_relay_emission_timeout_failure_plan(
     )
 }
 
-pub(super) async fn wait_for_session_bound_relay_delivery_ack(
+pub(in crate::services::discord) async fn wait_for_session_bound_relay_delivery_ack(
     target: Option<&SessionBoundRelayAckTarget>,
     timeout: std::time::Duration,
 ) -> SessionBoundRelayAckOutcome {

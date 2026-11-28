@@ -6,53 +6,55 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PreEmitGuardOutcome {
+pub(in crate::services::discord) enum PreEmitGuardOutcome {
     ContinueWatcherLoop,
     Proceed,
 }
 
-pub(super) struct PreEmitGuardContext<'a> {
-    pub(super) http: &'a Arc<serenity::Http>,
-    pub(super) shared: &'a Arc<SharedData>,
-    pub(super) channel_id: serenity::ChannelId,
-    pub(super) watcher_provider: &'a ProviderKind,
-    pub(super) tmux_session_name: &'a String,
-    pub(super) output_path: &'a String,
-    pub(super) paused: &'a Arc<AtomicBool>,
-    pub(super) pause_epoch: &'a Arc<AtomicU64>,
-    pub(super) captured_turn: Option<&'a InflightTurnState>,
-    pub(super) cancel: &'a Arc<AtomicBool>,
-    pub(super) turn_delivered: &'a Arc<AtomicBool>,
+pub(in crate::services::discord) struct PreEmitGuardContext<'a> {
+    pub(in crate::services::discord) http: &'a Arc<serenity::Http>,
+    pub(in crate::services::discord) shared: &'a Arc<SharedData>,
+    pub(in crate::services::discord) channel_id: serenity::ChannelId,
+    pub(in crate::services::discord) watcher_provider: &'a ProviderKind,
+    pub(in crate::services::discord) tmux_session_name: &'a String,
+    pub(in crate::services::discord) output_path: &'a String,
+    pub(in crate::services::discord) paused: &'a Arc<AtomicBool>,
+    pub(in crate::services::discord) pause_epoch: &'a Arc<AtomicU64>,
+    pub(in crate::services::discord) captured_turn: Option<&'a InflightTurnState>,
+    pub(in crate::services::discord) cancel: &'a Arc<AtomicBool>,
+    pub(in crate::services::discord) turn_delivered: &'a Arc<AtomicBool>,
 }
 
-pub(super) struct PreEmitGuardLocals<'a> {
-    pub(super) epoch_snapshot: u64,
-    pub(super) monitor_auto_turn_deferred: bool,
-    pub(super) placeholder_msg_id: Option<serenity::MessageId>,
-    pub(super) turn_data_start_offset: u64,
-    pub(super) current_offset: u64,
-    pub(super) response_sent_offset: usize,
-    pub(super) data_start_offset: u64,
-    pub(super) stale_resume_detected: bool,
-    pub(super) last_edit_text: &'a String,
+pub(in crate::services::discord) struct PreEmitGuardLocals<'a> {
+    pub(in crate::services::discord) epoch_snapshot: u64,
+    pub(in crate::services::discord) monitor_auto_turn_deferred: bool,
+    pub(in crate::services::discord) placeholder_msg_id: Option<serenity::MessageId>,
+    pub(in crate::services::discord) turn_data_start_offset: u64,
+    pub(in crate::services::discord) current_offset: u64,
+    pub(in crate::services::discord) response_sent_offset: usize,
+    pub(in crate::services::discord) data_start_offset: u64,
+    pub(in crate::services::discord) stale_resume_detected: bool,
+    pub(in crate::services::discord) last_edit_text: &'a String,
 }
 
-pub(super) struct PreEmitGuardState<'a> {
-    pub(super) monitor_auto_turn_claimed: &'a mut bool,
-    pub(super) monitor_auto_turn_finished: &'a mut bool,
-    pub(super) monitor_auto_turn_synthetic_msg_id: &'a mut Option<serenity::MessageId>,
-    pub(super) monitor_auto_turn_ledger_generation: &'a mut Option<u64>,
-    pub(super) all_data: &'a mut String,
-    pub(super) all_data_start_offset: &'a mut u64,
-    pub(super) all_data_fully_mirrored_to_session_relay: &'a mut bool,
-    pub(super) all_data_session_bound_relay_ack: &'a mut Option<SessionBoundRelayAckTarget>,
-    pub(super) all_data_first_forwarded_relay_sequence: &'a mut Option<u64>,
-    pub(super) last_relayed_offset: &'a mut Option<u64>,
-    pub(super) last_observed_generation_mtime_ns: &'a mut Option<i64>,
-    pub(super) full_response: &'a mut String,
+pub(in crate::services::discord) struct PreEmitGuardState<'a> {
+    pub(in crate::services::discord) monitor_auto_turn_claimed: &'a mut bool,
+    pub(in crate::services::discord) monitor_auto_turn_finished: &'a mut bool,
+    pub(in crate::services::discord) monitor_auto_turn_synthetic_msg_id:
+        &'a mut Option<serenity::MessageId>,
+    pub(in crate::services::discord) monitor_auto_turn_ledger_generation: &'a mut Option<u64>,
+    pub(in crate::services::discord) all_data: &'a mut String,
+    pub(in crate::services::discord) all_data_start_offset: &'a mut u64,
+    pub(in crate::services::discord) all_data_fully_mirrored_to_session_relay: &'a mut bool,
+    pub(in crate::services::discord) all_data_session_bound_relay_ack:
+        &'a mut Option<SessionBoundRelayAckTarget>,
+    pub(in crate::services::discord) all_data_first_forwarded_relay_sequence: &'a mut Option<u64>,
+    pub(in crate::services::discord) last_relayed_offset: &'a mut Option<u64>,
+    pub(in crate::services::discord) last_observed_generation_mtime_ns: &'a mut Option<i64>,
+    pub(in crate::services::discord) full_response: &'a mut String,
 }
 
-pub(super) async fn run_pre_emit_guard(
+pub(in crate::services::discord) async fn run_pre_emit_guard(
     context: &PreEmitGuardContext<'_>,
     locals: PreEmitGuardLocals<'_>,
     state: &mut PreEmitGuardState<'_>,

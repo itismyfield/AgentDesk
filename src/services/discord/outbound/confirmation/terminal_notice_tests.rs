@@ -327,3 +327,287 @@ impl Drop for EgressTrap {
         }
     }
 }
+
+mod handle_send_contract_tests {
+    //! #3038 Phase A characterization tests — pin the `/api/discord/send`
+    //! body-parsing 400 responses and the legacy `channel_id` fallback /
+    //! `channel:` prefixing behavior of `handle_send` before the health.rs
+    //! directory decomposition. All expectations capture current behavior
+    //! as-is (no seam; empty `HealthRegistry`).
+
+    use crate::services::discord::health::HealthRegistry;
+    use crate::services::message_outbox::source_registry::SendCallerClass;
+
+    use crate::services::discord::outbound::send_api::{handle_send, handle_send_with_caller};
+
+    struct TestRuntimeRoot {
+        previous_root: Option<std::ffi::OsString>,
+        _temp: tempfile::TempDir,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl TestRuntimeRoot {
+        fn new() -> Self {
+            let lock = crate::config::shared_test_env_lock()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
+            let temp = tempfile::tempdir().expect("temp runtime root"); // agentdesk-audit: allow-unwrap — test setup in #[cfg(test)] mod
+            unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+            Self {
+                previous_root,
+                _temp: temp,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for TestRuntimeRoot {
+        fn drop(&mut self) {
+            match &self.previous_root {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+            }
+        }
+    }
+
+    async fn assert_source_gate_body(
+        caller_class: SendCallerClass,
+        source: &str,
+        expected_status: &str,
+        expected_error: &str,
+    ) {
+        let _runtime_root = TestRuntimeRoot::new();
+        let registry = HealthRegistry::new();
+        let body = serde_json::json!({
+            "target": "channel:999999999999999999",
+            "content": "hi",
+            "source": source,
+        })
+        .to_string();
+
+        let (status, body) = handle_send_with_caller(&registry, None, &body, caller_class).await;
+        assert_eq!(status, expected_status);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap(); // agentdesk-audit: allow-unwrap — test response JSON should parse
+        assert_eq!(body["ok"], false);
+        assert_eq!(body["error"], expected_error);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn invalid_json_body_is_a_400_with_pinned_body() {
+        let registry = HealthRegistry::new();
+        let (status, body) = handle_send(&registry, None, "not json").await;
+        assert_eq!(status, "400 Bad Request");
+        assert_eq!(body, r#"{"ok":false,"error":"invalid JSON"}"#);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn missing_content_is_a_400_with_pinned_body() {
+        let _runtime_root = TestRuntimeRoot::new();
+        let registry = HealthRegistry::new();
+        let (status, body) = handle_send(&registry, None, r#"{"target":"channel:123"}"#).await;
+        assert_eq!(status, "400 Bad Request");
+        assert_eq!(body, r#"{"ok":false,"error":"content is required"}"#);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn missing_target_is_a_400_invalid_target() {
+        let _runtime_root = TestRuntimeRoot::new();
+        let registry = HealthRegistry::new();
+        let (status, body) = handle_send(&registry, None, r#"{"content":"hi"}"#).await;
+        assert_eq!(status, "400 Bad Request");
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["ok"], false);
+        assert_eq!(
+            body["error"],
+            crate::services::discord::outbound::send_target::SEND_TARGET_CONTRACT
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn channel_id_fallback_reaches_target_resolution_like_explicit_target() {
+        let _runtime_root = TestRuntimeRoot::new();
+        let registry = HealthRegistry::new();
+        // Legacy `channel_id` (numeric, no `channel:` prefix) must be accepted
+        // via the fallback + prefixing path and produce the exact same
+        // downstream response as the explicit `target` spelling.
+        let (fallback_status, fallback_body) = handle_send(
+            &registry,
+            None,
+            r#"{"channel_id":"999999999999999999","content":"hi","source":"system"}"#,
+        )
+        .await;
+        let (explicit_status, explicit_body) = handle_send(
+            &registry,
+            None,
+            r#"{"target":"channel:999999999999999999","content":"hi","source":"system"}"#,
+        )
+        .await;
+        assert_eq!(fallback_status, explicit_status);
+        assert_eq!(fallback_body, explicit_body);
+        // Both spellings clear target parsing and reach the authorization
+        // ladder: on an empty registry the unmapped channel is rejected by
+        // the role-map gate, not by target parsing.
+        assert_eq!(fallback_status, "403 Forbidden");
+        assert_eq!(
+            fallback_body,
+            r#"{"ok":false,"error":"channel not in role-map"}"#
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cli_caller_can_use_cli_sources_but_not_system() {
+        assert_source_gate_body(
+            SendCallerClass::Cli,
+            "agentdesk-cli",
+            "403 Forbidden",
+            "channel not in role-map",
+        )
+        .await;
+        assert_source_gate_body(
+            SendCallerClass::Cli,
+            "operator",
+            "403 Forbidden",
+            "channel not in role-map",
+        )
+        .await;
+        assert_source_gate_body(
+            SendCallerClass::Cli,
+            "system",
+            "403 Forbidden",
+            "source not allowed for this caller",
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dashboard_unknown_and_loopback_use_caller_specific_source_gate() {
+        assert_source_gate_body(
+            SendCallerClass::Dashboard,
+            "dashboard",
+            "403 Forbidden",
+            "channel not in role-map",
+        )
+        .await;
+        assert_source_gate_body(
+            SendCallerClass::Dashboard,
+            "headless_turn",
+            "403 Forbidden",
+            "source not allowed for this caller",
+        )
+        .await;
+        assert_source_gate_body(
+            SendCallerClass::Unknown,
+            "slo_alerter",
+            "403 Forbidden",
+            "source not allowed for this caller",
+        )
+        .await;
+        assert_source_gate_body(
+            SendCallerClass::LoopbackInternal,
+            "headless_turn",
+            "403 Forbidden",
+            "channel not in role-map",
+        )
+        .await;
+    }
+}
+
+mod manual_delivery_api_contract_tests {
+    use crate::services::discord::health::HealthRegistry;
+    use crate::services::discord::outbound::send_api::handle_send;
+
+    #[tokio::test]
+    async fn api_send_rejects_user_supplied_message_outbox_delivery_id_namespace() {
+        let registry = HealthRegistry::new();
+
+        let body = serde_json::json!({
+            "target": "channel:9000",
+            "content": "forged internal delivery",
+            "source": "headless_turn",
+            "bot": "notify",
+            "correlation_id": "message_outbox:headless_turn:terminal:forged",
+            "semantic_event_id": "message_outbox:41:deliver"
+        })
+        .to_string();
+        let (status, body) = handle_send(&registry, None, &body).await;
+        let response: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(status, "400 Bad Request");
+        assert_eq!(response["ok"], false);
+        assert_eq!(
+            response["error"],
+            "delivery_id correlation namespace is reserved"
+        );
+    }
+}
+
+mod send_gate_host_tests {
+    use crate::services::discord::outbound::send_gate;
+    use crate::services::provider::ProviderKind;
+    #[tokio::test]
+    async fn provider_notice_uses_channel_owner_tool_card_credentials() {
+        use crate::services::discord::{health::HealthRegistry, make_shared_data_for_tests};
+        use std::sync::Arc;
+        let registry = HealthRegistry::new();
+        let first = make_shared_data_for_tests();
+        let owner = make_shared_data_for_tests();
+        first.settings.write().await.allowed_channel_ids = vec![41];
+        owner.settings.write().await.allowed_channel_ids = vec![42];
+        first
+            .http
+            .cached_bot_token
+            .set("first-token".into())
+            .unwrap();
+        owner
+            .http
+            .cached_bot_token
+            .set("owner-token".into())
+            .unwrap();
+        registry.register("claude".into(), Arc::clone(&first)).await;
+        registry.register("claude".into(), Arc::clone(&owner)).await;
+        registry
+            .register_http(
+                "claude".into(),
+                first.serenity_http_or_token_fallback().unwrap(),
+            )
+            .await;
+        let options = send_gate::ManualOutboundOptions {
+            trusted_internal_outbox: true,
+            channel_owner_provider: Some(ProviderKind::Claude),
+            ..Default::default()
+        };
+        let http = send_gate::resolve_manual_bot_http(
+            &registry,
+            "claude",
+            poise::serenity_prelude::ChannelId::new(42),
+            &options,
+        )
+        .await
+        .unwrap();
+        assert!(http.token().ends_with("owner-token"));
+        first.settings.write().await.allowed_channel_ids.push(42);
+        assert_eq!(
+            send_gate::resolve_manual_bot_http(
+                &registry,
+                "claude",
+                poise::serenity_prelude::ChannelId::new(42),
+                &options
+            )
+            .await
+            .unwrap_err()
+            .0,
+            "503 Service Unavailable"
+        );
+        assert!(
+            send_gate::resolve_manual_bot_http(
+                &HealthRegistry::new(),
+                "claude",
+                poise::serenity_prelude::ChannelId::new(42),
+                &options
+            )
+            .await
+            .is_err()
+        );
+    }
+}

@@ -9,7 +9,7 @@ use poise::serenity_prelude::ChannelId;
 use crate::services::discord::queue_io::cancel_backstop_test_support as support;
 use crate::services::discord::{self as discord, inflight};
 use crate::services::provider::ProviderKind;
-use crate::test_support::wait::{WAIT_CAP, await_within};
+use adk_test_support::test_support::wait::{WAIT_CAP, await_within};
 
 /// Unhooks the channel's owner wake when the case ends.
 struct WakeHook(ChannelId);

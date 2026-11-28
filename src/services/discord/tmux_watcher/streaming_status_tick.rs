@@ -18,7 +18,7 @@ mod existing_panel_update;
 
 #[cfg(test)]
 #[path = "streaming_status_tick/committed_progress_tests.rs"]
-mod committed_progress_tests;
+pub(in crate::services::discord) mod committed_progress_tests;
 
 pub(super) async fn update_streaming_status_tick(
     ctx: &StreamingStatusTickContext<'_>,

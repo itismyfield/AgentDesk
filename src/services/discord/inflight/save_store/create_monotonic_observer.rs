@@ -214,7 +214,7 @@ pub(in crate::services::discord) mod test_seams {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-#[path = "create_monotonic_fixture_tests.rs"]
+#[path = "create_monotonic_fixture_test_support.rs"]
 pub(in crate::services::discord) mod fixture;
 
 #[cfg(test)]

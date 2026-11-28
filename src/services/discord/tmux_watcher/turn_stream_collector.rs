@@ -8,18 +8,18 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
 #[path = "turn_stream_collector/chunk_forward.rs"]
-mod chunk_forward;
+pub(in crate::services::discord) mod chunk_forward;
 use chunk_forward::{forward_turn_chunk_to_supervisor_relay, forwarded_chunk};
 #[path = "turn_stream_collector/state.rs"]
 mod state;
-pub(super) use state::*;
+pub(in crate::services::discord) use state::*;
 
 #[path = "turn_stream_collector/entry.rs"]
 mod entry;
 #[cfg(test)]
 #[path = "turn_stream_collector/observations_tests.rs"]
 mod o_test;
-pub(super) use entry::collect_turn_stream_until_terminal;
+pub(in crate::services::discord) use entry::collect_turn_stream_until_terminal;
 
 #[path = "turn_stream_collector/stream_seed.rs"]
 pub(super) mod stream_seed;

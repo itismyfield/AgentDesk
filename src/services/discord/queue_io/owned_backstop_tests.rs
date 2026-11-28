@@ -2,22 +2,36 @@
 //! for it, while an unowned channel's backstop still kicks.
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use super::*;
+use crate::services::discord::queue_io::backstop::hook_tests::{
+    OwnerAnsweredHook, set_owner_answered_hook,
+};
+use crate::services::discord::queue_io::backstop::{
+    DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY, arm_event_backstop_after_no_start_if_queue_nonempty,
+    arm_slow_idle_queue_backstop_if_queue_nonempty, schedule_deferred_idle_queue_kickoff,
+    schedule_deferred_idle_queue_kickoff_immediate,
+};
+use crate::services::discord::queue_io::cancel_backstop_test_support;
 use crate::services::discord::queue_io::input_owner::admission::{AdmissionTicket, admit};
+use crate::services::discord::{IdleQueueKickoffChannelOutcome, SharedData};
+use crate::services::provider::ProviderKind;
+use poise::serenity_prelude::ChannelId;
+use std::sync::Arc;
 
 /// Counts every kick a backstop fires at `channel`; no kick runs past the count.
 fn kicks(channel: ChannelId) -> (Arc<AtomicUsize>, impl Drop) {
     let count = Arc::new(AtomicUsize::new(0));
     let seen = count.clone();
-    let hook = super::super::set_idle_queue_kick_hook_for_tests(Arc::new(move |_, _, at, _| {
-        let seen = seen.clone();
-        Box::pin(async move {
-            if at == channel {
-                seen.fetch_add(1, Ordering::SeqCst);
-            }
-            Some(IdleQueueKickoffChannelOutcome::default())
-        })
-    }));
+    let hook = crate::services::discord::queue_io::set_idle_queue_kick_hook_for_tests(Arc::new(
+        move |_, _, at, _| {
+            let seen = seen.clone();
+            Box::pin(async move {
+                if at == channel {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                }
+                Some(IdleQueueKickoffChannelOutcome::default())
+            })
+        },
+    ));
     (count, hook)
 }
 
@@ -68,7 +82,7 @@ async fn no_backstop_schedules_or_fires_a_kick_at_an_owned_queue() {
     let admitted = admit(&mailbox, &original, AdmissionTicket::new()).await;
     assert!(matches!(
         admitted,
-        super::super::input_owner::admission::Admission::Accepted(_)
+        crate::services::discord::queue_io::input_owner::admission::Admission::Accepted(_)
     ));
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     assert_eq!(
@@ -200,7 +214,7 @@ async fn a_schedule_coalesced_during_the_slow_cycles_kick_wakes_the_new_owner() 
             Some(IdleQueueKickoffChannelOutcome::default())
         }) as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>>
     });
-    let _hook = super::super::set_idle_queue_kick_hook_for_tests(hook);
+    let _hook = crate::services::discord::queue_io::set_idle_queue_kick_hook_for_tests(hook);
     let outcome = IdleQueueKickoffChannelOutcome::default();
     let armed = arm_event_backstop_after_no_start_if_queue_nonempty(
         &shared, &provider, channel, outcome, "slow",
@@ -273,7 +287,7 @@ async fn a_schedule_coalesced_while_the_owner_check_answers_wakes_the_owner_once
             schedule_deferred_idle_queue_kickoff(shared.clone(), provider, channel, "after_owner");
         })
     });
-    OWNER_ANSWERED_HOOKS.insert(channel, hook);
+    set_owner_answered_hook(channel, Some(hook));
     let outcome = IdleQueueKickoffChannelOutcome::default();
     let armed = arm_event_backstop_after_no_start_if_queue_nonempty(
         &shared, &provider, channel, outcome, "slow",
@@ -290,7 +304,7 @@ async fn a_schedule_coalesced_while_the_owner_check_answers_wakes_the_owner_once
     for _ in 0..64 {
         tokio::task::yield_now().await;
     }
-    OWNER_ANSWERED_HOOKS.remove(&channel);
+    set_owner_answered_hook(channel, None);
     assert_eq!(
         fired.load(Ordering::SeqCst),
         1,
@@ -347,7 +361,7 @@ async fn a_coalesced_request_is_acknowledged_only_after_its_own_evaluation() {
             Some(IdleQueueKickoffChannelOutcome::default())
         }) as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>>
     });
-    let _hook = super::super::set_idle_queue_kick_hook_for_tests(hook);
+    let _hook = crate::services::discord::queue_io::set_idle_queue_kick_hook_for_tests(hook);
     schedule_deferred_idle_queue_kickoff_immediate(
         shared.clone(),
         provider.clone(),

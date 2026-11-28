@@ -182,12 +182,12 @@ fn persist_terminal_range(
     let (result, canonical, session) = frame;
     let (range, generation, source_file_identity) = source;
     let canonical = canonical.display().to_string();
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let crash_after_admission = std::env::var("ADK_7453_CRASH_CHANNEL")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         == Some(fresh.channel_id);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if crash_after_admission {
         assert_eq!(
             (local.full_response.len(), local.response_sent_offset),
@@ -278,7 +278,7 @@ fn persist_terminal_range(
             persisted.full_response, persisted.response_sent_offset
         ),
     );
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if crash_after_admission {
         std::process::exit(73);
     }
@@ -1479,7 +1479,7 @@ impl InflightTurnState {
 mod claude_terminal_tests;
 
 #[cfg(all(unix, any(test, feature = "test-support")))]
-#[path = "runtime_stamp/claude_terminal_fixture_tests.rs"]
+#[path = "runtime_stamp/claude_terminal_fixture_test_support.rs"]
 pub(in crate::services::discord) mod claude_terminal_fixture_tests;
 
 #[path = "runtime_stamp/stamp_guard.rs"]

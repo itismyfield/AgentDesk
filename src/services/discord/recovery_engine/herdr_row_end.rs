@@ -724,5 +724,5 @@ mod placeholder;
 pub(in crate::services::discord) mod tests;
 
 #[cfg(any(test, feature = "test-support"))]
-#[path = "herdr_row_end_hook_tests.rs"]
+#[path = "herdr_row_end_hook_test_support.rs"]
 pub(in crate::services::discord) mod row_end_hook_tests;

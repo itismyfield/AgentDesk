@@ -12,6 +12,7 @@ use crate::services::discord::inflight::{
 use crate::services::provider::ProviderKind;
 use crate::services::tui_prompt_dedupe as dedupe;
 
+use crate::services::discord::inflight::save_store::identity_gate::runtime_stamp::TuiTerminalRange;
 use crate::services::discord::inflight::save_store::identity_gate::runtime_stamp::claude_terminal_fixture_tests::Fixture;
 use crate::services::discord::{mailbox_snapshot, turn_bridge::STREAM_TEST_EVENTS};
 use crate::services::tui_o::cutover::test_override;
