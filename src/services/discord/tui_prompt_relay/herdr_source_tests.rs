@@ -266,6 +266,41 @@ fn mirror_pass_with_concurrent_herdr_launch(provider: ProviderKind) {
 }
 
 #[test]
+fn tmux_mirror_pass_defers_when_only_the_generation_changes() {
+    use super::super::rehydration;
+    use crate::services::discord::host_defer_gate::tests::ScriptedTmux;
+    use crate::services::tmux_common::spawn_markers::stamp_session_generation_marker;
+
+    let _root = crate::config::TestRuntimeRootGuard::with_isolated_config();
+    let ingress = Ingress::new();
+    let tmux = ScriptedTmux::install();
+    let name = "AgentDesk-claude-generation-change";
+    let session = uuid();
+    let path = ingress.transcript(&session);
+    let channel = CHANNEL.parse().unwrap();
+    let binding = crate::services::claude_tui::hook_server::observation_ingress::tests::claude(
+        &path, &session,
+    );
+    dedupe::register_tmux_channel(name, channel);
+    register_tmux_runtime_binding(name, binding.clone());
+    rehydration::AFTER_DEAD_PANE_SAMPLE.with_borrow_mut(|hook| {
+        *hook = Some(Box::new(move || {
+            assert!(stamp_session_generation_marker(name).is_some());
+        }));
+    });
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    rehydration::evict_dead_orphaned_claude_tui_mirrors(&shared);
+    let calls = tmux.take_calls();
+    assert_eq!(
+        calls.iter().filter(|call| call.contains(name)).count(),
+        1,
+        "targeted tmux probes: {calls:?}"
+    );
+    assert_eq!(runtime_binding_for_tmux_session(name), Some(binding));
+    assert_eq!(dedupe::owner_channel_for_tmux_session(name), Some(channel));
+}
+
+#[test]
 fn herdr_mirror_evicts_a_prior_tmux_nonce_but_keeps_the_current_herdr_nonce_pg() {
     use super::super::rehydration::evict_dead_orphaned_claude_tui_mirrors;
     use crate::db::dispatched_sessions::hosted_execution::test_support::{record, wire};
