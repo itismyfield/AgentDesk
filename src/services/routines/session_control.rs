@@ -1,6 +1,6 @@
 mod persistent_target;
 #[cfg(any(test, feature = "test-support"))]
-pub mod test_support;
+pub use super::discord_log::bot_http_tests as test_support;
 use anyhow::{Result, anyhow};
 use futures::future::BoxFuture;
 #[cfg(any(test, feature = "test-support"))]

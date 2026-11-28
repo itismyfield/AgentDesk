@@ -6,6 +6,7 @@ use poise::serenity_prelude::ChannelId;
 use serde::{Deserialize, Serialize};
 
 use super::super::{is_synthetic_headless_message_id_raw, runtime_store};
+use crate::services::discord::runtime_store::checkpoint_lock::CheckpointLock;
 use crate::services::provider::ProviderKind;
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -59,16 +60,8 @@ pub(super) fn advance(provider: &ProviderKind, channel: ChannelId, after: u64, o
     };
     let result = (|| -> Result<(), String> {
         // Lock the whole read/merge/publish so an older scan cannot undo a clear.
-        fs::create_dir_all(path.parent().ok_or("scanner path has no parent")?)
+        let guard = CheckpointLock::acquire(&path.with_extension("json.lock"), true)
             .map_err(|error| error.to_string())?;
-        let lock = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path.with_extension("json.lock"))
-            .map_err(|error| error.to_string())?;
-        lock.lock().map_err(|error| error.to_string())?;
         if read_at(&path, provider, channel).is_some_and(|prior| prior >= after) {
             return Ok(());
         }
@@ -81,7 +74,9 @@ pub(super) fn advance(provider: &ProviderKind, channel: ChannelId, after: u64, o
         };
         let data = serde_json::to_string(&progress).map_err(|error| error.to_string())?;
         runtime_store::atomic_write(&path, &data)?;
-        runtime_store::fsync_parent_and_ancestors(&path).map_err(|error| error.to_string())
+        let sync = runtime_store::fsync_parent_and_ancestors(&path);
+        drop(guard);
+        sync.map_err(|error| error.to_string())
     })();
     if let Err(error) = result {
         tracing::warn!(channel_id = channel.get(), provider = provider.as_str(), %error,
@@ -98,13 +93,7 @@ pub(super) fn remove(provider: &ProviderKind, channel: ChannelId) {
         return;
     }
     let result = (|| -> std::io::Result<()> {
-        let lock = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&lock_path)?;
-        lock.lock()?;
+        let guard = CheckpointLock::acquire(&lock_path, true)?;
         for file in [&path, &lock_path] {
             match fs::remove_file(file) {
                 Ok(()) => {}
@@ -112,7 +101,9 @@ pub(super) fn remove(provider: &ProviderKind, channel: ChannelId) {
                 Err(error) => return Err(error),
             }
         }
-        runtime_store::fsync_parent_dir(&path)
+        let sync = runtime_store::fsync_parent_dir(&path);
+        drop(guard);
+        sync
     })();
     if let Err(error) = result {
         tracing::warn!(channel_id=channel.get(), %error, "stale scanner progress removal failed");

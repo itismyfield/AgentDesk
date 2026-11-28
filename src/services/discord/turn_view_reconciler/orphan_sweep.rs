@@ -30,6 +30,8 @@ use crate::services::provider::ProviderKind;
 
 use super::*;
 
+mod intake;
+
 /// #4278: grace window before the orphan-`⏳` defense sweep may remove a
 /// persisted TUI-direct bot-anchor hourglass. A record younger than this is
 /// skipped so a legitimately slow-starting turn (whose inflight row has not
@@ -58,9 +60,7 @@ pub(in crate::services::discord) async fn sweep_orphan_tui_anchor_reactions(
     provider: &ProviderKind,
 ) -> usize {
     use crate::services::discord::{inflight, tui_direct_abort_marker, tui_direct_pending_start};
-    // codex r1 #2: pass-local marker cache — ONE `load_all` store read per
-    // sweep pass feeds every candidate's verdict-time marker probe (the prior
-    // per-candidate `load_for_channel` re-read the whole store O(P×M) times).
+    // The pass cache can preserve a target early. Removal uses fresh checked reads.
     let marker_anchors: HashSet<(u64, u64)> = tui_direct_abort_marker::load_all()
         .into_iter()
         .filter(|marker| marker.provider.eq_ignore_ascii_case(provider.as_str()))
@@ -71,35 +71,43 @@ pub(in crate::services::discord) async fn sweep_orphan_tui_anchor_reactions(
     let has_valid_marker = |channel_id: u64, anchor_message_id: u64| {
         marker_anchors.contains(&(channel_id, anchor_message_id))
     };
-    // codex r1 #1: removal-instant re-verification, evaluated FRESH inside the
-    // reconciler's target_lock right before the `⏳` removal (never from the
-    // pass cache — correctness beats cost here, and it only runs for actual
-    // removal candidates). Any of the three holds landing after the verdict
-    // aborts the removal: a live inflight row, an abort/deferred-claim marker
-    // covering the exact anchor, or a durable pending-start pinned to the
-    // exact anchor (its deferring worker owns this ⏳'s lifecycle).
+    // Recheck ownership at removal time under the target lock.
     let holds_before_removal = |channel_id: u64, anchor_message_id: u64| {
-        inflight::load_inflight_state_read_only(provider, channel_id).is_some()
-            || tui_direct_abort_marker::load_for_channel(provider.as_str(), channel_id)
-                .iter()
-                .any(|marker| marker.anchor_message_id == anchor_message_id)
-            || tui_direct_pending_start::load_all().iter().any(|record| {
-                record.provider.eq_ignore_ascii_case(provider.as_str())
-                    && record.channel_id == channel_id
-                    && record.anchor_message_id == anchor_message_id
-            })
+        !matches!(
+            tui_direct_pending_start::holds_for_retention(
+                provider,
+                channel_id,
+                Some(anchor_message_id)
+            ),
+            Ok(false)
+        ) || !matches!(
+            tui_direct_abort_marker::holds_for_retention(provider, channel_id, anchor_message_id),
+            Ok(false)
+        ) || !matches!(
+            inflight::load_inflight_state_read_only_result(provider, channel_id),
+            Ok(None)
+        )
     };
-    sweep_orphan_tui_anchors_with_probes(
+    let now = SystemTime::now();
+    let cleared = sweep_orphan_tui_anchors_with_probes(
         &shared.turn_view_reconciler,
         shared,
-        SystemTime::now(),
+        now,
         Duration::from_secs(ORPHAN_TUI_ANCHOR_MIN_AGE_SECS),
         &has_live_inflight,
         &has_valid_marker,
         &holds_before_removal,
         "orphan_tui_anchor_sweep",
     )
-    .await
+    .await;
+    cleared
+        + intake::sweep(
+            &shared.turn_view_reconciler,
+            shared,
+            now,
+            &holds_before_removal,
+        )
+        .await
 }
 
 /// A persisted `tui_direct_bot_anchor` target currently in the `⏳` (Pending)
@@ -377,12 +385,16 @@ mod tests {
 
     fn write_pending_anchor(shared: &SharedData, channel_id: u64, message_id: u64) {
         let target = anchor_target(channel_id, message_id);
+        write_pending_target(shared, target);
+    }
+
+    fn write_pending_target(shared: &SharedData, target: TurnViewTarget) -> PathBuf {
         let record = PersistedTargetState {
             version: PERSISTED_STATE_VERSION,
             provider: shared.provider.as_str().to_string(),
             kind: target.kind.as_str().to_string(),
-            channel_id,
-            message_id,
+            channel_id: target.channel_id.get(),
+            message_id: target.message_id.get(),
             owner_generation: 7,
             owner_turn_id: "turn-orphan".to_string(),
             applied: TurnViewState::Pending.as_str().to_string(),
@@ -394,6 +406,7 @@ mod tests {
         let json = serde_json::to_string_pretty(&record).expect("serialize persisted anchor");
         crate::services::discord::runtime_store::atomic_write(&path, &json)
             .expect("write persisted anchor");
+        path
     }
 
     fn persisted_exists(channel_id: u64, message_id: u64) -> bool {
@@ -633,6 +646,165 @@ mod tests {
             1
         );
         assert!(hourglass_removed(&shared.turn_view_reconciler, 18_002));
+    }
+
+    #[tokio::test]
+    async fn runtime_hygiene_intake_sweep_expires_orphans_and_keeps_live_targets() {
+        let root = scoped_runtime_root();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let stale = 8 * 24 * 60 * 60;
+        let cases = [
+            (51, "pending", stale, false),
+            (52, "completed", stale, false),
+            (53, "queued", stale, false),
+            (54, "pending", stale, true),
+            (55, "pending", 60 * 60, false),
+        ];
+        let mut paths = Vec::new();
+        for (channel, applied, age, live) in cases {
+            let message = channel + 100;
+            let target = TurnViewTarget::intake_user_message(
+                ChannelId::new(channel),
+                MessageId::new(message),
+            );
+            let path = TurnViewReconciler::persisted_target_path(target).unwrap();
+            let record = PersistedTargetState {
+                version: PERSISTED_STATE_VERSION,
+                provider: shared.provider.as_str().into(),
+                kind: target.kind.as_str().into(),
+                channel_id: channel,
+                message_id: message,
+                owner_generation: 7,
+                owner_turn_id: "test-turn".into(),
+                applied: applied.into(),
+                identity_label: target.kind.identity_label().into(),
+                token_hash: Some(shared.token_hash.clone()),
+                start_attempt_id: None,
+            };
+            crate::services::discord::runtime_store::atomic_write(
+                &path,
+                &serde_json::to_string(&record).unwrap(),
+            )
+            .unwrap();
+            crate::services::discord::health::test_support::age_file(&path, age);
+            paths.push(path);
+            if live {
+                let state = crate::services::discord::inflight::InflightTurnState::new(
+                    shared.provider.clone(),
+                    channel,
+                    None,
+                    42,
+                    message,
+                    message + 1,
+                    "test prompt".into(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    0,
+                );
+                crate::services::discord::inflight::save_inflight_state(&state).unwrap();
+            }
+        }
+
+        let queue = crate::services::discord::runtime_store::discord_pending_queue_root()
+            .unwrap()
+            .join(shared.provider.as_str())
+            .join(&shared.token_hash)
+            .join("52.json");
+        fs::create_dir_all(queue.parent().unwrap()).unwrap();
+        fs::write(
+            &queue,
+            serde_json::json!({
+                "version": 2, "items": [], "head_injection": null,
+                "retained_inputs": [], "terminal_identities": [],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let cleared = sweep_orphan_tui_anchor_reactions(&shared, &shared.provider).await;
+        assert!(paths[3].exists() && paths[4].exists());
+        assert_eq!(cleared, 3);
+        assert!(paths[..3].iter().all(|path| !path.exists()));
+        assert!(queue.exists());
+        assert!(hourglass_removed(&shared.turn_view_reconciler, 151));
+        assert!(
+            !shared
+                .turn_view_reconciler
+                .ops()
+                .iter()
+                .any(|op| op.target.message_id.get() == 152)
+        );
+        drop(root);
+    }
+
+    #[tokio::test]
+    async fn runtime_hygiene_owner_intake_keeps_uncertain_pending_and_abort_evidence() {
+        let root = scoped_runtime_root();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = shared.provider.as_str();
+        let pending =
+            crate::services::discord::runtime_store::tui_direct_pending_start_root().unwrap();
+        let abort =
+            crate::services::discord::runtime_store::tui_direct_abort_marker_root().unwrap();
+        fs::create_dir_all(&pending).unwrap();
+        fs::create_dir_all(&abort).unwrap();
+        let filenames = |channel, anchor| format!("{provider}_{channel}_{anchor}.json");
+        let valid = crate::services::discord::tui_direct_pending_start::TuiDirectPendingStart {
+            provider: provider.into(),
+            channel_id: 71,
+            anchor_message_id: 171,
+            ..Default::default()
+        };
+        fs::write(
+            pending.join(filenames(71, 171)),
+            serde_json::to_vec(&valid).unwrap(),
+        )
+        .unwrap();
+        fs::create_dir(pending.join(filenames(72, 172))).unwrap();
+        let malformed = abort.join(filenames(73, 173));
+        fs::write(&malformed, "{broken json").unwrap();
+        let mismatched = abort.join(filenames(74, 174));
+        fs::write(
+            &mismatched,
+            serde_json::json!({
+                "provider": provider, "channel_id": 74, "anchor_message_id": 175,
+                "tmux_session_name": "test-abort-session", "aborted_at_ms": 1,
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let paths: Vec<_> = (71..=75)
+            .map(|channel| {
+                let target = TurnViewTarget::intake_user_message(
+                    ChannelId::new(channel),
+                    MessageId::new(channel + 100),
+                );
+                let path = write_pending_target(&shared, target);
+                crate::services::discord::health::test_support::age_file(&path, 8 * 24 * 60 * 60);
+                path
+            })
+            .collect();
+
+        let cleared = sweep_orphan_tui_anchor_reactions(&shared, &shared.provider).await;
+        assert_eq!(
+            fs::read_to_string(malformed.with_extension("json.bad")).unwrap(),
+            "{broken json"
+        );
+        assert!(mismatched.exists());
+        assert!(!paths[4].exists());
+        for (path, reason) in paths.iter().zip([
+            "valid pending-start",
+            "unreadable pending-start",
+            "quarantined abort marker",
+            "mismatched abort marker",
+        ]) {
+            assert!(path.exists(), "{reason} must block deletion");
+        }
+        assert_eq!(cleared, 1);
+        drop(root);
     }
 
     /// A real inflight hold appearing during the target-lock wait preserves the anchor.

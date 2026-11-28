@@ -57,6 +57,7 @@ mod model_catalog;
 mod model_picker_interaction;
 pub(crate) mod monitoring_status;
 pub(crate) use adk_runtime::services::discord::org_schema;
+#[cfg(test)]
 pub(crate) mod org_writer;
 pub(crate) mod outbound;
 mod placeholder_cleanup;

@@ -1,3 +1,4 @@
+pub(crate) use crate::runtime_layout::is_valid_commit_sha;
 use axum::{
     Json,
     extract::State,
@@ -52,23 +53,6 @@ fn request_suppresses_followup_outbox(headers: &HeaderMap) -> bool {
         let _ = headers;
         false
     }
-}
-
-/// Validate that `commit` is a bare lowercase hex git object name
-/// (`^[0-9a-f]{7,64}$`) so it can be safely used as a marker file name.
-///
-/// #3863: `commit` is attacker-influenceable (request body / loopback reviewer
-/// agent ingesting PR/issue text = prompt-injection vector). Without this guard
-/// `Path::join` would honour an absolute path (discarding the base dir) or `..`
-/// segments and let the caller create/empty-truncate arbitrary files outside
-/// `runtime/review_passed/`. Rejecting `/`, `\`, `..`, NUL, uppercase, and
-/// non-hex characters keeps the resulting path a direct child of that dir.
-pub(crate) fn is_valid_commit_sha(commit: &str) -> bool {
-    let len = commit.len();
-    (7..=64).contains(&len)
-        && commit
-            .bytes()
-            .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
 }
 
 /// Write a review-passed marker file for the reviewed commit.

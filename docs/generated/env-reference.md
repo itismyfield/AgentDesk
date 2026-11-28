@@ -131,7 +131,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `HOME` | `src/cli/doctor/orchestrator.rs`, `src/cli/herdr.rs`, `src/config/session_hosts.rs`, `src/services/discord/sidecar_interaction.rs`, `src/services/mcp_config.rs`, `src/services/observability/events.rs`, `src/services/operator_connectors.rs`, `src/services/qwen.rs`, `src/services/routines/migrated.rs`, `src/services/session_host/herdr/autostart/spawn.rs` | Absolute socket path; defaults to $HOME/.config/herdr/herdr.sock |
 | `HOSTNAME` | `src/server/outbox_worker.rs`, `src/services/scheduled_messages.rs`, `src/services/tmux_common.rs` |  |
 | `LOCALAPPDATA` | `src/services/platform/binary_resolver.rs`, `src/services/stream_json_cli/dialects/agy.rs` |  |
-| `MEMENTO_WORKSPACE` | `src/server/routes/memory_api.rs`, `src/services/maintenance/jobs/memento_consolidation.rs`, `src/services/memory/memento.rs`, `src/services/memory/runtime_state.rs` |  |
+| `MEMENTO_WORKSPACE` | `src/server/routes/memory_api.rs`, `src/services/memory/memento.rs`, `src/services/memory/runtime_state.rs` |  |
 | `MISE_DATA_DIR` | `src/services/platform/binary_resolver.rs` |  |
 | `N_PREFIX` | `src/services/platform/binary_resolver.rs` |  |
 | `OBSIDIAN_REMOTE_VAULT_ROOT` | `src/services/operator_connectors.rs`, `src/services/routines/migrated.rs` |  |

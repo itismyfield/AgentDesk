@@ -327,6 +327,37 @@ async fn reclaim_orphan_placeholders(
             );
             continue;
         }
+        if !matches!(
+            super::tui_direct_pending_start::holds_for_retention(
+                provider,
+                channel_id,
+                Some(msg.id.get())
+            ),
+            Ok(false)
+        ) || !matches!(
+            super::tui_direct_abort_marker::holds_for_retention(provider, channel_id, msg.id.get()),
+            Ok(false)
+        ) {
+            continue;
+        }
+        // A pending start can publish the inflight row before removing its own record.
+        match super::inflight::load_inflight_state_read_only_result(provider, channel_id) {
+            Err(_) => continue,
+            Ok(Some(row))
+                if row.provider != provider.as_str()
+                    || row.channel_id != channel_id
+                    || [
+                        row.user_msg_id,
+                        row.current_msg_id,
+                        row.status_message_id.unwrap_or(0),
+                        row.injected_prompt_message_id.unwrap_or(0),
+                    ]
+                    .contains(&msg.id.get()) =>
+            {
+                continue;
+            }
+            Ok(_) => {}
+        }
         attempted += 1;
         let result = channel.delete_message(http, msg.id).await;
         crate::services::observability::emit_relay_delete_result(
