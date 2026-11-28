@@ -236,11 +236,27 @@ fn keyed(
 }
 
 #[cfg(unix)]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum MirrorHost {
     Tmux,
     Herdr,
     Deferred,
+}
+
+#[cfg(unix)]
+static MIRROR_WARNED: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, ProviderKind>>,
+> = std::sync::LazyLock::new(Default::default);
+
+#[cfg(unix)]
+pub(super) fn retain_mirror_lookup_warnings(
+    provider: &ProviderKind,
+    is_target: impl Fn(&str) -> bool,
+) {
+    MIRROR_WARNED
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .retain(|name, owner| owner != provider || is_target(name));
 }
 
 #[cfg(unix)]
@@ -263,32 +279,27 @@ pub(super) fn mirror_evict_admitted(
     channel_hint: Option<u64>,
 ) -> MirrorHost {
     use crate::services::session_host::HostKind;
-    use std::collections::HashSet;
-    use std::sync::{LazyLock, Mutex};
-
-    static WARNED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
 
     // Test runtimes built without a pool predate the guard; production requires PostgreSQL.
     #[cfg(test)]
     if shared.pg_pool.is_none() {
         return MirrorHost::Tmux;
     }
-    let gate = async {
-        use crate::services::agent_protocol::RuntimeHandoffKind;
-        use crate::services::{tmux_common, tui_prompt_dedupe as dedupe};
+    use crate::services::agent_protocol::RuntimeHandoffKind;
+    use crate::services::{tmux_common, tui_prompt_dedupe as dedupe};
 
-        // Use local identity evidence here: a tmux environment read is itself a probe.
-        let recorded =
-            crate::services::provider::parse_provider_and_channel_from_tmux_name(tmux_name)
-                .map(|(provider, _)| provider);
-        let kind = dedupe::runtime_binding_for_tmux_session(tmux_name)
-            .map(|binding| binding.runtime_kind)
-            .or_else(|| tmux_common::resolve_tmux_runtime_kind_marker(tmux_name));
-        let provider = recorded.as_ref().unwrap_or(match kind {
-            Some(RuntimeHandoffKind::ClaudeTui) => &ProviderKind::Claude,
-            Some(RuntimeHandoffKind::CodexTui) => &ProviderKind::Codex,
-            _ => provider,
-        });
+    // Use local identity evidence here: a tmux environment read is itself a probe.
+    let recorded = crate::services::provider::parse_provider_and_channel_from_tmux_name(tmux_name)
+        .map(|(provider, _)| provider);
+    let kind = dedupe::runtime_binding_for_tmux_session(tmux_name)
+        .map(|binding| binding.runtime_kind)
+        .or_else(|| tmux_common::resolve_tmux_runtime_kind_marker(tmux_name));
+    let provider = recorded.as_ref().unwrap_or(match kind {
+        Some(RuntimeHandoffKind::ClaudeTui) => &ProviderKind::Claude,
+        Some(RuntimeHandoffKind::CodexTui) => &ProviderKind::Codex,
+        _ => provider,
+    });
+    let gate = async {
         let channel = dedupe::owner_channel_for_tmux_session(tmux_name)
             .or(channel_hint)
             .unwrap_or(0);
@@ -312,14 +323,19 @@ pub(super) fn mirror_evict_admitted(
         },
         Err(_) => Err("no runtime for the host check; mirror kept"),
     };
-    let mut warned = WARNED.lock().unwrap_or_else(|error| error.into_inner());
+    let mut warned = MIRROR_WARNED
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     match result {
         Ok(host) => {
             warned.remove(tmux_name);
             host
         }
         Err(message) => {
-            if warned.insert(tmux_name.to_owned()) {
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                warned.entry(tmux_name.to_owned())
+            {
+                entry.insert(provider.clone());
                 drop(warned);
                 tracing::warn!(tmux_name, "{message}");
             }

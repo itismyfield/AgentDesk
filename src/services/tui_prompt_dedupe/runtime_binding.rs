@@ -19,6 +19,8 @@ pub use codex_policy::{
     codex_verified_source_allowed_under_source_authority,
 };
 mod codex_hook;
+#[cfg(unix)]
+pub(crate) use binding_access::evict_previous_tmux_mirror_under_source_authority;
 pub use binding_access::register_provider_session;
 use binding_access::same_runtime_source;
 pub use binding_access::{
@@ -949,16 +951,23 @@ pub fn evict_dead_tmux_mirror(tmux_session_name: &str) -> bool {
         return false;
     }
     let removed = with_runtime_binding_authority(tmux_session_name, |state| {
-        let removed_runtime = state.runtime_by_tmux.remove(tmux_session_name).is_some();
-        pane_registration::forget_restore_scope(state, tmux_session_name);
-        let removed_channel = state.channel_by_tmux.remove(tmux_session_name).is_some();
-        let removed_provider_sessions =
-            state.remove_provider_session_mappings_for_tmux(tmux_session_name);
-        removed_runtime || removed_channel || removed_provider_sessions
+        remove_tmux_mirror(state, tmux_session_name)
     });
+    clear_evicted_mirror_compact_state(tmux_session_name);
+    removed
+}
+
+fn remove_tmux_mirror(state: &mut TuiPromptDedupeState, tmux_session_name: &str) -> bool {
+    let runtime = state.runtime_by_tmux.remove(tmux_session_name).is_some();
+    pane_registration::forget_restore_scope(state, tmux_session_name);
+    let channel = state.channel_by_tmux.remove(tmux_session_name).is_some();
+    let sessions = state.remove_provider_session_mappings_for_tmux(tmux_session_name);
+    runtime || channel || sessions
+}
+
+fn clear_evicted_mirror_compact_state(tmux_session_name: &str) {
     crate::services::claude_compact_context::clear_launch_provenance_for_tmux(tmux_session_name);
     crate::services::claude_compact_trigger::clear_for_tmux(tmux_session_name);
-    removed
 }
 
 #[cfg(test)]

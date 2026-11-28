@@ -82,7 +82,23 @@ fn deferred_codex_pane_blocks_markerless_rollout_publication() {
         tmux.live(admitted);
         tmux.cwd(&cwd);
         let names = [deferred.to_owned(), admitted.to_owned()];
-        let hosts = HashMap::from([(names[0].clone(), false), (names[1].clone(), true)]);
+        for name in &names {
+            crate::services::tmux_common::write_tmux_runtime_kind_marker(
+                name,
+                RuntimeHandoffKind::CodexTui,
+            )
+            .unwrap();
+        }
+        let hosts = HashMap::from([
+            (
+                names[0].clone(),
+                super::super::super::host_defer_gate::MirrorHost::Deferred,
+            ),
+            (
+                names[1].clone(),
+                super::super::super::host_defer_gate::MirrorHost::Tmux,
+            ),
+        ]);
         let plan = codex_tui_rehydrate_plan(&names, &hosts);
         let published = rehydrate_codex_tui_binding_transaction(
             admitted,

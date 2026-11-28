@@ -195,6 +195,65 @@ pub fn runtime_bindings_for_kind(
         .collect()
 }
 
+#[cfg(unix)]
+pub(crate) fn evict_previous_tmux_mirror_under_source_authority(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    expected: &TuiRuntimeBinding,
+) -> bool {
+    let name = authority.session();
+    // A listing protects both an admitted source and publication in progress.
+    if expected.output_path.is_empty() || herdr_listing(name).is_some() {
+        return false;
+    }
+    let Some(channel) = owner_channel_for_tmux_session(name) else {
+        return false;
+    };
+    let Ok(Ok(events)) = binding_events::records_strict(channel) else {
+        return false;
+    };
+    let mut pane_events = events.iter().filter(|event| {
+        event.tmux_session == name
+            && !matches!(event.new, binding_events::BindingTarget::Rejected { .. })
+    });
+    if pane_events
+        .clone()
+        .any(|event| event.execution_nonce.is_some())
+    {
+        return false;
+    }
+    let matches_source = |event: &binding_events::BindingEvent| match &event.new {
+        binding_events::BindingTarget::Source(source)
+        | binding_events::BindingTarget::Resolved { source, .. } => {
+            expected.session_id.as_deref() == Some(source.session_id.as_str())
+                && std::path::Path::new(&expected.output_path) == source.path
+        }
+        _ => false,
+    };
+    let previous_tmux = match pane_events.next() {
+        Some(event) => matches_source(event) || pane_events.any(matches_source),
+        // A legacy mirror may have been registered before its channel, without a log entry.
+        None => {
+            super::super::binding_context::observe_spawn_nonce_marker(name)
+                == super::super::binding_context::SpawnNonceMarker::Absent
+        }
+    };
+    if !previous_tmux {
+        return false;
+    }
+    let removed = with_runtime_binding_state_under_source_authority(authority, |state| {
+        if state.runtime_by_tmux.get(name).map(|entry| &entry.value) != Some(expected)
+            || state.channel_by_tmux.get(name).map(|entry| entry.value) != Some(channel)
+        {
+            return false;
+        }
+        remove_tmux_mirror(state, name)
+    });
+    if removed {
+        clear_evicted_mirror_compact_state(name);
+    }
+    removed
+}
+
 pub fn codex_verified_publication_allowed(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     binding: &TuiRuntimeBinding,
