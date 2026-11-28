@@ -166,5 +166,22 @@ fn current_writer_compat_golden() -> String {
     bytes
 }
 
-#[path = "fixtures/previous_v2_reader.rs"]
-mod previous_v2;
+mod previous_v2 {
+    use super::current_writer_compat_golden;
+    use crate::services::turn_orchestrator::queued_head::v2_types::previous_v2::{
+        RetainedReason, SnapshotV2,
+    };
+
+    #[test]
+    fn previous_reader_decodes_current_writer_optional_metadata() {
+        let bytes = current_writer_compat_golden();
+        let old: SnapshotV2 = serde_json::from_str(&bytes)
+            .expect("previous V2 read-only decoder must accept current writer");
+        assert_eq!(old.version, 2);
+        assert!(matches!(
+            old.retained_inputs[0].reason,
+            RetainedReason::Rejected { .. }
+        ));
+        assert!(old.head_injection.is_some());
+    }
+}

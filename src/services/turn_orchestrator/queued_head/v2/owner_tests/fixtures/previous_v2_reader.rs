@@ -89,16 +89,3 @@ pub(crate) struct TerminalIdentity {
     pub(crate) identity: QueueIdentity,
     pub(crate) settled_at_ms: u64,
 }
-
-#[test]
-fn previous_reader_decodes_current_writer_optional_metadata() {
-    let bytes = super::current_writer_compat_golden();
-    let old: SnapshotV2 = serde_json::from_str(&bytes)
-        .expect("previous V2 read-only decoder must accept current writer");
-    assert_eq!(old.version, 2);
-    assert!(matches!(
-        old.retained_inputs[0].reason,
-        RetainedReason::Rejected { .. }
-    ));
-    assert!(old.head_injection.is_some());
-}
