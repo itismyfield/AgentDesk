@@ -170,6 +170,27 @@ for (const skipO of [false, true]) {
   });
 }
 
+test("onTick5min reports only the O error if the deadline passes after O starts", () => {
+  let sections = 0;
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    config: { server_port: 8791 },
+    withWorkDeadline(_reserveMs, work) {
+      const cutoffAfterO = ++sections === 4;
+      return work() || cutoffAfterO;
+    },
+    dbQuery(sql) {
+      if (sql.includes("idle_cursor_at")) throw new Error("candidate scan failed");
+      return [];
+    }
+  });
+
+  policy.onTick5min({});
+
+  assert.equal(sections, 4);
+  assert.equal(state.httpPosts.length, 0);
+  assert.deepEqual(state.logs.warn, ["[tick5min] O error: Error: candidate scan failed"]);
+});
+
 test("idle-kill advances past a repeatedly timed-out POST and rechecks it on the next sweep", () => {
   const rows = orderedRows([idleRow("slow"), idleRow("ready")]);
   const { policy, state } = loadPolicy("policies/timeouts.js", {

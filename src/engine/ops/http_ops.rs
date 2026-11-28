@@ -1224,7 +1224,11 @@ mod tests {
                 var warnings = [], gQueries = 0, slowG = true, ownerGets = 0, killPosts = 0;
                 var resumedSections = 0;
                 var agentdesk = {
-                    log: {warn: function(line) { warnings.push(line); }, debug: function() {}},
+                    log: {
+                        info: function() {},
+                        warn: function(line) { warnings.push(line); },
+                        debug: function() {}
+                    },
                     config: {get: function(key) { return key === "server_port" ? 8791 : 45; }},
                     pipeline: {
                         getConfig: function() { return {}; },
