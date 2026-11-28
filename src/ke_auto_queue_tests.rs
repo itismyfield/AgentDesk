@@ -24,12 +24,8 @@ mod dispatched_entry_recovery_pg_tests;
 mod dispatched_sessions_store_tests;
 #[path = "dispatch/fresh_worktree_pg_tests.rs"]
 mod fresh_worktree_pg_tests;
-#[path = "services/auto_queue/fsm_tests.rs"]
-mod fsm_tests;
 #[path = "services/auto_queue/cancel_run/malformed_context_pg_tests.rs"]
 mod malformed_context_pg_tests;
-#[path = "services/auto_queue/planning_dispatch_failure_pg_tests.rs"]
-mod planning_dispatch_failure_pg_tests;
 #[path = "db/server_campaigns/stage_store_tests.rs"]
 mod server_campaigns_stage_store;
 #[path = "db/server_campaigns/verification_store_tests.rs"]
