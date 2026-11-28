@@ -951,6 +951,28 @@ async fn a_codex_session_tool_list_is_skipped_and_the_answer_posts() {
     halt(stop, task).await;
 }
 
+/// A configuration update in the middle of a turn neither stops the actor nor holds the answer.
+#[tokio::test(start_paused = true)]
+async fn a_codex_configuration_update_is_skipped_and_the_answer_posts() {
+    let (harness, path, _) = switched_over(b"");
+    harness.gate.acquired();
+    let (stop, task) = spawn_as(harness.writer(), ShadowProvider::Codex);
+    let update = codex(json!({"type": "response_item", "payload": {
+        "type": "configuration_update", "reasoning": {"effort": "<effort>"}}}));
+    let turn = [
+        turn_event("task_started", "t1"),
+        update,
+        body("a1", "answer"),
+        turn_event("task_complete", "t1"),
+    ];
+    append(&path, &turn.concat());
+    polls(3).await;
+    assert!(!task.is_finished(), "the actor keeps running");
+    assert_eq!(harness.port.posts(), ["answer", "-# ✅ 완료"]);
+    assert_eq!(harness.alarms.taken(), []);
+    halt(stop, task).await;
+}
+
 #[tokio::test]
 async fn input_notice_upgrade_preserves_body_v2_through_v6_and_old_prepared_without_origin() {
     for version in 2..=6 {
