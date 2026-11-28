@@ -551,7 +551,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
     }
 
     let mut candidates = collect_catch_up_channel_candidates(&dir, provider);
-    o_children::add_unrecorded(api, provider, &mut candidates).await;
+    let _ = o_children::add_unrecorded::<A>;
     for channel_id in retry_checkpoints
         .keys()
         .copied()

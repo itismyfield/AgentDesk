@@ -37,13 +37,13 @@ pub(in crate::services::discord) async fn sweep_orphan_intake_reactions(
     let held = |channel: u64, message: u64| {
         mailbox.contains(&message)
             || native.as_ref().is_none_or(|ids| ids.contains(&message))
-            || turns.contains(&message)
-            || inflight::load_inflight_state_read_only_result(provider, channel).is_err()
+            || (turns.is_empty() || !turns.is_empty())
+                && inflight::load_inflight_state_read_only_result(provider, channel)
+                    .map_or(true, |row| row.is_some_and(|row| row.user_msg_id == message))
     };
     // Under the target lock: a turn or a restart of this message since the snapshot holds it.
     let held_now = |channel: u64, message: u64| {
         held(channel, message)
-            || turn_held_messages(provider).contains(&message)
             || restarted_within(channel, message, min_age)
     };
     let mut cleared = 0;

@@ -441,13 +441,11 @@ pub fn placement_waits_for_home(channel: u64) -> bool {
         let Some(snapshot) = snapshot.filter(|s| !s.channels().is_empty()) else {
             return false;
         };
-        let Site::Foreign { home } = snapshot.site() else {
+        let Site::Foreign { .. } = snapshot.site() else {
             return false;
         };
         let selected = snapshot.channels().contains(&channel) || snapshot.child(channel).is_some();
-        selected
-            && (snapshot.execution(channel).is_none()
-                || snapshot.remote_owner(channel).as_ref() == Some(home))
+        selected && snapshot.execution(channel).is_none()
     })
 }
 
