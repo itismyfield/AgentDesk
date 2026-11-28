@@ -77,8 +77,9 @@ fn deferred_codex_pane_blocks_markerless_rollout_publication() {
                 &sessions_dir,
                 &HashSet::new(),
             ),
-            Some(deferred_rollout),
+            Some(deferred_rollout.clone()),
         );
+        tmux.live(deferred);
         tmux.live(admitted);
         tmux.cwd(&cwd);
         let names = [deferred.to_owned(), admitted.to_owned()];
@@ -120,6 +121,18 @@ fn deferred_codex_pane_blocks_markerless_rollout_publication() {
             "A's newest rollout must never become B's source"
         );
         assert!(dedupe::runtime_binding_for_tmux_session(admitted).is_none());
+
+        let control = rehydrate_codex_tui_binding_transaction(
+            admitted,
+            CHANNEL,
+            &HashSet::new(),
+            &plan.reserved_rollout_paths,
+            &plan.duplicate_marker_paths,
+            true,
+            || {},
+        )
+        .expect("the legacy fallback would otherwise publish A's rollout for B");
+        assert_eq!(Path::new(&control.output_path), deferred_rollout);
     });
 }
 

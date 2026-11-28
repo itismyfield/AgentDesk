@@ -123,10 +123,11 @@ impl ScriptedTmux {
              echo \"$*\" >> \"$d/calls\"\n\
              [ \"$1\" = list-sessions ] && {{ cat \"$d/listed\" 2>/dev/null; exit 0; }}\n\
              [ -f \"$d/fail\" ] && {{ echo 'error connecting to socket' >&2; exit 1; }}\n\
-             if [ \"$1\" = display-message ] && [ -f \"$d/cwd\" ] && [ \"$4\" = \"=$(cat \"$d/live\"):\" ]; then\n\
+             live_target() {{ [ -f \"$d/live\" ] && grep -Fxq -- \"$1\" \"$d/live\"; }}\n\
+             if [ \"$1\" = display-message ] && [ -f \"$d/cwd\" ] && live_target \"$4\"; then\n\
                  cat \"$d/cwd\"; exit 0\n\
              fi\n\
-             if [ -f \"$d/live\" ] && [ \"$3\" = \"=$(cat \"$d/live\"):\" ]; then\n\
+             if live_target \"$3\"; then\n\
                  [ \"$1\" = list-panes ] && echo 0; exit 0\n\
              fi\n\
              echo \"can't find session: $3\" >&2; exit 1"
@@ -159,7 +160,12 @@ impl ScriptedTmux {
     }
 
     pub(crate) fn live(&self, name: &str) {
-        std::fs::write(self.dir.path().join("live"), name).unwrap();
+        let mut live = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.dir.path().join("live"))
+            .unwrap();
+        writeln!(live, "={name}:").unwrap();
     }
 
     pub(crate) fn cwd(&self, path: &std::path::Path) {
