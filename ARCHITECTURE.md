@@ -2278,6 +2278,7 @@ src/
 │   │   │   ├── raw_output.rs
 │   │   │   ├── reaction_control.rs
 │   │   │   ├── receipt_index.rs
+│   │   │   ├── restart_report_types.rs
 │   │   │   ├── result.rs
 │   │   │   ├── send_api.rs
 │   │   │   ├── send_gate.rs
@@ -2741,6 +2742,7 @@ src/
 │   │   │   │   │   │   │   ├── tests/
 │   │   │   │   │   │   │   │   └── activation_e2e_tests.rs
 │   │   │   │   │   │   │   └── tests.rs
+│   │   │   │   │   │   ├── busy_source.rs
 │   │   │   │   │   │   ├── busy_turn.rs
 │   │   │   │   │   │   ├── native_input.rs
 │   │   │   │   │   │   ├── pending_attached.rs
@@ -3065,6 +3067,7 @@ src/
 │   │   │   ├── validation.rs
 │   │   │   └── write.rs
 │   │   ├── shared_state/
+│   │   │   ├── catch_up_retry.rs
 │   │   │   ├── g7_host.rs
 │   │   │   ├── g7_host_tests.rs
 │   │   │   └── health_ports.rs

@@ -18,8 +18,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 try:
+    from ci.rust_test_inflow import audit_test_files, is_rust_source
     from rust_cfg import find_test_only_cfg_attribute
 except ModuleNotFoundError:  # imported from a repo-root unittest
+    from scripts.ci.rust_test_inflow import audit_test_files, is_rust_source
     from scripts.rust_cfg import find_test_only_cfg_attribute
 
 
@@ -236,7 +238,7 @@ def collect_added_lines() -> list[AddedLine]:
     if untracked.returncode == 0:
         for path in untracked.stdout.splitlines():
             if not (
-                is_selected_production_path(path)
+                is_rust_source(path)
                 or is_mutant_hook_path(path)
                 or (path.startswith("migrations/postgres/") and path.endswith(".sql"))
             ):
@@ -363,6 +365,13 @@ def test_region_lines(path: str) -> set[int]:
     except OSError:
         _TEST_REGION_CACHE[path] = result
         return result
+    result = inline_test_region(source)
+    _TEST_REGION_CACHE[path] = result
+    return result
+
+
+def inline_test_region(source: str) -> set[int]:
+    result: set[int] = set()
     code_lines = strip_rust_non_code(source).splitlines()
     raw_lines = source.splitlines()
 
@@ -408,7 +417,6 @@ def test_region_lines(path: str) -> set[int]:
         if active_depth is not None and depth < active_depth:
             active_depth = None
 
-    _TEST_REGION_CACHE[path] = result
     return result
 
 
@@ -705,7 +713,7 @@ def audit_source_text_guards(lines: list[AddedLine], allowlist: Path = SOURCE_GU
     allowed, findings = load_source_guard_allowlist(allowlist)
     by_path: dict[str, list[AddedLine]] = collections.defaultdict(list)
     for added in lines:
-        if is_mutant_hook_path(added.path):
+        if is_mutant_hook_path(added.path) or is_rust_source(added.path):
             by_path[added.path].append(added)
     for path, added_lines in sorted(by_path.items()):
         try:
@@ -949,13 +957,16 @@ def audit_sql_version_dependent_escapes(root: Path) -> tuple[list[str], int]:
 
 
 def main() -> int:
+    base = merge_base()
     lines = collect_added_lines()
     sql_findings, sql_files = audit_sql_version_dependent_escapes(Path("."))
     findings = (
         audit_unwrap_panic(lines)
         + audit_migration_integers(lines)
-        + audit_mutant_hooks(lines, merge_base() is not None, collect_removed_lines())
+        + audit_mutant_hooks(lines, base is not None, collect_removed_lines())
         + audit_source_text_guards(lines)
+        + audit_test_files(base, lambda source: bool(inline_test_region(source))
+                           or any(test for *_, test in rust_test_functions(source)))
         + audit_source_guard_rows(Path("."))
         + sql_findings
     )
