@@ -9,9 +9,17 @@ if [ -z "$compiler" ]; then
     echo "Cannot resolve deployment config: Rust compiler unavailable" >&2
     exit 1
 fi
+case "$compiler" in
+    /*) ;;
+    *) compiler="$PWD/$compiler" ;;
+esac
 resolver_dir="$(mktemp -d "${TMPDIR:-/tmp}/agentdesk-config-path.XXXXXX")"
+case "$resolver_dir" in
+    /*) ;;
+    *) resolver_dir="$PWD/$resolver_dir" ;;
+esac
 resolver="$resolver_dir/resolver"
 trap 'rm -f "$resolver_dir"/*; rmdir "$resolver_dir"' EXIT
-"$compiler" --edition 2024 --crate-name agentdesk_config_path \
-    "$script_dir/resolve_config_path.rs" -o "$resolver"
+(CDPATH='' cd -- "$script_dir/.." && "$compiler" --edition 2024 --crate-name agentdesk_config_path \
+    "$script_dir/resolve_config_path.rs" -o "$resolver")
 "$resolver" "${1:?runtime root required}"

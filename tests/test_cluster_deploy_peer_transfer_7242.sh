@@ -225,9 +225,7 @@ sys.exit(rc)
 PY
 cp "$ROOT/scripts/release_source.py" "$WORK/repo/scripts/"
 cp "$ROOT/scripts/resolve-config-path.sh" "$WORK/repo/scripts/"
-if [ -f "$ROOT/scripts/refresh_release_launchd_plist.py" ]; then
-    cp "$ROOT/scripts/refresh_release_launchd_plist.py" "$WORK/repo/scripts/"
-fi
+cp "$ROOT/scripts/refresh_release_launchd_plist.py" "$WORK/repo/scripts/"
 mkdir -p "$WORK/repo/scripts/lib" "$WORK/repo/skills" "$WORK/repo/policies" "$WORK/repo/dashboard"
 cp "$ROOT/scripts/lib/"*.sh "$WORK/repo/scripts/lib/"
 cp "$ROOT/scripts/_deploy_policy_generation.sh" "$WORK/repo/scripts/"
@@ -583,7 +581,7 @@ run_entry_case() (
     export AGENTDESK_DEPLOY_TEST_MODE=1 AGENTDESK_DEPLOY_NO_DETACH=1
     export AGENTDESK_DEPLOY_SKIP_FRESHNESS=1 AGENTDESK_DEPLOY_MAX_LOADAVG=5
     export AGENTDESK_ROOT_DIR="$WORK/leader" AGENTDESK_REPO_DIR="$WORK/repo"
-    export HOME="$WORK/home"
+    export HOME="$WORK/home/$scenario"
     export FAKE_RELEASE_DB_ROUTE=shell
     export AGENTDESK_DEPLOY_PEERS=peer FAKE_LOAD=9 FAKE_PENDING='[]'
     unset AGENTDESK_CONFIG AGENTDESK_DEPLOY_BINARY AGENTDESK_DEPLOY_PEER_ARTIFACT_DIR AGENTDESK_DEPLOY_TARGET_SHA

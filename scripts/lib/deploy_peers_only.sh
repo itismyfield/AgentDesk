@@ -1,27 +1,46 @@
 #!/usr/bin/env bash
 
 _deploy_cluster_role() {
-    # Match the generated service environment before applying its overrides.
-    local release_path="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$HOME/.cargo/bin:$HOME/.local/bin:$HOME/bin"
-    env -i HOME="$HOME" PATH="$release_path" AGENTDESK_ROOT_DIR="$ADK_REL" AGENTDESK_DCSERVER_LABEL="$PLIST_REL" \
-        "$BASH" --noprofile --norc -s -- "$SCRIPT_DIR" "$REL_LAUNCHD_ENV_FILE" <<EOF
+    local env_file="$REL_LAUNCHD_ENV_FILE"
+    local -a shell_args
+    [ "${1:-}" != existing ] || env_file=""
+    case "$env_file" in
+        ''|/*) ;;
+        *) env_file="$PWD/$env_file" ;;
+    esac
+    if [ "${1:-}" = existing ] || [ "$PLIST_REL" != com.agentdesk.release ]; then
+        shell_args=(python3 -I "$SCRIPT_DIR/refresh_release_launchd_plist.py" --role-context
+            "$HOME/Library/LaunchAgents/$PLIST_REL.plist" "$PLIST_REL" "$BASH"
+            --noprofile --norc -p -s -- "$SCRIPT_DIR" "$env_file" existing)
+    else
+        # Match the generated service environment before applying its overrides.
+        local release_path="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$HOME/.cargo/bin:$HOME/.local/bin:$HOME/bin"
+        shell_args=(env -i HOME="$HOME" PATH="$release_path" AGENTDESK_ROOT_DIR="$ADK_REL"
+            AGENTDESK_DCSERVER_LABEL="$PLIST_REL" "$BASH" --noprofile --norc -s -- "$SCRIPT_DIR" "$env_file")
+    fi
+    "${shell_args[@]}" <<EOF
 set -euo pipefail
 $(declare -f _read_deploy_cluster_role _release_config_path _apply_launchd_env_file_to_shell _parse_launchd_env_line _trim_whitespace)
 SCRIPT_DIR=\$1
 REL_LAUNCHD_ENV_FILE=\$2
-ADK_REL=\$AGENTDESK_ROOT_DIR
+if [ "\${3:-}" = existing ]; then
+    ADK_REL=\$(pwd -P) || exit 1
+else
+    ADK_REL=\$AGENTDESK_ROOT_DIR
+fi
 _read_deploy_cluster_role
 EOF
 }
 
 _read_deploy_cluster_role() {
-    case "$REL_LAUNCHD_ENV_FILE" in
-        /*) ;;
-        *) REL_LAUNCHD_ENV_FILE="$PWD/$REL_LAUNCHD_ENV_FILE" ;;
-    esac
     CDPATH='' cd -- "$ADK_REL" || return 1
     if [ -f "$REL_LAUNCHD_ENV_FILE" ]; then
         _apply_launchd_env_file_to_shell "$REL_LAUNCHD_ENV_FILE" || return 1
+    fi
+    unset BASH_ENV ENV
+    if [ -z "${HOME:-}" ] || [ -z "${PATH:-}" ]; then
+        echo '✗ Cannot verify the release service environment: HOME and PATH are required.' >&2
+        return 1
     fi
     local config_path="" default_root release_cwd runtime_root root previous_root=""
     release_cwd="$(pwd -P)" || return 1
@@ -97,7 +116,7 @@ _require_deploy_source_builder() {
 
 _run_peers_only() {
     local role deployed source_identity snapshot rc=0
-    if [ "$DEPLOY_PEER_INVOCATION" = 1 ] || ! role="$(_deploy_cluster_role)" \
+    if [ "$DEPLOY_PEER_INVOCATION" = 1 ] || ! role="$(_deploy_cluster_role existing)" \
         || [[ "$role" != primary && "$role" != standalone ]]; then
         echo '✗ [peers-only] run on the primary with a known cluster role.' >&2
         return 1

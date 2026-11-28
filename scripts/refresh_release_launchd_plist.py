@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Refresh release launchd arguments while preserving operator log destinations."""
+"""Read or refresh a release service plist."""
 from __future__ import annotations
 
 import argparse
@@ -8,7 +8,34 @@ from pathlib import Path
 import plistlib
 import stat
 import subprocess
+import sys
 import tempfile
+from xml.parsers.expat import ExpatError
+
+
+def read_plist(path: Path) -> dict:
+    with path.open("rb") as stream:
+        data = plistlib.load(stream)
+    if not isinstance(data, dict):
+        raise ValueError("launchd plist must be a dictionary")
+    return data
+
+
+def exec_role_context(path: Path, label: str, command: list[str]) -> None:
+    try:
+        plist = read_plist(path)
+        cwd = Path(plist["WorkingDirectory"])
+        env = plist["EnvironmentVariables"]
+        if plist.get("Label") != label or not cwd.is_absolute() or not isinstance(env, dict):
+            raise ValueError("invalid service context")
+        if not all(isinstance(key, str) and isinstance(value, str) for key, value in env.items()):
+            raise ValueError("invalid service environment")
+        # Leave an absent PATH detectable after the shell applies the deployment overrides.
+        env.setdefault("PATH", "")
+        os.chdir(cwd)
+        os.execve(command[0], command, env)
+    except (OSError, ValueError, TypeError, KeyError, ExpatError):
+        raise SystemExit("Cannot verify the existing release plist environment or working directory.")
 
 
 def refresh(binary: Path, home: Path, root: Path) -> None:
@@ -17,8 +44,7 @@ def refresh(binary: Path, home: Path, root: Path) -> None:
     logs = {}
     mode = 0o600
     if destination.exists():
-        with destination.open("rb") as stream:
-            current = plistlib.load(stream)
+        current = read_plist(destination)
         mode = stat.S_IMODE(destination.stat().st_mode)
         for key in ("StandardOutPath", "StandardErrorPath"):
             if key in current:
@@ -36,8 +62,7 @@ def refresh(binary: Path, home: Path, root: Path) -> None:
             "--home", str(home), "--root-dir", str(root),
             "--agentdesk-bin", str(binary), "--output", str(candidate),
         ], check=True)
-        with candidate.open("rb") as stream:
-            generated = plistlib.load(stream)
+        generated = read_plist(candidate)
         if generated.get("Label") != "com.agentdesk.release":
             raise ValueError("generated launchd plist has an unexpected label")
         generated.update(logs)
@@ -50,6 +75,8 @@ def refresh(binary: Path, home: Path, root: Path) -> None:
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["--role-context"]:
+        exec_role_context(Path(sys.argv[2]), sys.argv[3], sys.argv[4:])
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", required=True, type=Path)
     parser.add_argument("--home", required=True, type=Path)
