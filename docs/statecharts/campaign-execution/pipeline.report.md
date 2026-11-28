@@ -135,7 +135,7 @@ PROPERTY: `InstanceTerminates` — 시작된 instance는 결국 `done` 또는 `f
 | 39 | 별도 legacy pipeline API | `src/server/routes/domains/ops.rs:106`; `src/server/routes/pipeline.rs:92,112,129,279,317` | 모델 밖 |
 | 40 | legacy UI 저장·카드 추가 | `dashboard/src/api/campaigns.ts:188`; DC/`QueueAddToCampaign.tsx:22,29` | 모델 밖 |
 | 41 | layout | DC/`campaignViewStorage.ts:5,83,92,108`; DC/`CampaignRelationsEditor.tsx:213` | 실행 변수 없음(`LayoutIndependent` = stuttering) |
-| 42 | 공개 API inventory | `src/server/routes/docs/inventory/endpoints/server_campaigns.rs:4` | 모델 밖 |
+| 42 | 공개 API inventory | `docs/data/api-endpoints.json` | 모델 밖 |
 | 43 | Stage 소비: `TestEvidence::validate_execution_subject` | D/`profile.rs:450`(stage 대조 `:457`) | `ConditionFromCurrentVisit`. stage 대조 대신 (state, visit, graph pin) 대조 |
 | 44 | seal의 binding digest | D/`candidate_seal.rs:46`(`digest_of :78`) | 모델 밖(과거 digest 재현 decoder, C1). `PinAndFactsImmutable` |
 | 45 | begin_review의 digest 재검사 | S/`stage_fsm.rs:325★` | `Commit` 앞의 보호 가드(모델에서는 `Decidable`에 포함) |

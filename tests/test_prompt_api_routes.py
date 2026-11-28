@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 import os
 from pathlib import Path
 import shlex
@@ -18,14 +19,18 @@ class PromptRoutes(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.parts = self.root / 'src/server/routes/docs/inventory/endpoints'
-        self.parts.mkdir(parents=True)
-        (self.parts / 'mod.rs').write_text('mod part_01;\n')
-        self.part = self.parts / 'part_01.rs'
-        self.part.write_text('ep("POST", "/api/discord/send", "ops", "description /api/send")\n.with_curl("/api/send")\n')
+        self.catalog = self.root / 'docs/data/api-endpoints.json'
+        self.catalog.parent.mkdir(parents=True)
+        self.write_catalog('/api/discord/send')
         self.prompts = self.root / 'prompts'
         self.prompts.mkdir()
         self.prompt = self.prompts / 'agent.prompt.md'
+
+    def write_catalog(self, *paths):
+        self.catalog.write_text(json.dumps([
+            {'method': 'POST', 'path': path, 'category': 'ops', 'description': 'Example /api/send'}
+            for path in paths
+        ]), encoding='utf-8')
 
     def run_check(self, source, repo=None):
         self.prompt.write_text(source)
@@ -155,20 +160,20 @@ class PromptRoutes(unittest.TestCase):
             self.assertIn('agent.prompt.md:6:', output)
 
     def test_parameter_fullmatch(self):
-        self.part.write_text('ep("GET", "/api/item/{id}", "", "")\nep("GET", "/api/files/{*rest}", "", "")\n')
+        self.write_catalog('/api/item/{id}', '/api/files/{*rest}')
         for path, expected in [('item/abc', 0), ('item/', 1), ('item/a/b', 1), ('items/a', 1), ('files/a/b', 0), ('files/', 1)]:
             with self.subTest(path=path):
                 self.assertEqual(self.run_check('http://localhost:1/api/' + path)[0], expected)
 
     def test_unavailable(self):
-        for source in ('ep("GET", "/api/health", "", "")\nep(METHOD_CONST, "/api/discord/send", "", "")', '', 'ep(dynamic, "/api/send", "", "")', 'ep("GET", r"/api/send", "", "")'):
-            self.part.write_text(source)
-            rc, output = self.run_check('http://localhost:1/api/discord/send')
-            self.assertEqual(rc, 2)
-            self.assertIn('inspection_unavailable', output)
-        self.part.unlink()
-        self.assertEqual(self.run_check('')[0], 2)
-        (self.parts / 'mod.rs').write_text('')
+        for source in ('', '[]', '{}', '[null]', '[{"path": "/api/health"}]',
+                       '[{"method": "GET", "path": 42}]', '[{"method": "GET", "path": "relative"}]'):
+            with self.subTest(source=source):
+                self.catalog.write_text(source, encoding='utf-8')
+                rc, output = self.run_check('http://localhost:1/api/discord/send')
+                self.assertEqual(rc, 2)
+                self.assertIn('inspection_unavailable', output)
+        self.catalog.unlink()
         self.assertEqual(self.run_check('')[0], 2)
         self.assertEqual(self.run_check('', self.root / 'missing')[0], 2)
 
@@ -196,6 +201,15 @@ class PromptRoutes(unittest.TestCase):
         self.assertFalse(any(route.fullmatch('/api/send') for route in routes))
         self.assertIn('.route("/discord/send",', (REPO / 'src/server/routes/domains/ops.rs').read_text())
 
+    def test_named_module_routes_are_recognized(self):
+        for path in ('/api/agents/fixture/execution-node',
+                     '/api/decisions/fixture',
+                     '/api/kakao/calendar/events/fixture'):
+            with self.subTest(path=path):
+                rc, output = self.run_check(f'curl http://localhost:1{path}', REPO)
+                self.assertEqual(rc, 0, output)
+                self.assertIn('candidate_urls=1 unknown_paths=0', output)
+
     def test_invalid_utf8_is_unavailable_even_with_a_legacy_locale(self):
         self.prompt.write_text('http://localhost:1/api/discord/send', encoding='utf-8')
         read_text = Path.read_text
@@ -204,7 +218,7 @@ class PromptRoutes(unittest.TestCase):
             kwargs.setdefault('encoding', 'cp1252')
             return read_text(path, *args, **kwargs)
 
-        for path in (self.prompt, self.parts / 'mod.rs', self.part):
+        for path in (self.prompt, self.catalog):
             before = path.read_bytes()
             path.write_bytes(before + b'\n\xff\xfe')
             with self.subTest(path=path.name), patch.object(Path, 'read_text', legacy_read):
@@ -354,7 +368,7 @@ tmux() {
         mirror = self.root / 'release/config/agents/old.prompt.md'
         mirror.parent.mkdir(parents=True)
         mirror.write_bytes(b'original mirror')
-        self.part.unlink()
+        self.catalog.unlink()
         for strict in (False, True):
             for source in ('unset', 'empty', 'missing'):
                 with self.subTest(strict=strict, source=source):
