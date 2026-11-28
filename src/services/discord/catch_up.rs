@@ -1568,7 +1568,7 @@ mod catch_up_recovery_tests {
             settings.allow_all_users = true;
         }
         let provider = ProviderKind::Claude;
-        let (parent, thread) = (1479671298497183835_u64, 1479671298497183899_u64);
+        let (parent, thread) = (1_000_000_000_000_001_u64, 1_000_000_000_000_002_u64);
         let agents = serde_json::json!([{"id": "adk-cc", "name": "Catch up", "provider": "claude",
             "channels": {"claude": {"id": parent.to_string(), "runtime": "tui"}}}]);
         super::agentdesk_config::write_bindings_for_test(root.path(), agents.clone());
@@ -1581,7 +1581,7 @@ mod catch_up_recovery_tests {
             messages: vec![catch_up_test_message(
                 ChannelId::new(thread),
                 first,
-                343742347365974026,
+                1_000_000_000_000_003,
                 "첫 입력",
             )],
             child_threads: vec![(thread, parent)],
