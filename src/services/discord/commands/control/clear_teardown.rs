@@ -71,7 +71,7 @@ pub(super) async fn end_session(
     report: &mut ClearReport,
 ) {
     #[cfg(unix)]
-    forbid_idle_resume(shared, provider, channel_id, report);
+    let _ = forbid_idle_resume;
     let host = crate::services::discord::admin_host_guard::host_decision_of;
     let decision = host(shared, provider, channel_id.get()).await;
     let herdr = decision.is_herdr();
