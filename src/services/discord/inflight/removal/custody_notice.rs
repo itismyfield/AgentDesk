@@ -13,6 +13,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 pub(super) mod retention;
 
@@ -54,37 +55,32 @@ pub(super) async fn enqueue_custody_notices(
             return 0;
         }
     };
-    let notices = notices(custody, provider);
-    let Some(pool) = pool else {
-        if !notices.is_empty() {
-            tracing::warn!(
-                provider = provider.as_str(),
-                turns = notices.len(),
-                "custody notices wait for PostgreSQL"
-            );
-        }
-        return 0;
-    };
-    let (mut enqueued, mut removed, mut bytes) = (0, 0, 0u64);
-    for notice in &notices {
+    let mut enqueued = 0;
+    let mut retired = retention::Retired::default();
+    let now = SystemTime::now();
+    let mut waiting_for_pg = 0;
+    for (dir, marker) in episode_markers(custody, provider) {
+        let Some(notice) = notice_or_warn(&dir, provider, &marker) else {
+            if marker["tui_direct"] != true {
+                retired.expire(&dir, provider, &marker["episode"], None, now);
+            }
+            continue;
+        };
+        let Some(pool) = pool else {
+            waiting_for_pg += 1;
+            continue;
+        };
         let (session, dir) = (notice.session.as_str(), notice.dir.display());
-        match retention::terminal(pool, notice).await {
+        match retention::terminal(pool, &notice).await {
             Ok(Some(sent_at)) => {
                 if let Some(sent_at) = sent_at {
-                    match retention::remove_expired(
+                    retired.expire(
                         &notice.dir,
-                        sent_at.into(),
-                        std::time::SystemTime::now(),
-                    ) {
-                        Ok(Some(size)) => {
-                            removed += 1;
-                            bytes += size;
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            tracing::warn!(%dir, %error, "terminal custody retained after cleanup error")
-                        }
-                    }
+                        provider,
+                        &marker["episode"],
+                        Some(sent_at.into()),
+                        now,
+                    );
                 }
                 continue;
             }
@@ -115,14 +111,14 @@ pub(super) async fn enqueue_custody_notices(
             readdress(pool, id, &notice.bot).await;
         }
     }
-    if removed != 0 {
-        tracing::info!(
+    if waiting_for_pg != 0 {
+        tracing::warn!(
             provider = provider.as_str(),
-            removed,
-            bytes,
-            "custody retention removed"
+            turns = waiting_for_pg,
+            "custody notices wait for PostgreSQL"
         );
     }
+    retired.log(provider);
     enqueued
 }
 
@@ -140,9 +136,15 @@ async fn readdress(pool: &PgPool, id: i64, bot: &str) {
     }
 }
 
-/// The notice of each TUI-direct episode in custody; an episode whose marker fails is logged
-/// with its path and skipped.
+#[cfg(test)]
 pub(super) fn notices(custody: &Path, provider: &ProviderKind) -> Vec<Notice> {
+    episode_markers(custody, provider)
+        .into_iter()
+        .filter_map(|(dir, marker)| notice_or_warn(&dir, provider, &marker))
+        .collect()
+}
+
+fn episode_markers(custody: &Path, provider: &ProviderKind) -> Vec<(PathBuf, Value)> {
     let entries = match fs::read_dir(custody) {
         Ok(entries) => entries.flatten().map(|entry| entry.path()),
         Err(error) => {
@@ -154,28 +156,24 @@ pub(super) fn notices(custody: &Path, provider: &ProviderKind) -> Vec<Notice> {
     };
     let mut dirs: Vec<PathBuf> = entries.collect();
     dirs.sort();
-    let mut notices = Vec::new();
-    for dir in dirs {
-        if !fs::symlink_metadata(&dir).is_ok_and(|meta| meta.is_dir()) {
-            continue;
-        }
-        match episode_notice(&dir, provider) {
-            Ok(notice) => notices.extend(notice),
+    dirs.into_iter()
+        .filter(|dir| fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_dir()))
+        .filter_map(|dir| match read_episode_marker(&dir) {
+            Ok(marker) => Some((dir, marker)),
             Err((step, cause)) => {
-                let (provider, dir) = (provider.as_str(), dir.display());
-                tracing::warn!(provider, %dir, step, %cause, "custody episode skipped");
+                warn_skipped(&dir, provider, step, &cause);
+                None
             }
-        }
-    }
-    notices
+        })
+        .collect()
 }
 
-/// A TUI-direct episode's notice, keyed by the turn nonce its marker records (or, for an earlier
-/// build's anchorless marker, a copy names), else the digest of the marker's episode key.
-fn episode_notice(
-    dir: &Path,
-    provider: &ProviderKind,
-) -> Result<Option<Notice>, (&'static str, String)> {
+fn warn_skipped(dir: &Path, provider: &ProviderKind, step: &str, cause: &str) {
+    let (provider, dir) = (provider.as_str(), dir.display());
+    tracing::warn!(provider, %dir, step, %cause, "custody episode skipped");
+}
+
+fn read_episode_marker(dir: &Path) -> Result<Value, (&'static str, String)> {
     let marker = dir.join("episode.json");
     if !fs::symlink_metadata(&marker).is_ok_and(|meta| meta.is_file()) {
         return Err(("read episode.json", "not a regular file".to_string()));
@@ -183,7 +181,24 @@ fn episode_notice(
     let marker = fs::read(marker);
     let marker = marker.map_err(|error| ("read episode.json", error.to_string()))?;
     let marker = serde_json::from_slice::<Value>(&marker);
-    let marker = marker.map_err(|error| ("parse episode.json", error.to_string()))?;
+    marker.map_err(|error| ("parse episode.json", error.to_string()))
+}
+
+fn notice_or_warn(dir: &Path, provider: &ProviderKind, marker: &Value) -> Option<Notice> {
+    match episode_notice(dir, provider, marker) {
+        Ok(notice) => notice,
+        Err((step, cause)) => {
+            warn_skipped(dir, provider, step, &cause);
+            None
+        }
+    }
+}
+
+fn episode_notice(
+    dir: &Path,
+    provider: &ProviderKind,
+    marker: &Value,
+) -> Result<Option<Notice>, (&'static str, String)> {
     if marker["tui_direct"] != true {
         return Ok(None);
     }
