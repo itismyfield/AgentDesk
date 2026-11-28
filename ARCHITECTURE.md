@@ -2048,7 +2048,10 @@ src/
 │   │   │   ├── restart_recovery.rs
 │   │   │   ├── restart_recovery_tests.rs
 │   │   │   ├── retired_wake.rs
-│   │   │   └── root_replaced.rs
+│   │   │   ├── root_replaced.rs
+│   │   │   ├── root_replaced_hook_tests.rs
+│   │   │   ├── route_fixture_tests.rs
+│   │   │   └── terminate_hook_tests.rs
 │   │   ├── host_key_derivation/
 │   │   │   ├── ke_session_tests.rs
 │   │   │   └── ke_tests.rs
@@ -3167,6 +3170,7 @@ src/
 │   │   │   ├── loop_poll_prologue/
 │   │   │   │   ├── post_terminal_disposal_tests/
 │   │   │   │   │   └── compact_summary_tests.rs
+│   │   │   │   ├── post_terminal_disposal_root_tests.rs
 │   │   │   │   ├── post_terminal_disposal_tests.rs
 │   │   │   │   ├── types.rs
 │   │   │   │   └── watcher_resume.rs
@@ -3178,17 +3182,20 @@ src/
 │   │   │   │   ├── first_admission_tests.rs
 │   │   │   │   ├── footer_retirement_raw_tests.rs
 │   │   │   │   ├── legacy_state.rs
+│   │   │   │   ├── native_collector_mailbox_tests.rs
 │   │   │   │   ├── native_collector_tests.rs
 │   │   │   │   └── types.rs
 │   │   │   ├── supervisor_relay/
 │   │   │   │   └── supervisor_frame_source.rs
 │   │   │   ├── terminal_commit_epilogue/
+│   │   │   │   ├── continuation_marker_root_tests.rs
 │   │   │   │   ├── continuation_marker_tests.rs
 │   │   │   │   └── synthetic_mailbox_release_tests.rs
 │   │   │   ├── turn_identity/
 │   │   │   │   └── soft_terminal_authority.rs
 │   │   │   ├── turn_stream_collector/
 │   │   │   │   ├── chunk_forward.rs
+│   │   │   │   ├── chunk_forward_tests.rs
 │   │   │   │   ├── entry.rs
 │   │   │   │   ├── idle_read.rs
 │   │   │   │   ├── observations_tests.rs
@@ -3210,6 +3217,7 @@ src/
 │   │   │   ├── footer_retirement_tests.rs
 │   │   │   ├── herdr_entry_host_tests.rs
 │   │   │   ├── host_gate.rs
+│   │   │   ├── idle_sink_frontier_tests.rs
 │   │   │   ├── jsonl_rotation.rs
 │   │   │   ├── judged_stop_harness_tests.rs
 │   │   │   ├── legacy_state.rs
@@ -3221,6 +3229,7 @@ src/
 │   │   │   ├── o_capsule_origin_tests.rs
 │   │   │   ├── o_delegated_arm.rs
 │   │   │   ├── o_delegated_watcher_tests.rs
+│   │   │   ├── o_evidence_ack_tests.rs
 │   │   │   ├── o_evidence_tests.rs
 │   │   │   ├── o_seed_install_tests.rs
 │   │   │   ├── o_tail_owned_close_tests.rs
@@ -3242,9 +3251,11 @@ src/
 │   │   │   ├── provider_session_persistence_tests.rs
 │   │   │   ├── read_source_switch_tests.rs
 │   │   │   ├── receipt_watcher_harness_tests.rs
+│   │   │   ├── redrive_reclaim_e2e_tests.rs
 │   │   │   ├── rowless_delivery_authority.rs
 │   │   │   ├── scheduled_watcher_harness_tests.rs
 │   │   │   ├── session_bound_ack.rs
+│   │   │   ├── session_bound_ack_root_tests.rs
 │   │   │   ├── session_bound_ack_tests.rs
 │   │   │   ├── single_message_footer.rs
 │   │   │   ├── single_message_footer_tests.rs
@@ -3256,12 +3267,14 @@ src/
 │   │   │   ├── supervisor_relay.rs
 │   │   │   ├── supervisor_relay_tests.rs
 │   │   │   ├── task_response_authority.rs
+│   │   │   ├── task_response_authority_root_tests.rs
 │   │   │   ├── task_response_authority_tests.rs
 │   │   │   ├── terminal_abort_exits.rs
 │   │   │   ├── terminal_commit_epilogue.rs
 │   │   │   ├── terminal_delivery_types.rs
 │   │   │   ├── terminal_direct_fallback.rs
 │   │   │   ├── terminal_direct_fallback_edit.rs
+│   │   │   ├── terminal_direct_fallback_root_tests.rs
 │   │   │   ├── terminal_direct_fallback_send_tests.rs
 │   │   │   ├── terminal_direct_fallback_tests.rs
 │   │   │   ├── terminal_long_chunks.rs
@@ -3857,6 +3870,7 @@ src/
 │   │   │   │   ├── recovery_markers.rs
 │   │   │   │   ├── restore.rs
 │   │   │   │   ├── restore_core.rs
+│   │   │   │   ├── restore_hook_tests.rs
 │   │   │   │   ├── restore_legacy_tests.rs
 │   │   │   │   ├── restore_mapping.rs
 │   │   │   │   ├── restore_retry.rs
@@ -3866,7 +3880,8 @@ src/
 │   │   │   │   ├── tests.rs
 │   │   │   │   ├── watch_host.rs
 │   │   │   │   ├── watch_host_tests.rs
-│   │   │   │   └── watcher_install_fixture_tests.rs
+│   │   │   │   ├── watcher_install_fixture_tests.rs
+│   │   │   │   └── watcher_install_process_tests.rs
 │   │   │   ├── codex_tui_restore.rs
 │   │   │   ├── dispatched_origin_ghost.rs
 │   │   │   ├── dispatched_origin_ghost_tests.rs
@@ -3903,8 +3918,14 @@ src/
 │   │   ├── destructive_cancel_gate.rs
 │   │   ├── discord_io.rs
 │   │   ├── dispatch_policy.rs
+│   │   ├── dl_herdr_terminate_tests.rs
+│   │   ├── dl_herdr_terminate_unix_tests.rs
+│   │   ├── dl_tmux_watcher_tests.rs
+│   │   ├── dl_tmux_watcher_unix_tests.rs
 │   │   ├── dl_turn_bridge_tests.rs
 │   │   ├── dl_turn_bridge_unix_tests.rs
+│   │   ├── dl_turn_finalizer_tests.rs
+│   │   ├── dl_turn_finalizer_unix_tests.rs
 │   │   ├── dl_turn_presence_tests.rs
 │   │   ├── dl_turn_presence_unix_tests.rs
 │   │   ├── e2e_control.rs
