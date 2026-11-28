@@ -202,7 +202,7 @@ mod dl_misc_test_host;
 #[cfg(all(test, unix))]
 mod dl_misc_unix_test_host;
 #[cfg(test)]
-mod dl_recovery_engine_tests;
+mod dl_recovery_engine_test_host;
 #[cfg(all(test, unix))]
 mod dl_recovery_engine_unix_test_host;
 #[cfg(test)]
