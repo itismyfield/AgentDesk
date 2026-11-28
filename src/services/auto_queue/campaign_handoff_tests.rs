@@ -1,6 +1,8 @@
-use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::db::campaigns::CampaignInput;
+use crate::db::campaigns::{self, Campaign, CampaignInput};
+use crate::engine::PolicyEngine;
+use crate::services::auto_queue::route::campaign_handoff::HandoffReport;
+use crate::services::auto_queue::route::{hand_off_auto_campaigns_pg, hand_off_ready_nodes_pg};
 use crate::test_support::wait::poll_within;
 
 const REPO: &str = "Owner/Repo";
@@ -443,9 +445,11 @@ async fn postgres_activate_does_not_complete_a_run_the_handoff_is_filling_pg() {
         let pool = pool.clone();
         tokio::spawn(async move {
             let ctx = crate::services::auto_queue::AutoQueueLogContext::new().run("empty");
-            super::super::activate_command::complete_run_if_empty(&pool, "empty", &ctx)
-                .await
-                .is_ok()
+            crate::services::auto_queue::route::activate_command::complete_run_if_empty(
+                &pool, "empty", &ctx,
+            )
+            .await
+            .is_ok()
         })
     };
     poll_within(

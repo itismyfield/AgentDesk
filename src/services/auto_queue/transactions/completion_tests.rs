@@ -7,7 +7,7 @@ use crate::db::auto_queue::{
     ENTRY_STATUS_SKIPPED, EntryStatusUpdateOptions, RunCompletionBlockedReason,
     RunCompletionOutcome,
 };
-use crate::test_support::wait::{WAIT_CAP, await_within};
+use adk_test_support::test_support::wait::{WAIT_CAP, await_within};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 

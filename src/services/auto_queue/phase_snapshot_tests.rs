@@ -66,7 +66,7 @@ async fn existing_dispatch_recheck_attaches_the_pending_entry_pg() {
         )
         .await
     });
-    crate::test_support::wait::await_within(
+    adk_test_support::test_support::wait::await_within(
         async {
             loop {
                 let waiting: bool = sqlx::query_scalar(
@@ -82,7 +82,7 @@ async fn existing_dispatch_recheck_attaches_the_pending_entry_pg() {
                 tokio::task::yield_now().await;
             }
         },
-        crate::test_support::wait::WAIT_CAP,
+        adk_test_support::test_support::wait::WAIT_CAP,
     )
     .await;
     assert!(
@@ -98,10 +98,13 @@ async fn existing_dispatch_recheck_attaches_the_pending_entry_pg() {
     .await
     .unwrap();
     token.commit().await.unwrap();
-    let id = crate::test_support::wait::await_within(creator, crate::test_support::wait::WAIT_CAP)
-        .await
-        .unwrap()
-        .unwrap();
+    let id = adk_test_support::test_support::wait::await_within(
+        creator,
+        adk_test_support::test_support::wait::WAIT_CAP,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(id, "d-existing");
     let entry: (String, Option<String>, Option<i64>) = sqlx::query_as(
         "SELECT status, dispatch_id, slot_index::BIGINT FROM auto_queue_entries

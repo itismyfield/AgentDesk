@@ -1,7 +1,7 @@
 use super::*;
 
 /// POST /api/queue/slots/{agent_id}/{slot_index}/rebind
-pub(super) async fn rebind_slot_with_pg(
+pub(crate) async fn rebind_slot_with_pg(
     agent_id: &str,
     slot_index: i64,
     body: &RebindSlotBody,

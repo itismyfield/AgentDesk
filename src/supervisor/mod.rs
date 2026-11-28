@@ -9,7 +9,7 @@ use sqlx::{PgPool, Row as SqlxRow};
 use crate::engine::{PolicyEngine, PolicyEngineHandle};
 use crate::error::{AppError, ErrorCode};
 
-const SUPERVISOR_ACTOR: &str = "runtime_supervisor";
+pub(crate) const SUPERVISOR_ACTOR: &str = "runtime_supervisor";
 const AUDIT_ONLY_ACK_FIELD: &str = "supervisor_audit_only";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -484,9 +484,6 @@ impl std::fmt::Display for SupervisorAction {
         }
     }
 }
-
-#[cfg(test)]
-mod decision_log_pg_tests;
 
 #[cfg(test)]
 mod tests {

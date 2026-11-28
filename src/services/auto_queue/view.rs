@@ -49,17 +49,17 @@ pub(super) struct ResolvedDispatchCard {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct ActivateCardState {
+pub(crate) struct ActivateCardState {
     pub(super) status: String,
     pub(super) title: String,
-    pub(super) latest_dispatch_id: Option<String>,
-    pub(super) latest_dispatch_status: Option<String>,
+    pub(crate) latest_dispatch_id: Option<String>,
+    pub(crate) latest_dispatch_status: Option<String>,
     /// #3605 (codex R2): dispatch_type of `latest_dispatch_id`. Needed so the
     /// auto-queue attach decision can distinguish an attachable IMPLEMENTATION
     /// dispatch from an inert side-path (consultation / scope-assessment) that
     /// merely became latest_dispatch_id. `None` when there is no latest dispatch
     /// or it is not pending/dispatched.
-    pub(super) latest_dispatch_type: Option<String>,
+    pub(crate) latest_dispatch_type: Option<String>,
     pub(super) entry_status: String,
     pub(super) repo_id: Option<String>,
     pub(super) assigned_agent_id: Option<String>,
@@ -123,7 +123,7 @@ impl ActivateCardState {
     /// independent of the FSM review gate `has_active_dispatch`
     /// (engine::transition::GateSnapshot / kanban::transition_core), which is a
     /// separate count-based query and is intentionally left unchanged.
-    pub(super) fn has_active_dispatch(&self) -> bool {
+    pub(crate) fn has_active_dispatch(&self) -> bool {
         self.latest_dispatch_id.is_some()
             && matches!(
                 self.latest_dispatch_status.as_deref(),
@@ -184,11 +184,11 @@ impl ActivateCardState {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct RestoreEntryRecord {
-    pub(super) entry_id: String,
-    pub(super) card_id: String,
-    pub(super) agent_id: String,
-    pub(super) thread_group: i64,
+pub(crate) struct RestoreEntryRecord {
+    pub(crate) entry_id: String,
+    pub(crate) card_id: String,
+    pub(crate) agent_id: String,
+    pub(crate) thread_group: i64,
 }
 
 #[derive(Debug, Default)]
@@ -212,20 +212,20 @@ pub(super) enum RestoreEntryDecision {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct RestoreDispatchCandidate {
-    pub(super) entry: RestoreEntryRecord,
-    pub(super) title: String,
+pub(crate) struct RestoreDispatchCandidate {
+    pub(crate) entry: RestoreEntryRecord,
+    pub(crate) title: String,
 }
 
 #[derive(Debug, Default)]
-pub(super) struct RestoreDispatchAttemptResult {
-    pub(super) dispatched: bool,
+pub(crate) struct RestoreDispatchAttemptResult {
+    pub(crate) dispatched: bool,
     pub(super) created_dispatch: bool,
     pub(super) rebound_slot: bool,
     pub(super) unbound_dispatch: bool,
 }
 
-pub(super) async fn load_activate_card_state_pg(
+pub(crate) async fn load_activate_card_state_pg(
     pool: &sqlx::PgPool,
     card_id: &str,
     entry_id: &str,

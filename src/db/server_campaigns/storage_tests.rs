@@ -41,7 +41,7 @@ pub(super) async fn create(
     commands::create(pool, id, input, key, observed_at, render).await
 }
 
-pub(super) async fn execute(
+pub(crate) async fn execute(
     pool: &PgPool,
     id: &str,
     envelope: &CommandEnvelope,
@@ -49,7 +49,7 @@ pub(super) async fn execute(
     commands::execute(pool, id, envelope, render).await
 }
 
-pub(super) struct Harness {
+pub(crate) struct Harness {
     pub fixture: TestPostgresDb,
     pub pool: PgPool,
 }
@@ -109,7 +109,7 @@ impl Harness {
     }
 }
 
-pub(super) fn envelope(key: &str, command: Command) -> CommandEnvelope {
+pub(crate) fn envelope(key: &str, command: Command) -> CommandEnvelope {
     CommandEnvelope {
         idempotency_key: key.into(),
         observed_at: domain::now(),
@@ -117,21 +117,21 @@ pub(super) fn envelope(key: &str, command: Command) -> CommandEnvelope {
     }
 }
 
-pub(super) async fn send(pool: &PgPool, key: &str, command: Command) -> CommandOutcome {
+pub(crate) async fn send(pool: &PgPool, key: &str, command: Command) -> CommandOutcome {
     execute(pool, "campaign", &envelope(key, command))
         .await
         .unwrap()
         .outcome
 }
 
-pub(super) fn applied(outcome: CommandOutcome) -> CommandResult {
+pub(crate) fn applied(outcome: CommandOutcome) -> CommandResult {
     match outcome {
         CommandOutcome::Decided(Ok(result)) => result,
         other => panic!("expected decision, got {other:?}"),
     }
 }
 
-pub(super) fn rejected(outcome: CommandOutcome, code: RejectionCode) {
+pub(crate) fn rejected(outcome: CommandOutcome, code: RejectionCode) {
     assert_eq!(outcome, CommandOutcome::Decided(Err(Rejection::new(code))));
 }
 
@@ -145,7 +145,7 @@ pub(super) fn edit(revision: u64, title: &str) -> Command {
     }
 }
 
-pub(super) fn stop(mode: StopMode) -> Command {
+pub(crate) fn stop(mode: StopMode) -> Command {
     Command::RequestStop {
         expected_revision: 1,
         expected_run: "run".into(),

@@ -1,5 +1,5 @@
-use super::{ReleasedSlot, slot_taken_by_foreign_run_pg};
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::services::auto_queue::cleanup_tasks::{ReleasedSlot, slot_taken_by_foreign_run_pg};
 use crate::services::auto_queue::runtime::clear_slot_threads_for_runs_pg;
 use crate::services::discord::health::slot_row_host_refusal;
 

@@ -464,7 +464,3 @@ pub(crate) async fn hand_off_auto_campaigns_pg(
     }
     Ok(())
 }
-
-#[cfg(test)]
-#[path = "campaign_handoff_tests.rs"]
-mod tests;

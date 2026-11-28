@@ -8,7 +8,7 @@ pub(crate) use crate::db::dispatch_test_db::{
 #[cfg(test)]
 mod tests {
     use super::{DispatchPostgresTestDb, postgres_base_database_url};
-    use crate::test_support::wait::{WAIT_CAP, await_within, join_within};
+    use adk_test_support::test_support::wait::{WAIT_CAP, await_within, join_within};
 
     #[test]
     fn try_create_pg_contract() {

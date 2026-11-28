@@ -1016,22 +1016,26 @@ src/
 │   │   │   ├── phase_gates.rs
 │   │   │   └── retry.rs
 │   │   ├── activate_command.rs
+│   │   ├── activate_command_tests.rs
 │   │   ├── activate_preflight.rs
 │   │   ├── activate_route.rs
 │   │   ├── advisory_return_pg_tests.rs
 │   │   ├── campaign_handoff.rs
 │   │   ├── campaign_handoff_tests.rs
 │   │   ├── cancel_run.rs
+│   │   ├── cancel_run_pg_tests.rs
 │   │   ├── cleanup_tasks.rs
 │   │   ├── cleanup_tasks_ownership_pg_tests.rs
 │   │   ├── cleanup_tasks_pg_tests.rs
 │   │   ├── command.rs
+│   │   ├── command_advisory_pg_tests.rs
 │   │   ├── control_routes.rs
 │   │   ├── dispatch_assignment_command.rs
 │   │   ├── dispatch_command.rs
 │   │   ├── dispatch_query.rs
 │   │   ├── dispatched_entry_recovery_pg_tests.rs
 │   │   ├── fsm.rs
+│   │   ├── fsm_tests.rs
 │   │   ├── lifecycle_routes.rs
 │   │   ├── order_routes.rs
 │   │   ├── order_snapshot_tests.rs
@@ -1040,6 +1044,7 @@ src/
 │   │   ├── phase_gate_violations.rs
 │   │   ├── phase_snapshot_tests.rs
 │   │   ├── planning.rs
+│   │   ├── planning_dispatch_failure_pg_tests.rs
 │   │   ├── query.rs
 │   │   ├── route.rs
 │   │   ├── route_generate.rs
@@ -5692,6 +5697,8 @@ src/
 ├── high_risk_recovery.rs
 ├── intake_consent_authority.rs
 ├── ke_assembly_tests.rs
+├── ke_auto_queue_tests.rs
+├── ke_auto_queue_unix_tests.rs
 ├── ke_routines_tests.rs
 ├── krx_claude_tests.rs
 ├── krx_config_tests.rs
@@ -5766,6 +5773,8 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/high_risk_recovery.rs` | PG-only high-risk recovery tests for boot reconciliation and review refire paths. |
 | `src/intake_consent_authority.rs` | Owns the opaque before-effects consent proof and mounts the service issuer gated by worker-private scope keys. |
 | `src/ke_assembly_tests.rs` | Mounts KE assembly tests that use the root Discord registry and runtime fixtures. |
+| `src/ke_auto_queue_tests.rs` | Test-only host for KE auto-queue, dispatch, and database tests that use root-crate items. |
+| `src/ke_auto_queue_unix_tests.rs` | Unix test host for KE auto-queue and database tests that use root-crate items. |
 | `src/ke_routines_tests.rs` | Test-only host that declares KE routine and scheduled-message tests calling root-crate items. |
 | `src/krx_claude_tests.rs` | Test-only host that declares KRX claude tests calling root-crate items, so they leave the KRX crate. |
 | `src/krx_config_tests.rs` | Test-only host that declares KRX config/services tests calling root-crate items, so they leave the KRX crate. |

@@ -705,7 +705,7 @@ async fn release_and_persist_slots_for_task_pg(
 
 /// Skip known foreign owners early; the session UPDATE also checks ownership
 /// so reassignment after this probe cannot clear the successor's sessions.
-async fn slot_taken_by_foreign_run_pg(
+pub(crate) async fn slot_taken_by_foreign_run_pg(
     pool: &PgPool,
     run_ids: &[String],
     slot: &ReleasedSlot,
@@ -1461,7 +1461,3 @@ mod tests {
         }
     }
 }
-
-#[cfg(test)]
-#[path = "cleanup_tasks_ownership_pg_tests.rs"]
-mod ownership_pg_tests;

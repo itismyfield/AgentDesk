@@ -1,7 +1,11 @@
-use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::services::auto_queue::route::slot_routes::rebind_slot_with_pg;
+use crate::services::auto_queue::route::{
+    ActivateBody, AutoQueueActivateDeps, RebindSlotBody, activate_with_deps_pg,
+};
 use crate::test_support::wait::{WAIT_CAP, await_within};
 use sqlx::{Connection, PgConnection, PgPool};
+use std::sync::Arc;
 
 #[derive(Clone, Copy)]
 enum Operation {
@@ -29,7 +33,7 @@ impl Operation {
             )
             .await
             .map(|_| ()),
-            Self::Rebind => slot_routes::rebind_slot_with_pg(
+            Self::Rebind => rebind_slot_with_pg(
                 "lock-agent",
                 0,
                 &RebindSlotBody {

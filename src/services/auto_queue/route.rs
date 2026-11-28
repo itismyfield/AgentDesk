@@ -28,18 +28,15 @@ fn auto_queue_json_error(status: StatusCode, Json(body): Json<serde_json::Value>
 }
 
 #[path = "activate_command.rs"]
-mod activate_command;
+pub(crate) mod activate_command;
 #[path = "activate_preflight.rs"]
 mod activate_preflight;
 #[path = "activate_route.rs"]
 mod activate_route;
-#[cfg(test)]
-#[path = "advisory_return_pg_tests.rs"]
-mod advisory_return_pg_tests;
 #[path = "campaign_handoff.rs"]
-mod campaign_handoff;
+pub(crate) mod campaign_handoff;
 #[path = "command.rs"]
-mod command;
+pub(crate) mod command;
 #[path = "control_routes.rs"]
 mod control_routes;
 #[path = "dispatch_assignment_command.rs"]
@@ -49,7 +46,7 @@ mod dispatch_command;
 #[path = "dispatch_query.rs"]
 mod dispatch_query;
 #[path = "fsm.rs"]
-mod fsm;
+pub(crate) mod fsm;
 #[path = "lifecycle_routes.rs"]
 mod lifecycle_routes;
 #[path = "order_routes.rs"]
@@ -61,7 +58,7 @@ mod phase_gate_catalog;
 #[path = "phase_gate_violations.rs"]
 pub mod phase_gate_violations;
 #[path = "planning.rs"]
-mod planning;
+pub(crate) mod planning;
 #[path = "query.rs"]
 mod query;
 #[path = "route_generate.rs"]
@@ -72,9 +69,9 @@ mod route_types;
 #[path = "run_completion_activate_pg_tests.rs"]
 mod run_completion_activate_pg_tests;
 #[path = "slot_routes.rs"]
-mod slot_routes;
+pub(crate) mod slot_routes;
 #[path = "view.rs"]
-mod view;
+pub(crate) mod view;
 #[path = "view_admin_routes.rs"]
 mod view_admin_routes;
 

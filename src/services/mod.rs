@@ -167,7 +167,7 @@ mod krx_config_tests;
 #[cfg(test)]
 mod krx_db_b_tests;
 #[cfg(test)]
-mod krx_db_tests;
+pub(crate) mod krx_db_tests;
 #[cfg(all(test, unix))]
 mod krx_db_unix_tests;
 #[cfg(test)]

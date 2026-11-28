@@ -10,7 +10,7 @@ use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::auto_queue::transactions::{
     update_entry_status_on_pg, update_entry_status_on_pg_tx,
 };
-use crate::test_support::wait::poll_within;
+use adk_test_support::test_support::wait::poll_within;
 
 #[tokio::test]
 async fn cancelled_run_rejects_dispatched_tx_pg() {
