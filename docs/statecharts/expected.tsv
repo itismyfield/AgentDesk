@@ -1800,6 +1800,7 @@ session-lifecycle/HerdrIdleExpireMutOrphanCodex.cfg	HerdrIdleExpire	-	IdleEventu
 session-lifecycle/HerdrIdleExpireMutTurn.cfg	HerdrIdleExpire	NeverClosesBusy	-
 session-lifecycle/HerdrIdleExpirePrev.cfg	HerdrIdleExpire	NextMessageResumes	IdleEventuallyCloses
 session-lifecycle/HerdrIdleExpirePrevClear.cfg	HerdrIdleExpire	ClearNeverResumes	-
+session-lifecycle/HerdrIdleExpirePrevNoKey.cfg	HerdrIdleExpire	ClearNeverResumes	-
 session-lifecycle/HerdrIdleExpirePrevOverStart.cfg	HerdrIdleExpire	ClearNeverResumes	-
 session-lifecycle/HerdrMissingBoundAttachAfter.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundAttachAfterStale.cfg	HerdrMissingBound	-	-

@@ -10,7 +10,7 @@
 EXTENDS Naturals
 
 CONSTANTS Expire, CheckTurn, CheckInflight, CheckIdle, Exclude, RecordResume, KeepAtLock,
-          OrphanCodex, ClearForgets, BanEvery
+          OrphanCodex, ClearForgets, BanEvery, ChannelBan
 
 VARIABLES prov, gone, srv, registered, grace, rec, pane, turn, inflight, dispatch, idle, phase,
           alerts, closedBusy, closedUsed, selector, slot, file, effort, resumed, cleared,
@@ -40,7 +40,7 @@ Unlocked == phase # "reserved"
 \* cancelled. file: the idle end's own thread record (restart_intent/idle_resume.rs), kept apart
 \* from the owner. The next launch on a Retired row resumes: Claude from the kept claude_session_id,
 \* Codex only through an open intent or record, whatever the SQL selector says
-\* (codex/herdr_turn.rs:216 -> restart_intent.rs:68-71 -> restart_intent/idle_resume.rs:86).
+\* (codex/herdr_turn.rs:216 -> restart_intent.rs:68-71 -> restart_intent/idle_resume.rs:113).
 Resumes == IF prov = "claude" THEN selector = "kept" ELSE slot \in {"effort", "idle"} \/ file
 
 \* Input of the owning bot. On a retired row the turn launches a new execution, which spends any
@@ -145,7 +145,7 @@ IdleKillTick ==
 
 \* Under the transition lock (herdr_terminate.rs:510): the same-turn read, then (:550 ->
 \* idle_expire.rs:59) the row lock reading status, heartbeat and dispatch (:88), the inflight
-\* re-read, the Codex thread record (:114 -> idle_resume.rs:43), the fence; orphan: :300-303. A refusal writes nothing; the previous head cancelled the slot it had overwritten.
+\* re-read, the Codex thread record (:114 -> idle_resume.rs:55), the fence; orphan: :300-303. A refusal writes nothing; the previous head cancelled the slot it had overwritten.
 Reserve ==
     /\ srv = "up" /\ phase = "judged"
     /\ IF rec = "bound" /\ TurnClear /\ (~CheckIdle \/ idle) /\ ~dispatch
@@ -219,15 +219,19 @@ Restore ==
 
 \* The owner's /clear of a retired execution, on one of three paths (control.rs:584-585): alone
 \* (herdr_recovery.rs:117), over a launch's start scope (codex/herdr_turn.rs:147 registered; the
-\* clear takes clear_teardown.rs:174) or past a held transition (herdr_recovery.rs:167). First the
-\* idle record of that owner and nonce is cancelled (herdr_recovery.rs:339 -> idle_resume.rs:75):
+\* clear takes clear_teardown.rs:195) or past a held transition (herdr_recovery.rs:167). First the
+\* idle record of that owner and nonce is cancelled (herdr_recovery.rs:339 -> idle_resume.rs:87):
 \* every path with BanEvery, only the lone one before. A cancel that fails ends the clear unclaimed.
+\* keyed: the clear resolved its session key (control.rs:150). Over a start, clear_teardown.rs:195
+\* reads the execution by that key, so an unkeyed clear never cancels there yet still says it reset;
+\* ChannelBan cancels by the channel first (clear_teardown.rs:73 -> idle_resume.rs:99), key or not.
 \* "failed": a clear whose selector write did not land; the user was told it did not reset.
 ClearBan ==
     /\ srv = "up" /\ registered /\ rec = "retired" /\ ~cleared /\ clearing \in {"none", "failed"}
-    /\ \E path \in {"alone", "over_start", "held"}, landed \in BOOLEAN :
-         /\ clearing' = IF landed THEN path ELSE clearing
-         /\ file' = (file /\ ~(landed /\ ClearForgets /\ (path = "alone" \/ BanEvery)))
+    /\ \E path \in {"alone", "over_start", "held"}, landed \in BOOLEAN, keyed \in BOOLEAN :
+         LET tried == path = "alone" \/ (BanEvery /\ (path # "over_start" \/ keyed \/ ChannelBan))
+         IN /\ clearing' = IF landed \/ ~tried THEN path ELSE clearing
+            /\ file' = (file /\ ~(landed /\ tried /\ ClearForgets))
     /\ UNCHANGED <<prov, gone, srv, registered, grace, rec, pane, turn, inflight, dispatch, idle,
                    phase, alerts, closedBusy, closedUsed, selector, slot, effort, resumed, cleared,
                    clearResumed>>

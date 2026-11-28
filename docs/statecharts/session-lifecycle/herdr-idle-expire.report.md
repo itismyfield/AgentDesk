@@ -18,7 +18,7 @@ at Init, so every config checks a Claude and a Codex execution, with and without
 | Input on Retired | `install_pending_pg` over a Retired row. Claude resumes the kept `claude_session_id`; Codex `launch_of` → `resume_of`: the owner slot naming that execution first, else `idle_resume::kept` for the same owner and retired nonce; `ResumeStart` checks the O cursor |
 | DispatchAttach | `update_session_pg` plain `UPDATE` of `active_dispatch_id`; it waits behind the row lock (`Exclude`) |
 | Elapse | `last_heartbeat` older than 6 h; a quiet long turn or a restart can leave it stale |
-| ClearBan / ClearSelector | `/clear` of a retired execution takes one of three paths (`control.rs:584-585`): alone (`herdr_recovery.rs:117`), over a launch's start scope registered at `codex/herdr_turn.rs:147` (`clear_teardown.rs:174`), or past a held transition (`herdr_recovery.rs:167`). Each first cancels the idle record of that owner and nonce (`herdr_recovery.rs:339` → `idle_resume.rs:75`); a failed cancel reports `idle_resume` and writes no selector. Then the SQL selector (`clear_retired_selector_pg` or, held, `set_for_execution_pg`); only a write that lands claims the reset. (PrevOverStart) only the lone path cancelled; (PrevClear) none did |
+| ClearBan / ClearSelector | `/clear` of a retired execution takes one of three paths (`control.rs:584-585`): alone (`herdr_recovery.rs:117`), over a launch's start scope registered at `codex/herdr_turn.rs:147` (`clear_teardown.rs:195`, reached only when the clear resolves its session key), or past a held transition (`herdr_recovery.rs:167`). Each first cancels the idle record of that owner and nonce (`herdr_recovery.rs:339` → `idle_resume.rs:87`); a clear off the lone path also cancels the channel's record before it ends the session, key or not (`clear_teardown.rs:73` → `idle_resume.rs:99` `forbid_channel`, `ChannelBan`); a failed cancel reports `idle_resume` and writes no selector. Then the SQL selector (`clear_retired_selector_pg` or, held, `set_for_execution_pg`); only a write that lands claims the reset. (PrevNoKey) an unkeyed clear over a start cancelled nothing yet said it reset; (PrevOverStart) only the lone path cancelled; (PrevClear) none did |
 | Crash / Boot / GracePass / Register / Return / Restore | dcserver restart loses the mailbox and both locks; inflight file, pane, slot and record survive; `ORPHAN_AFTER_BOOT_SECS`; a removed bot never registers until it is added back; `restore_inflight.rs` |
 
 ## Entry points of the resume intent
@@ -29,7 +29,7 @@ at Init, so every config checks a Claude and a Codex execution, with and without
 | owner slot read | `effort_restart/herdr.rs` `herdr_resume` → `BootPorts::effort_resume` (`router/message_handler/provider_dispatch.rs`) |
 | idle record store | `idle_expire.rs` `IdleGate::keep` (under the transition lock and row reservation; orphan: inside `holds`) → `idle_resume::keep` |
 | idle record drop | `IdleGate` drop when the end never reached `release` → `idle_resume::forget` (operation compared) |
-| idle record cancel by /clear | `commands/control/herdr_recovery.rs:117` (alone), `:167` (held), `clear_teardown.rs:174` (over a launch start) → `herdr_recovery.rs:339` → `idle_resume.rs:75` `forbid` (nonce compared) |
+| idle record cancel by /clear | `commands/control/herdr_recovery.rs:117` (alone), `:167` (held), `clear_teardown.rs:195` (over a launch start, keyed) → `herdr_recovery.rs:339` → `idle_resume.rs:87` `forbid` (nonce compared); `clear_teardown.rs:73` (every clear off the lone path) → `idle_resume.rs:99` `forbid_channel` (any owner and nonce of the channel) |
 | consume | `codex/herdr_turn/restart_intent.rs` `resume_of` (slot first, else `idle_resume::kept`), spent once another execution holds the row |
 
 ## Results (plain TLC 1.7.4)
@@ -48,6 +48,7 @@ at Init, so every config checks a Claude and a Codex execution, with and without
 | MutOrphanCodex (no orphan end for Codex) | IdleEventuallyCloses | the rest |
 | PrevClear (`99fb38efcb`: /clear keeps the idle record) | ClearNeverResumes | the rest |
 | PrevOverStart (`ca6e9ceb99`: only the lone /clear cancels it) | ClearNeverResumes | the rest |
+| PrevNoKey (`f742a4e4ce`: the over-start cancel needs the session key) | ClearNeverResumes | the rest |
 
 Prev / MutLateKeep: `/effort` stores its intent, the idle tick overwrites the slot, `/effort` retires
 the execution, the idle end is refused and cancels the slot, and the next message opens a fresh
@@ -60,3 +61,6 @@ PrevOverStart: an idle end keeps a Codex record, a /clear overlapping a launch's
 transition) clears only the SQL selector and says the session was reset, and the next message
 resumes the cleared conversation. A clear whose selector write fails says it did not reset; the
 record it already cancelled leaves the next launch fresh.
+PrevNoKey: an idle end keeps a Codex record, a /clear overlapping a launch's start cannot resolve
+its session key, so it never reads the execution that would cancel the record, yet says the session
+was reset; the next message resumes the cleared conversation.
