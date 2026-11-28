@@ -321,6 +321,7 @@ gateway-lease/ChannelHomeAs7336.cfg	ChannelHome	Conservation,NoRefusal	Completes
 gateway-lease/ChannelHomeBefore.cfg	ChannelHome	FirstInputOnHome,NoRefusal	ServesOnExpected
 gateway-lease/ChannelHomeDesign.cfg	ChannelHome	-	-
 gateway-lease/ChannelHomeDesignClear.cfg	ChannelHome	-	-
+gateway-lease/ChannelHomeDesignRemoval.cfg	ChannelHome	-	-
 gateway-lease/ChannelHomeDrop.cfg	ChannelHome	Conservation	Completes
 gateway-lease/ChannelHomeIndexLag.cfg	ChannelHome	FirstInputOnHome	-
 gateway-lease/ChannelHomeLocalCfg.cfg	ChannelHome	Conservation,CurrentStore,FirstInputOnHome,NoDuplicate,SingleWriter	-

@@ -52,11 +52,10 @@ stateDiagram-v2
   s31: Home is the gateway (set to the gateway, 2 file edits so far), an input is handed to the gateway, idle session on the gateway [1 input left unanswered]
   s32: Home is the gateway (set to the designated node, the hub's file says otherwise, 2 file edits so far), an input is kept for the designated node, old home did not answer, idle session on the gateway [1 input left unanswered]
   s33: Home is the designated node (set to the designated node, the hub's file says otherwise, 2 file edits so far), an input is handed to the designated node, idle session on the gateway [1 input left unanswered]
-  s34: Home is the designated node (no node set, 2 file edits so far), an input is handed to the designated node, idle session on the gateway [1 input left unanswered]
-  s35: Home is the designated node (no node set, 2 file edits so far), an input is kept for the gateway, idle session on the gateway [1 input left unanswered]
-  s36: Home is the designated node (no node set, 2 file edits so far), an input is kept for the gateway, old home asked to end, idle session on the gateway [1 input left unanswered]
-  s37: Home is the designated node (no node set, 2 file edits so far), an input is kept for the gateway, old home ended, idle session on the gateway [1 input left unanswered]
-  s38: Home is the gateway (no node set, 2 file edits so far), an input is handed to the gateway, idle session on the gateway [1 input left unanswered]
+  s34: Home is the designated node (set to the gateway, 2 file edits so far), an input is handed to the designated node, idle session on the gateway [1 input left unanswered]
+  s35: Home is the designated node (set to the gateway, 2 file edits so far), an input is kept for the gateway, idle session on the gateway [1 input left unanswered]
+  s36: Home is the designated node (set to the gateway, 2 file edits so far), an input is kept for the gateway, old home asked to end, idle session on the gateway [1 input left unanswered]
+  s37: Home is the designated node (set to the gateway, 2 file edits so far), an input is kept for the gateway, old home ended, idle session on the gateway [1 input left unanswered]
   [*] --> s0
   s0 --> s1: an operator edits one node's config file
   s1 --> s2: you send a message
@@ -97,7 +96,7 @@ stateDiagram-v2
   s34 --> s35: the gateway's tick picks the target again
   s35 --> s36: the old home is asked to end its session
   s36 --> s37: the old home answers the request
-  s37 --> s38: the owner row moves to the new home
+  s37 --> s31: the owner row moves to the new home
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   class s0 tan
   class s0 bugPath
@@ -177,5 +176,3 @@ stateDiagram-v2
   class s36 bugPath
   class s37 pink
   class s37 bugPath
-  class s38 blue
-  class s38 repeats

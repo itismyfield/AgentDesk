@@ -19,34 +19,35 @@ Model: [ChannelHome.tla](ChannelHome.tla). One O channel, two nodes: D is the no
 - `ServesOnExpected` (PROPERTY): once restarts and edits stop, every turn that runs, runs on the expected home.
 - `OldSessionEnds` (PROPERTY): a session of an older generation ends while its node is up.
 
-The designation is `none`, `G` or `D`. `none` is no designation: an unmanaged channel stays on today's path and a managed one falls back to the gateway. Restarts of D (`MaxFlaps`), config edits (`MaxEdits`), `/clear` on the home (`MaxClears`) and new messages are the environment and carry no fairness. Every tick, hand-over, started turn and notice delivery is weakly fair.
+The designation is `none`, `G` or `D`; it starts as `none`. Only configs with `Removal = TRUE` (DesignRemoval, NoneHold) may edit it back to `none`, which keeps the other configs inside the CI budget. `none` is no designation: an unmanaged channel stays on today's path and a managed one falls back to the gateway. Restarts of D (`MaxFlaps`), config edits (`MaxEdits`), `/clear` on the home (`MaxClears`) and new messages are the environment and carry no fairness. Every tick, hand-over, started turn and notice delivery is weakly fair.
 
 ## Results (TLC 1.7.4, 4 workers)
 
 | cfg | Mode, bounds (flaps/edits/clears) | states | safety | liveness |
 |---|---|---:|---|---|
-| ChannelHomeBefore | `before` — main, 1/2/1 | 8,742 | RED `NoRefusal`, `FirstInputOnHome` | RED `ServesOnExpected` |
-| ChannelHomeAs7336 | `as7336` — the #7336 path switched on as it is, 0/2/0 | 12,831 | RED `Conservation`, `NoRefusal` | RED `Completes`, `Drains`, `OldSessionEnds` |
+| ChannelHomeBefore | `before` — main, 1/2/1 | 6,134 | RED `NoRefusal`, `FirstInputOnHome` | RED `ServesOnExpected` |
+| ChannelHomeAs7336 | `as7336` — the #7336 path switched on as it is, 0/2/0 | 9,204 | RED `Conservation`, `NoRefusal` | RED `Completes`, `Drains`, `OldSessionEnds` |
 | ChannelHomeDesign | `design`, 1/1/0 | 59,601 | GREEN | GREEN |
-| ChannelHomeDesignClear | `design`, 0/2/1 | 86,050 | GREEN | GREEN |
+| ChannelHomeDesignClear | `design`, 0/2/1 | 49,969 | GREEN | GREEN |
+| ChannelHomeDesignRemoval | `design`, 0/2/0, edits may remove the designation | 28,668 | GREEN | GREEN |
 | ChannelHomeThread | `design`, thread child, 1/1/0 | 66,447 | GREEN | GREEN |
-| ChannelHomeNoFence | mutation: post on the cached permit, 0/2/0 | 31,896 | RED `SingleWriter`, `NoDuplicate`, `CurrentStore` | holds |
+| ChannelHomeNoFence | mutation: post on the cached permit, 0/2/0, invariants only | 18,505 | RED `SingleWriter`, `NoDuplicate`, `CurrentStore` | not checked |
 | ChannelHomeLocalCfg | mutation: each node judges the home from its own file, 0/3/0, invariants only | 752,638 | RED `SingleWriter`, `NoDuplicate`, `Conservation`, `CurrentStore`, `FirstInputOnHome` | not checked |
-| ChannelHomeNoWait | mutation: the old owner ends a running turn instead of answering Busy, 0/2/0 | 33,466 | RED `BusyTurnFinishes` | holds |
-| ChannelHomeDrop | mutation: an admitted input leaves custody with no turn and no notice, 0/2/0 | 71,056 | RED `Conservation` | RED `Completes` |
-| ChannelHomeNoAdoptNative | mutation: cleanup and permit never see the adopted native, 0/2/0 | 13,448 | holds | RED `Completes`, `Drains`, `OldSessionEnds` |
-| ChannelHomeNoRenew | mutation: no new generation after the owner's own session ended, 0/2/1 | 59,004 | holds | RED `Completes`, `Drains` |
-| ChannelHomeReuseStore | mutation: a writer reuses a store of an older tenure, 0/2/0 | 31,924 | RED `CurrentStore` | holds |
-| ChannelHomeRawOnly | mutation: a held input is re-planned only on a raw revision change, 0/3/0 | 148,685 | holds | RED `Completes`, `Drains`, `HeldResolves` |
-| ChannelHomeThreadNoInherit | mutation: a thread reads its own designation, 0/2/0 | 1,207 | RED `FirstInputOnHome` | RED `ServesOnExpected` |
-| ChannelHomeThreadNoChild | mutation: D never records the thread child, 0/2/0 | 7,547 | holds | RED `Completes`, `Drains` |
-| ChannelHomeIndexLag | mutation: admission reads a designation index that lags the PG row, 0/2/0 | 93,725 | RED `FirstInputOnHome` | holds |
-| ChannelHomeNoNotice | mutation: a started turn is withheld with no notice reserved, 0/2/0 | 23,826 | RED `Conservation` | RED `Completes` |
-| ChannelHomeNoCancel | mutation: a plan that returns to the owner keeps the move's cleanup, 0/2/0 | 29,042 | RED `NoSelfCleanup` | holds |
-| ChannelHomeNoneHold | mutation: a held input gets no plan once the designation is removed, 0/2/0 | 27,510 | holds | RED `Completes`, `Drains`, `HeldResolves` |
-| ChannelHomeRenewRace | mutation: renew during a move's cleanup, plan judged without the owner generation, 0/2/0 | 29,580 | holds | RED `Completes`, `Drains`, `HeldResolves` |
+| ChannelHomeNoWait | mutation: the old owner ends a running turn instead of answering Busy, 0/2/0, invariants only | 19,393 | RED `BusyTurnFinishes` | not checked |
+| ChannelHomeDrop | mutation: an admitted input leaves custody with no turn and no notice, 0/1/0 | 3,349 | RED `Conservation` | RED `Completes` |
+| ChannelHomeNoAdoptNative | mutation: cleanup and permit never see the adopted native, 0/2/0 | 8,673 | holds | RED `Completes`, `Drains`, `OldSessionEnds` |
+| ChannelHomeNoRenew | mutation: no new generation after the owner's own session ended, 0/1/1 | 2,811 | holds | RED `Completes`, `Drains` |
+| ChannelHomeReuseStore | mutation: a writer reuses a store of an older tenure, 0/2/0 | 18,273 | RED `CurrentStore` | holds |
+| ChannelHomeRawOnly | mutation: a held input is re-planned only on a raw revision change, 0/2/0 | 15,405 | holds | RED `Completes`, `Drains`, `HeldResolves` |
+| ChannelHomeThreadNoInherit | mutation: a thread reads its own designation, 0/2/0 | 875 | RED `FirstInputOnHome` | RED `ServesOnExpected` |
+| ChannelHomeThreadNoChild | mutation: D never records the thread child, 0/2/0 | 4,952 | holds | RED `Completes`, `Drains` |
+| ChannelHomeIndexLag | mutation: admission reads a designation index that lags the PG row, 0/1/0 | 2,625 | RED `FirstInputOnHome` | holds |
+| ChannelHomeNoNotice | mutation: a started turn is withheld with no notice reserved, 0/2/0 | 13,855 | RED `Conservation` | RED `Completes` |
+| ChannelHomeNoCancel | mutation: a plan that returns to the owner keeps the move's cleanup, 0/2/0, invariants only | 16,832 | RED `NoSelfCleanup` | not checked |
+| ChannelHomeNoneHold | mutation: a held input gets no plan once the designation is removed, 0/2/0, edits may remove | 27,510 | holds | RED `Completes`, `Drains`, `HeldResolves` |
+| ChannelHomeRenewRace | mutation: renew during a move's cleanup, plan judged without the owner generation, 0/1/0 | 1,653 | holds | RED `Completes`, `Drains`, `HeldResolves` |
 
-LocalCfg has 752,638 states, so its properties would not fit the 300 s CI budget per config; it keeps the invariants it exists for. Its edits switch between the two nodes only, as `none` adds nothing to a disagreement between two files. Design, DesignClear and Thread are over the 500-state chart budget and have no chart. Each RED config has a bug-path chart named `channel-home-<mode>.chart.mmd`.
+LocalCfg has 752,638 states, so its properties would not fit the 300 s CI budget per config; it keeps the invariants it exists for. NoFence, NoWait and NoCancel are safety mutations and also run their invariants only. Every mutation uses the fewest edits that still break its rule; the CI check runs one TLC per rule on one worker. Its edits switch between the two nodes only, as `none` adds nothing to a disagreement between two files. Design, DesignClear, DesignRemoval and Thread are over the 500-state chart budget and have no chart. Each RED config has a bug-path chart named `channel-home-<mode>.chart.mmd`.
 
 ## Changes from revision 2
 
@@ -54,9 +55,11 @@ LocalCfg has 752,638 states, so its properties would not fit the 300 s CI budget
 |---|---|---|---|
 | Before | RED `NoRefusal` / `ServesOnExpected` | adds `FirstInputOnHome` | The sticky gateway session runs the first input after a designation; the new rule catches it once. |
 | As7336 | 1/2/1, 237,015 states | 0/2/0, same rules RED | At 1/2/1 the bigger model took 325 s. The same five rules break without a restart or `/clear`. |
-| Design, DesignClear, Thread | GREEN | GREEN with the new rules | Thread drops `/clear` (DesignClear has it): 1/1/1 took 131 s. |
+| Design, DesignClear, Thread | GREEN | GREEN with the new rules, plus DesignRemoval | Thread drops `/clear` (DesignClear has it): 1/1/1 took 131 s. DesignRemoval covers removing a designation and the held return G → D → G. |
 | LocalCfg | RED four rules / `Completes` | RED five rules, invariants only | See above. |
-| ReuseStore | 0/3/0 | 0/2/0 | Three designation values make G → D → G two edits. |
+| ReuseStore, RawOnly | 0/3/0 | 0/2/0 | Three designation values make G → D → G two edits. |
+| Drop, NoRenew | 0/2/x | 0/1/x | One edit is enough for the drop and the clear. |
+| NoFence, NoWait | properties hold | invariants only | Their rules are safety rules; the properties cost CI time and showed nothing. |
 | RawOnly, ThreadNoInherit | as before | add `HeldResolves`, `FirstInputOnHome` | The new rules also catch these. |
 | IndexLag, NoNotice, NoCancel, NoneHold, RenewRace | — | new, all RED | One per review finding: first-input misplacement, notice with no delivery, return during a move, removed designation, renew against a move. |
 

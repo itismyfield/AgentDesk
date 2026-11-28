@@ -24,11 +24,13 @@ stateDiagram-v2
   s7: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far), idle session on the gateway
   s8: No owner row, the gateway serves (set to the designated node, 1 file edit so far) [refusal shown]
   s9: No owner row, the gateway serves (set to the designated node, 1 file edit so far), idle session on the gateway
-  s10: No owner row, the gateway serves (set to the designated node, 1 file edit so far), an input waits at the gateway, idle session on the gateway
-  s11: No owner row, the gateway serves (set to the designated node, 1 file edit so far), turn runs on the gateway [an input ran on the wrong node]
-  s12: No owner row, the gateway serves (set to the designated node, 1 file edit so far), an input waits at the gateway, turn runs on the gateway [an input ran on the wrong node]
-  s13: No owner row, the gateway serves (set to the designated node, 1 file edit so far), an input waits at the gateway, idle session on the gateway [an input ran on the wrong node]
-  s14: No owner row, the gateway serves (set to the designated node, 1 file edit so far), idle session on the gateway [an input ran on the wrong node]
+  s10: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far), an input waits at the gateway, turn runs on the gateway
+  s11: No owner row, the gateway serves (set to the designated node, 1 file edit so far), an input waits at the gateway, idle session on the gateway
+  s12: No owner row, the gateway serves (set to the designated node, 1 file edit so far), turn runs on the gateway [an input ran on the wrong node]
+  s13: No owner row, the gateway serves (set to the designated node, 1 file edit so far), an input waits at the gateway, turn runs on the gateway
+  s14: No owner row, the gateway serves (set to the designated node, 1 file edit so far), turn runs on the gateway
+  s15: No owner row, the gateway serves (set to the designated node, 1 file edit so far), idle session on the gateway [an input ran on the wrong node]
+  s16: No owner row, the gateway serves (set to the designated node, 1 file edit so far), an input waits at the gateway, idle session on the gateway [an input ran on the wrong node]
   [*] --> s0
   s0 --> s1: an operator edits one node's config file
   s1 --> s2: you send a message
@@ -40,13 +42,16 @@ stateDiagram-v2
   s5 --> s7: the answer reaches Discord
   s6 --> s8: the gateway refuses to place the channel on another node
   s7 --> s9: the hub copies its setting to the database
-  s9 --> s10: you send a message
-  s10 --> s11: the gateway keeps the input on its live session
-  s11 --> s12: you send a message
-  s12 --> s13: the answer reaches Discord
-  s13 --> s11: the gateway keeps the input on its live session
-  s11 --> s14: the answer reaches Discord
+  s5 --> s10: you send a message
+  s9 --> s11: you send a message
+  s10 --> s13: the hub copies its setting to the database
+  s11 --> s12: the gateway keeps the input on its live session
+  s13 --> s11: the answer reaches Discord
+  s11 --> s14: the gateway keeps the input on its live session
   s14 --> s13: you send a message
+  s12 --> s15: the answer reaches Discord
+  s15 --> s16: you send a message
+  s16 --> s12: the gateway keeps the input on its live session
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
   class s0 tan
@@ -73,12 +78,16 @@ stateDiagram-v2
   class s10 tan
   class s10 bugPath
   class s11 tan
-  class s11 mayBreak
   class s11 bugPath
-  class s11 repeats
   class s12 tan
+  class s12 mayBreak
+  class s12 bugPath
   class s12 repeats
   class s13 tan
-  class s13 repeats
+  class s13 bugPath
   class s14 tan
-  class s14 repeats
+  class s14 bugPath
+  class s15 tan
+  class s15 repeats
+  class s16 tan
+  class s16 repeats

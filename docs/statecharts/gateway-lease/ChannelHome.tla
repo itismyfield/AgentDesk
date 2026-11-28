@@ -2,6 +2,7 @@
 \* One O channel whose execution node (O home) is set per channel (#8486).
 \* D is the designated node; G holds the Discord gateway lease and runs the channel when D
 \* cannot. The lease holder is fixed here; GatewayLease.tla covers how the lease moves.
+\* Removal = TRUE: an edit may also remove the designation once set.
 \* Thread = TRUE: the channel is a thread child; its designation is its parent's and D must
 \* record the child before its writer can start.
 \* Mode = "before":    main 5f0f2803e8. A designation never moves a live session, and without
@@ -21,7 +22,7 @@
 \* "nonehold" plans nothing for a held input once the designation is removed; "renewrace"
 \* renews during a move's cleanup and judges a plan without its owner generation.
 EXTENDS Naturals, FiniteSets
-CONSTANTS Mode, Thread, MaxFlaps, MaxEdits, MaxClears
+CONSTANTS Mode, Thread, MaxFlaps, MaxEdits, MaxClears, Removal
 
 Nodes == {"D", "G"}
 Vals == {"none", "G", "D"}
@@ -104,8 +105,9 @@ NewGen(m) == /\ owner' = m
 \* ---- configuration ----
 \* An operator edits one node's config file; the two files may differ. Only the hub's file
 \* feeds the PG row; the file-judging mutation edits both, between the two nodes only.
+\* Without Removal an edit sets a node; with it an edit may also clear the designation.
 EditYaml(n) == /\ edits < MaxEdits /\ edits' = edits + 1 /\ (Mode = "localcfg" \/ n = "G")
-               /\ \E v \in (IF Mode = "localcfg" THEN Nodes ELSE Vals) \ {yaml[n]} :
+               /\ \E v \in (IF Removal /\ Mode # "localcfg" THEN Vals ELSE Nodes) \ {yaml[n]} :
                      yaml' = [yaml EXCEPT ![n] = v]
                /\ UNCHANGED <<want, up, seen, owner, sess, stamp, run, view, q, qtok, tgt, proof, clean, ans, fate, refusals, cutBusy, flaps, bind, oldNat, store, clears, child, note, qs, misplaced, cstale, idx, selfCut>>
 \* Only the hub (G here) seeds the PG designation from its file.
