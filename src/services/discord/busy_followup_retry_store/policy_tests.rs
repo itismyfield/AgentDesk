@@ -121,6 +121,7 @@ async fn rewatch(
     session: &str,
 ) -> std::sync::Arc<crate::services::discord::SharedData> {
     use crate::services::claude_tui::composer_lock::{DraftGuard, guard_draft};
+    use crate::services::discord::queue_dispatch::busy_followup_retry::requeue_inflight_for_followup_retry;
     guard_draft(session, DraftGuard::DraftRestored);
     let live = std::collections::HashMap::from([(
         serenity::all::ChannelId::new(channel),
@@ -143,7 +144,7 @@ async fn rewatch(
     );
     state.followup_merge_consecutive = false;
     assert!(
-        store::requeue_inflight_for_followup_retry(
+        requeue_inflight_for_followup_retry(
             &shared,
             &ProviderKind::Claude,
             serenity::all::ChannelId::new(channel),

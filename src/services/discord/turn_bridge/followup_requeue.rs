@@ -205,6 +205,7 @@ fn rewatch_matching_draft_holds(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::discord::queue_dispatch::busy_followup_retry::requeue_inflight_for_followup_retry;
 
     /// A failed attempt that cost no bridge time.
     fn attempt(turn_id: &str) -> BusyAttempt<'_> {
@@ -1201,7 +1202,7 @@ mod tests {
         .unwrap();
         let row = inflight(channel, MessageId::new(input));
         assert!(
-            retries::requeue_inflight_for_followup_retry(&shared, &provider, channel, &row)
+            requeue_inflight_for_followup_retry(&shared, &provider, channel, &row)
                 .await
                 .enqueued
         );
@@ -1295,7 +1296,7 @@ mod tests {
                 let mut row = inflight(channel, MessageId::new(input));
                 row.user_text = format!("held source {input}");
                 assert!(
-                    retries::requeue_inflight_for_followup_retry(&shared, &provider, channel, &row)
+                    requeue_inflight_for_followup_retry(&shared, &provider, channel, &row)
                         .await
                         .enqueued
                 );

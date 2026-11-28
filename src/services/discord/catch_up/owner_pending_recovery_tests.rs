@@ -319,25 +319,32 @@ async fn a_v2_queue_channel_refuses_every_legacy_claim_and_keeps_its_file() {
 /// frontier stays before it, as for any queued input this binary did not run.
 #[tokio::test(flavor = "current_thread")]
 async fn catch_up_never_retakes_a_message_a_v2_queue_holds() {
-    let fx = Fixture::new().await;
-    let channel_id = ChannelId::new(7_272_504);
-    let (checkpoint, q) = (id(1, 600), id(2, 150));
-    fx.seed_checkpoint(channel_id, checkpoint);
-    let path = write_v2_queue(&fx, channel_id, q);
-    let before = std::fs::read(&path).unwrap();
-    let history = vec![own_reply(channel_id, checkpoint), human(channel_id, q)];
-    let api = StrictApi::new(&fx.shared).with_history(channel_id, history);
-    fx.sweep(&api).await;
-    assert_eq!(
-        api.enqueue_log(),
-        Vec::<EnqueueRecord>::new(),
-        "the V2 file keeps it"
-    );
-    assert_eq!(
-        fx.surfaces(channel_id),
-        (Some(checkpoint.get()), Some(checkpoint.get()))
-    );
-    assert_eq!(std::fs::read(&path).unwrap(), before);
+    for held_visible_at in [0, 1] {
+        let fx = Fixture::new().await;
+        let channel_id = ChannelId::new(7_272_504);
+        let (checkpoint, q) = (id(1, 600), id(2, 150));
+        fx.seed_checkpoint(channel_id, checkpoint);
+        let path = write_v2_queue(&fx, channel_id, q);
+        let before = std::fs::read(&path).unwrap();
+        let api = StrictApi::new(&fx.shared)
+            .with_history(channel_id, vec![own_reply(channel_id, checkpoint)])
+            .arriving_at(held_visible_at, human(channel_id, q));
+        fx.sweep(&api).await;
+        let fetches = api.fetch_log();
+        assert_eq!(fetches[0].2.contains(&q.get()), held_visible_at == 0);
+        assert!(fetches[1].1.cursor.is_none());
+        assert!(fetches[1].2.contains(&q.get()));
+        assert_eq!(
+            api.enqueue_log(),
+            Vec::<EnqueueRecord>::new(),
+            "the V2 file keeps it"
+        );
+        assert_eq!(
+            fx.surfaces(channel_id),
+            (Some(checkpoint.get()), Some(checkpoint.get()))
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
 }
 
 /// An input the V2 file's settled history holds was delivered: the real sweep does not take it
