@@ -43,7 +43,24 @@ fn eligibility(debt: &Undelivered) -> Eligibility<'_> {
 }
 
 fn owner(path: &Path) -> Owner {
-    Owner::adopt(path.to_path_buf(), "claude/rotation-tests".into()).unwrap()
+    let root = crate::services::discord::runtime_store::runtime_root().unwrap();
+    let root_is_ancestor = path
+        .parent()
+        .is_some_and(|parent| parent.starts_with(&root));
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_ansi(false)
+        .with_test_writer()
+        .finish();
+    eprintln!(
+        "rotation owner fixture: root={root:?} path={path:?} root_is_ancestor={root_is_ancestor}"
+    );
+    tracing::subscriber::with_default(subscriber, || {
+        Owner::adopt(path.to_path_buf(), "claude/rotation-tests".into())
+            .unwrap_or_else(|error| panic!("rotation owner adoption failed: {error}"))
+    })
 }
 
 fn request(native_session_id: Uuid) -> (RotationIntent, Handoff) {
