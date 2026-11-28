@@ -4,8 +4,7 @@ use crate::services::discord::{mailbox_finish_turn, mailbox_snapshot};
 struct Fixture {
     state: inflight::InflightTurnState,
     shared: Arc<SharedData>,
-    _env: crate::config::TestEnvVarGuard,
-    _root: tempfile::TempDir,
+    _owned_root: Option<(crate::config::TestEnvVarGuard, tempfile::TempDir)>,
 }
 
 impl Fixture {
@@ -15,12 +14,20 @@ impl Fixture {
             "AGENTDESK_ROOT_DIR",
             root.path(),
         );
+        let fixture = Self::with_root(channel, root.path());
+        Self {
+            _owned_root: Some((env, root)),
+            ..fixture
+        }
+    }
+
+    fn with_root(channel: u64, root: &std::path::Path) -> Self {
         let shared = super::super::make_shared_data_for_tests_with_storage(None);
         let mut state = super::tests::recovery_state(ProviderKind::Claude, channel);
         state.born_generation = 0;
         state.full_response = "published prefix\nunposted suffix".to_string();
         state.response_sent_offset = "published prefix\n".len();
-        let output = root.path().join("source.jsonl");
+        let output = root.join("source.jsonl");
         std::fs::write(&output, b"{\"type\":\"assistant\"}\n").expect("source");
         state.output_path = Some(output.to_string_lossy().into_owned());
         state.last_offset = std::fs::metadata(&output).expect("source EOF").len();
@@ -28,8 +35,7 @@ impl Fixture {
         Self {
             state,
             shared,
-            _env: env,
-            _root: root,
+            _owned_root: None,
         }
     }
 
@@ -628,16 +634,15 @@ async fn partial_eof_actual_controller_preserves_frozen_prefix_and_streamed_curr
 
 #[tokio::test(flavor = "current_thread")]
 async fn captured_live_partial_eof_preserves_failures_then_commits_and_clears_current_generation() {
-    let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    crate::services::discord::runtime_store::set_process_generation_for_tests(Some(5_071_900));
     verify_live_captured_commit(false).await;
     #[cfg(unix)]
     verify_live_captured_commit(true).await;
-    crate::services::discord::runtime_store::set_process_generation_for_tests(None);
 }
 
 async fn verify_live_captured_commit(adopt_v2: bool) {
-    let mut fixture = Fixture::new(5_071_806);
+    let root = crate::config::TestRuntimeRootGuard::new();
+    crate::services::discord::runtime_store::set_process_generation_for_tests(Some(5_071_900));
+    let mut fixture = Fixture::with_root(5_071_806, root.path());
     fixture.state.born_generation = 5_071_900;
     fixture.claim().await;
     let channel = ChannelId::new(fixture.state.channel_id);
@@ -650,7 +655,7 @@ async fn verify_live_captured_commit(adopt_v2: bool) {
             .shared
             .mailbox(channel)
             .v2_adopt(
-                fixture._root.path().join("v2-captured.json"),
+                root.path().join("runtime/v2-captured.json"),
                 "claude/captured".into(),
             )
             .await
@@ -694,6 +699,7 @@ async fn verify_live_captured_commit(adopt_v2: bool) {
             .cancel_token
             .is_none()
     );
+    crate::services::discord::runtime_store::set_process_generation_for_tests(None);
 }
 
 #[tokio::test(flavor = "current_thread")]
