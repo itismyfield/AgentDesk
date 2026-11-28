@@ -1,7 +1,7 @@
 // Reader's words for ChannelHome.tla: one O channel whose execution node is set per channel.
 // "Designated node" is the node the setting names; "gateway" is the node that holds the Discord
 // gateway lease and runs the channel when the designated node cannot.
-export const title = "One O channel with a per-channel execution node, issue 8486 (revision 3)";
+export const title = "One O channel with a per-channel execution node, issue 8486 (revision 4)";
 
 const node = (n) => (n === "D" ? "the designated node" : "the gateway");
 
@@ -43,6 +43,9 @@ const lifecycle = (v) => {
   const parts = [];
   if (dead.length) parts.push(`, ${dead.map(node).join(" and ")} cleared its session`);
   if (v.child) parts.push(", thread recorded on the designated node");
+  const residue = ["D", "G"].filter((n) => v.res[n] === "old");
+  if (residue.length) parts.push(`, ${residue.map(node).join(" and ")} keeps an older tenure's binding log`);
+  if (v.qclr) parts.push(", the waiting input was cleared");
   const pending = Object.entries(v.note).filter(([, reserved]) => reserved).length;
   if (pending) parts.push(`, ${pending} notice${pending > 1 ? "s" : ""} waiting in the outbox`);
   return parts.join("");
@@ -63,6 +66,9 @@ const harm = (v) => {
     marks.push("writes from an old store");
   if (Object.values(v.ans).some((count) => count > 1)) marks.push("answered twice");
   if (v.cutBusy) marks.push("busy turn cut");
+  if (Object.keys(v.ans).some((t) => v.ans[t] + v.ndel[t] > 1)) marks.push("two effects for one input");
+  if (Object.entries(v.fate).some(([t, fate]) => fate === "noticed" && v.ndel[t] === 0)) marks.push("noticed with no notice sent");
+  if (v.ranCleared) marks.push("a cleared input ran");
   return marks.length ? ` [${marks.join(", ")}]` : "";
 };
 
@@ -101,7 +107,7 @@ const labels = {
   Withheld: "the turn ends and its answer is withheld",
   Refresh: "a node reads the owner row again",
   StaleEnd: "the old home ends its idle session",
-  Clear: "you clear the session on its home",
+  Clear: "you run /clear at the gateway",
   Renew: "the home opens a new generation for its next session",
   RecordChild: "the designated node records the thread",
   DropAdmitted: "the input leaves custody with no turn",

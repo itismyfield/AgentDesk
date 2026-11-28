@@ -1,13 +1,13 @@
 ---
-title: "One O channel with a per-channel execution node, issue 8486 (revision 3)"
+title: "One O channel with a per-channel execution node, issue 8486 (revision 4)"
 ---
 stateDiagram-v2
   state "Legend" as legend {
     lg0: Unmanaged
     lg1: Gateway
     lg2: Moving
-    lg3: Path to the Completes or Drains or HeldResolves bug
-    lg4: Repeats forever, so Completes or Drains or HeldResolves breaks
+    lg3: Path to the CleanupResolves or Completes or Drains or HeldResolves bug
+    lg4: Repeats forever, so CleanupResolves or Completes or Drains or HeldResolves breaks
   }
   class lg0 tan
   class lg1 blue
@@ -15,7 +15,7 @@ stateDiagram-v2
   class lg3 bugPath
   class lg4 repeats
   s0: No owner row, the gateway serves (no node set)
-  s1: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far)
+  s1: No owner row, the gateway serves (no node set), an input waits at the gateway
   s2: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far), an input waits at the gateway
   s3: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far), turn runs on the gateway
   s4: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far), idle session on the gateway
@@ -26,18 +26,17 @@ stateDiagram-v2
   s9: Home is the gateway (set to the designated node, 1 file edit so far), an input is kept for the designated node, old home ended, the gateway cleared its session
   s10: Home is the gateway (set to the designated node, 1 file edit so far), an input is kept for the designated node, old home ended
   [*] --> s0
-  s0 --> s1: an operator edits one node's config file
-  s1 --> s2: you send a message
+  s0 --> s1: you send a message
+  s1 --> s2: an operator edits one node's config file
   s2 --> s3: the gateway starts the turn itself
   s3 --> s4: the answer reaches Discord
   s4 --> s5: the hub copies its setting to the database
   s5 --> s6: you send a message
   s6 --> s7: the gateway puts the input into shared custody
-  s7 --> s8: the old home is asked to end its session
   s7 --> s7: a node reads the owner row again
+  s7 --> s8: the old home is asked to end its session
   s8 --> s9: the old home answers the request
   s9 --> s10: the home opens a new generation for its next session
-  s10 --> s10: a node reads the owner row again
   class s0 tan
   class s0 bugPath
   class s1 tan
@@ -59,5 +58,4 @@ stateDiagram-v2
   class s9 pink
   class s9 bugPath
   class s10 pink
-  class s10 bugPath
   class s10 repeats

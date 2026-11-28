@@ -1,0 +1,164 @@
+---
+title: "One O channel with a per-channel execution node, issue 8486 (revision 4)"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Unmanaged
+    lg1: Designated
+    lg2: Gateway
+    lg3: Moving
+    lg4: Path to the Completes or Drains or OldSessionEnds bug
+    lg5: Repeats forever, so Completes or Drains or OldSessionEnds breaks
+  }
+  class lg0 tan
+  class lg1 teal
+  class lg2 blue
+  class lg3 pink
+  class lg4 bugPath
+  class lg5 repeats
+  s0: No owner row, the gateway serves (no node set)
+  s1: No owner row, the gateway serves (no node set), an input waits at the gateway
+  s2: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far), an input waits at the gateway
+  s3: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far), turn runs on the gateway
+  s4: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far, designated node down), an input waits at the gateway
+  s5: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far, designated node down), turn runs on the gateway
+  s6: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far), idle session on the gateway
+  s7: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far), an input waits at the gateway, idle session on the gateway
+  s8: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far, designated node down), idle session on the gateway
+  s9: No owner row, the gateway serves (set to the designated node, 1 file edit so far), an input waits at the gateway, idle session on the gateway
+  s10: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far, designated node down), an input waits at the gateway, idle session on the gateway
+  s11: No owner row, the gateway serves (set to the designated node, 1 file edit so far, designated node down), an input waits at the gateway, idle session on the gateway
+  s12: No owner row, the gateway serves (set to the designated node, 1 file edit so far, designated node down), turn runs on the gateway
+  s13: Home is the gateway (set to the designated node, 1 file edit so far, designated node down), an input is kept for the designated node, idle session on the gateway
+  s14: No owner row, the gateway serves (set to the designated node, 1 file edit so far, designated node down), idle session on the gateway
+  s15: Home is the gateway (set to the designated node, 1 file edit so far, designated node down), an input is kept for the designated node, old home asked to end, idle session on the gateway
+  s16: Home is the gateway (set to the designated node, 1 file edit so far, designated node down), an input is kept for the designated node, old home did not answer, idle session on the gateway
+  s17: Home is the designated node (set to the designated node, 1 file edit so far, designated node down), an input is handed to the designated node, idle session on the gateway
+  s18: Home is the designated node (set to the designated node, 1 file edit so far), an input is handed to the designated node, idle session on the gateway
+  s19: Home is the designated node (set to the designated node, 1 file edit so far, designated node down), an input is kept for the gateway, idle session on the gateway
+  s20: Home is the designated node (set to the designated node, 1 file edit so far), turn runs on the designated node, idle session on the gateway
+  s21: Home is the designated node (set to the designated node, 1 file edit so far, designated node down), an input is kept for the gateway, old home asked to end, idle session on the gateway
+  s22: Home is the designated node (set to the designated node, 1 file edit so far, designated node down), an input is kept for the gateway, old home did not answer, idle session on the gateway
+  s23: Home is the designated node (set to the designated node, 1 file edit so far), idle session on the designated node and the gateway
+  s24: Home is the designated node (set to the designated node, 1 file edit so far), an input waits at the gateway, idle session on the designated node and the gateway
+  s25: Home is the gateway (set to the designated node, 1 file edit so far, designated node down), an input is handed to the gateway, idle session on the gateway
+  s26: Home is the designated node (set to the designated node, 1 file edit so far), an input is kept for the gateway, idle session on the designated node and the gateway
+  s27: Home is the designated node (set to the designated node, 1 file edit so far), an input is kept for the gateway, old home asked to end, idle session on the designated node and the gateway
+  s28: Home is the designated node (set to the designated node, 1 file edit so far), an input is kept for the gateway, old home did not answer, idle session on the designated node and the gateway
+  s29: Home is the gateway (set to the designated node, 1 file edit so far), an input is handed to the gateway, idle session on the designated node and the gateway, the designated node keeps an older tenure's binding log
+  s30: Home is the gateway (set to the designated node, 1 file edit so far), an input is kept for the designated node, idle session on the designated node and the gateway, the designated node keeps an older tenure's binding log
+  s31: Home is the gateway (set to the designated node, 1 file edit so far), an input is kept for the designated node, old home asked to end, idle session on the designated node and the gateway, the designated node keeps an older tenure's binding log
+  s32: Home is the gateway (set to the designated node, 1 file edit so far), an input is kept for the designated node, old home asked to end, idle session on the designated node, the designated node keeps an older tenure's binding log
+  s33: Home is the gateway (set to the designated node, 1 file edit so far), an input is kept for the designated node, old home ended, idle session on the designated node, the designated node keeps an older tenure's binding log
+  s34: Home is the designated node (set to the designated node, 1 file edit so far), an input is handed to the designated node, idle session on the designated node, the designated node keeps an older tenure's binding log
+  [*] --> s0
+  s0 --> s1: you send a message
+  s1 --> s2: an operator edits one node's config file
+  s2 --> s4: the designated node stops
+  s2 --> s3: the gateway starts the turn itself
+  s3 --> s6: the answer reaches Discord
+  s4 --> s5: the gateway starts the turn itself
+  s5 --> s8: the answer reaches Discord
+  s6 --> s7: you send a message
+  s7 --> s9: the hub copies its setting to the database
+  s8 --> s10: you send a message
+  s9 --> s11: the designated node stops
+  s10 --> s11: the hub copies its setting to the database
+  s10 --> s5: the gateway starts the turn itself
+  s5 --> s12: the hub copies its setting to the database
+  s11 --> s13: the gateway puts the input into shared custody
+  s12 --> s14: the answer reaches Discord
+  s13 --> s13: the designated node's heartbeat expires
+  s13 --> s15: the old home is asked to end its session
+  s14 --> s11: you send a message
+  s15 --> s15: the designated node's heartbeat expires
+  s15 --> s16: the request's deadline passes without an answer
+  s16 --> s17: the owner row moves to the new home
+  s17 --> s19: the gateway's tick picks the target again
+  s17 --> s18: the designated node boots and ends its session of an older owner
+  s18 --> s20: the home starts the turn
+  s19 --> s21: the old home is asked to end its session
+  s20 --> s23: the answer reaches Discord
+  s21 --> s22: the request's deadline passes without an answer
+  s22 --> s25: the owner row moves to the new home
+  s23 --> s24: you send a message
+  s24 --> s26: the gateway puts the input into shared custody
+  s26 --> s27: the old home is asked to end its session
+  s27 --> s28: the request's deadline passes without an answer
+  s28 --> s29: the owner row moves to the new home
+  s29 --> s29: the designated node's heartbeat is fresh again or a node reads the owner row again
+  s29 --> s30: the gateway's tick picks the target again
+  s30 --> s31: the old home is asked to end its session
+  s31 --> s32: the old home ends its idle session
+  s32 --> s33: the old home answers the request
+  s33 --> s34: the owner row moves to the new home
+  class s0 tan
+  class s0 bugPath
+  class s1 tan
+  class s1 bugPath
+  class s2 tan
+  class s2 bugPath
+  class s3 tan
+  class s3 bugPath
+  class s4 tan
+  class s4 bugPath
+  class s5 tan
+  class s5 bugPath
+  class s6 tan
+  class s6 bugPath
+  class s7 tan
+  class s7 bugPath
+  class s8 tan
+  class s8 bugPath
+  class s9 tan
+  class s9 bugPath
+  class s10 tan
+  class s10 bugPath
+  class s11 tan
+  class s11 bugPath
+  class s12 tan
+  class s12 bugPath
+  class s13 blue
+  class s13 bugPath
+  class s14 tan
+  class s14 bugPath
+  class s15 pink
+  class s15 bugPath
+  class s16 pink
+  class s16 bugPath
+  class s17 teal
+  class s17 bugPath
+  class s18 teal
+  class s18 bugPath
+  class s19 teal
+  class s19 bugPath
+  class s20 teal
+  class s20 bugPath
+  class s21 pink
+  class s21 bugPath
+  class s22 pink
+  class s22 bugPath
+  class s23 teal
+  class s23 bugPath
+  class s24 teal
+  class s24 bugPath
+  class s25 blue
+  class s25 repeats
+  class s26 teal
+  class s26 bugPath
+  class s27 pink
+  class s27 bugPath
+  class s28 pink
+  class s28 bugPath
+  class s29 blue
+  class s29 bugPath
+  class s30 blue
+  class s30 bugPath
+  class s31 pink
+  class s31 bugPath
+  class s32 pink
+  class s32 bugPath
+  class s33 pink
+  class s33 bugPath
+  class s34 teal
+  class s34 repeats

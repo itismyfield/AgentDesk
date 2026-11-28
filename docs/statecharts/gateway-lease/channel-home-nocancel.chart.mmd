@@ -1,5 +1,5 @@
 ---
-title: "One O channel with a per-channel execution node, issue 8486 (revision 3)"
+title: "One O channel with a per-channel execution node, issue 8486 (revision 4)"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -25,8 +25,7 @@ stateDiagram-v2
   s8: Home is the gateway (set to the designated node, the hub's file says otherwise, 2 file edits so far), an input is kept for the designated node, idle session on the gateway
   s9: Home is the gateway (set to the gateway, 2 file edits so far), an input is kept for the designated node, idle session on the gateway
   s10: Home is the gateway (set to the gateway, 2 file edits so far), an input is kept for the designated node, old home asked to end, idle session on the gateway
-  s11: Home is the gateway (set to the gateway, 2 file edits so far), an input is kept for the gateway, old home asked to end, idle session on the gateway
-  s12: Home is the gateway (set to the gateway, 2 file edits so far), an input is kept for the gateway, old home ended, the gateway cleared its session [cleanup ended the session the plan keeps]
+  s11: Home is the gateway (set to the gateway, 2 file edits so far), an input is kept for the designated node, old home ended, the gateway cleared its session [cleanup ended the session the plan keeps]
   [*] --> s0
   s0 --> s1: an operator edits one node's config file
   s1 --> s2: you send a message
@@ -38,8 +37,7 @@ stateDiagram-v2
   s7 --> s8: the gateway puts the input into shared custody
   s8 --> s9: the hub copies its setting to the database
   s9 --> s10: the old home is asked to end its session
-  s10 --> s11: the gateway's tick picks the target again
-  s11 --> s12: the old home answers the request
+  s10 --> s11: the old home answers the request
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   class s0 tan
   class s0 bugPath
@@ -64,7 +62,5 @@ stateDiagram-v2
   class s10 pink
   class s10 bugPath
   class s11 pink
+  class s11 breaks
   class s11 bugPath
-  class s12 pink
-  class s12 breaks
-  class s12 bugPath

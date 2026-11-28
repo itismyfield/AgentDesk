@@ -1,59 +1,61 @@
 ---
-title: "One O channel with a per-channel execution node, issue 8486 (revision 3)"
+title: "One O channel with a per-channel execution node, issue 8486 (revision 4)"
 ---
 stateDiagram-v2
   state "Legend" as legend {
     lg0: Unmanaged
-    lg1: Breaks NoRefusal
-    lg2: Breaks FirstInputOnHome in some cases
-    lg3: Path to the FirstInputOnHome or NoRefusal or ServesOnExpected bug
-    lg4: Repeats forever, so ServesOnExpected breaks
+    lg1: Breaks FirstInputOnHome or NoRefusal
+    lg2: Path to the FirstInputOnHome or NoRefusal or ServesOnExpected bug
+    lg3: Repeats forever, so ServesOnExpected breaks
   }
   class lg0 tan
   class lg1 breaks
-  class lg2 mayBreak
-  class lg3 bugPath
-  class lg4 repeats
+  class lg2 bugPath
+  class lg3 repeats
   s0: No owner row, the gateway serves (no node set)
   s1: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far)
-  s2: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far), an input waits at the gateway
-  s3: No owner row, the gateway serves (set to the designated node, 1 file edit so far)
-  s4: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far, designated node down)
-  s5: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far), turn runs on the gateway
-  s6: No owner row, the gateway serves (set to the designated node, 1 file edit so far), an input waits at the gateway
-  s7: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far), idle session on the gateway
-  s8: No owner row, the gateway serves (set to the designated node, 1 file edit so far) [refusal shown]
-  s9: No owner row, the gateway serves (set to the designated node, 1 file edit so far), idle session on the gateway
-  s10: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far), an input waits at the gateway, turn runs on the gateway
-  s11: No owner row, the gateway serves (set to the designated node, 1 file edit so far), an input waits at the gateway, idle session on the gateway
-  s12: No owner row, the gateway serves (set to the designated node, 1 file edit so far), turn runs on the gateway [an input ran on the wrong node]
-  s13: No owner row, the gateway serves (set to the designated node, 1 file edit so far), an input waits at the gateway, turn runs on the gateway
-  s14: No owner row, the gateway serves (set to the designated node, 1 file edit so far), turn runs on the gateway
-  s15: No owner row, the gateway serves (set to the designated node, 1 file edit so far), idle session on the gateway [an input ran on the wrong node]
-  s16: No owner row, the gateway serves (set to the designated node, 1 file edit so far), an input waits at the gateway, idle session on the gateway [an input ran on the wrong node]
+  s2: No owner row, the gateway serves (no node set), an input waits at the gateway
+  s3: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far), an input waits at the gateway
+  s4: No owner row, the gateway serves (set to the designated node, 1 file edit so far)
+  s5: No owner row, the gateway serves (no node set, designated node down), an input waits at the gateway
+  s6: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far), turn runs on the gateway
+  s7: No owner row, the gateway serves (set to the designated node, 1 file edit so far), an input waits at the gateway
+  s8: No owner row, the gateway serves (no node set), turn runs on the gateway
+  s9: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far), idle session on the gateway
+  s10: No owner row, the gateway serves (set to the designated node, 1 file edit so far) [refusal shown]
+  s11: No owner row, the gateway serves (set to the designated node, 1 file edit so far), idle session on the gateway
+  s12: No owner row, the gateway serves (set to the designated node, 1 file edit so far), an input waits at the gateway, idle session on the gateway
+  s13: No owner row, the gateway serves (set to the designated node, 1 file edit so far), turn runs on the gateway [an input ran on the wrong node]
+  s14: No owner row, the gateway serves (no node set, the hub's file says otherwise, 2 file edits so far), idle session on the gateway
+  s15: No owner row, the gateway serves (set to the designated node, 2 file edits so far), idle session on the gateway
+  s16: No owner row, the gateway serves (set to the designated node, 2 file edits so far), an input waits at the gateway, idle session on the gateway
+  s17: No owner row, the gateway serves (set to the designated node, 2 file edits so far), turn runs on the gateway [an input ran on the wrong node]
+  s18: No owner row, the gateway serves (set to the designated node, 2 file edits so far), an input waits at the gateway, turn runs on the gateway [an input ran on the wrong node]
+  s19: No owner row, the gateway serves (set to the designated node, 2 file edits so far), an input waits at the gateway, idle session on the gateway [an input ran on the wrong node]
   [*] --> s0
   s0 --> s1: an operator edits one node's config file
-  s1 --> s2: you send a message
-  s1 --> s3: the hub copies its setting to the database
-  s1 --> s4: the designated node stops
-  s2 --> s5: the gateway starts the turn itself
-  s3 --> s6: you send a message
-  s4 --> s1: the designated node boots and ends its session of an older owner
-  s5 --> s7: the answer reaches Discord
-  s6 --> s8: the gateway refuses to place the channel on another node
-  s7 --> s9: the hub copies its setting to the database
-  s5 --> s10: you send a message
-  s9 --> s11: you send a message
-  s10 --> s13: the hub copies its setting to the database
-  s11 --> s12: the gateway keeps the input on its live session
-  s13 --> s11: the answer reaches Discord
-  s11 --> s14: the gateway keeps the input on its live session
-  s14 --> s13: you send a message
-  s12 --> s15: the answer reaches Discord
+  s0 --> s2: you send a message
+  s1 --> s3: you send a message
+  s1 --> s4: the hub copies its setting to the database
+  s2 --> s5: the designated node stops
+  s3 --> s6: the gateway starts the turn itself
+  s4 --> s7: you send a message
+  s5 --> s2: the designated node boots and ends its session of an older owner
+  s6 --> s9: the answer reaches Discord
+  s7 --> s10: the gateway refuses to place the channel on another node
+  s2 --> s8: the gateway starts the turn itself
+  s8 --> s6: an operator edits one node's config file
+  s9 --> s11: the hub copies its setting to the database
+  s11 --> s12: you send a message
+  s12 --> s13: the gateway keeps the input on its live session
+  s9 --> s14: an operator edits one node's config file
+  s14 --> s15: the hub copies its setting to the database
   s15 --> s16: you send a message
-  s16 --> s12: the gateway keeps the input on its live session
+  s16 --> s17: the gateway keeps the input on its live session
+  s17 --> s18: you send a message
+  s18 --> s19: the answer reaches Discord
+  s19 --> s17: the gateway keeps the input on its live session
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
-  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
   class s0 tan
   class s0 bugPath
   class s1 tan
@@ -71,23 +73,29 @@ stateDiagram-v2
   class s7 tan
   class s7 bugPath
   class s8 tan
-  class s8 breaks
   class s8 bugPath
   class s9 tan
   class s9 bugPath
   class s10 tan
+  class s10 breaks
   class s10 bugPath
   class s11 tan
   class s11 bugPath
   class s12 tan
-  class s12 mayBreak
   class s12 bugPath
-  class s12 repeats
   class s13 tan
+  class s13 breaks
   class s13 bugPath
   class s14 tan
   class s14 bugPath
   class s15 tan
-  class s15 repeats
+  class s15 bugPath
   class s16 tan
-  class s16 repeats
+  class s16 bugPath
+  class s17 tan
+  class s17 bugPath
+  class s17 repeats
+  class s18 tan
+  class s18 repeats
+  class s19 tan
+  class s19 repeats

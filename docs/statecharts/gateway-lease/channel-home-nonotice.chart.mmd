@@ -1,5 +1,5 @@
 ---
-title: "One O channel with a per-channel execution node, issue 8486 (revision 3)"
+title: "One O channel with a per-channel execution node, issue 8486 (revision 4)"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -20,51 +20,82 @@ stateDiagram-v2
   class lg6 repeats
   s0: No owner row, the gateway serves (no node set)
   s1: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far)
-  s2: No owner row, the gateway serves (set to the designated node, 1 file edit so far)
-  s3: No owner row, the gateway serves (set to the designated node, the hub's file says otherwise, 2 file edits so far)
-  s4: No owner row, the gateway serves (set to the designated node, the hub's file says otherwise, 2 file edits so far), an input waits at the gateway
-  s5: No owner row, the gateway serves (set to the designated node, the hub's file says otherwise, 2 file edits so far), an input is kept for the designated node
-  s6: Home is the designated node (set to the designated node, the hub's file says otherwise, 2 file edits so far), an input is handed to the designated node
-  s7: Home is the designated node (set to the designated node, the hub's file says otherwise, 2 file edits so far), turn runs on the designated node
-  s8: Home is the designated node (set to the gateway, 2 file edits so far), turn runs on the designated node
-  s9: Home is the designated node (set to the gateway, 2 file edits so far), an input waits at the gateway, turn runs on the designated node
-  s10: Home is the designated node (set to the gateway, 2 file edits so far), an input is kept for the gateway, turn runs on the designated node
-  s11: Home is the designated node (set to the gateway, 2 file edits so far), an input is kept for the gateway, old home asked to end, turn runs on the designated node
-  s12: Home is the designated node (set to the gateway, 2 file edits so far), an input is kept for the gateway, old home did not answer, turn runs on the designated node
-  s13: Home is the gateway (set to the gateway, 2 file edits so far), an input is handed to the gateway, turn runs on the designated node (old session) [1 withheld input with no notice]
-  s14: Home is the gateway (set to the gateway, 2 file edits so far), an input is handed to the gateway, idle session on the designated node [1 withheld input with no notice]
-  s15: Home is the gateway (set to the gateway, 2 file edits so far), turn runs on the gateway, idle session on the designated node [1 withheld input with no notice]
-  s16: Home is the gateway (set to the gateway, 2 file edits so far), idle session on the designated node and the gateway [1 withheld input with no notice]
-  s17: Home is the gateway (set to the gateway, 2 file edits so far), idle session on the gateway [1 withheld input with no notice]
-  s18: Home is the gateway (set to the gateway, 2 file edits so far), an input waits at the gateway, idle session on the gateway [1 withheld input with no notice]
-  s19: Home is the gateway (set to the gateway, 2 file edits so far), an input is kept for the gateway, idle session on the gateway [1 withheld input with no notice]
-  s20: Home is the gateway (set to the gateway, 2 file edits so far), an input is handed to the gateway, idle session on the gateway [1 withheld input with no notice]
-  s21: Home is the gateway (set to the gateway, 2 file edits so far), turn runs on the gateway [1 withheld input with no notice]
+  s2: No owner row, the gateway serves (no node set), an input waits at the gateway
+  s3: No owner row, the gateway serves (set to the designated node, 1 file edit so far)
+  s4: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far), an input waits at the gateway
+  s5: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far), turn runs on the gateway
+  s6: No owner row, the gateway serves (set to the designated node, the hub's file says otherwise, 2 file edits so far)
+  s7: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far), idle session on the gateway
+  s8: No owner row, the gateway serves (set to the designated node, the hub's file says otherwise, 2 file edits so far), an input waits at the gateway
+  s9: No owner row, the gateway serves (set to the gateway, 1 file edit so far), idle session on the gateway
+  s10: No owner row, the gateway serves (set to the designated node, the hub's file says otherwise, 2 file edits so far), an input is kept for the designated node
+  s11: No owner row, the gateway serves (set to the gateway, 1 file edit so far), an input waits at the gateway, idle session on the gateway
+  s12: Home is the designated node (set to the designated node, the hub's file says otherwise, 2 file edits so far), an input is handed to the designated node
+  s13: Home is the gateway (set to the gateway, 1 file edit so far), an input is kept for the gateway, idle session on the gateway
+  s14: Home is the designated node (set to the designated node, the hub's file says otherwise, 2 file edits so far), turn runs on the designated node
+  s15: Home is the designated node (set to the gateway, 2 file edits so far), turn runs on the designated node
+  s16: Home is the gateway (set to the gateway, 1 file edit so far), an input is handed to the gateway, idle session on the gateway
+  s17: Home is the designated node (set to the gateway, 2 file edits so far), an input waits at the gateway, turn runs on the designated node
+  s18: Home is the gateway (set to the gateway, the hub's file says otherwise, 2 file edits so far), an input is handed to the gateway, idle session on the gateway
+  s19: Home is the designated node (set to the gateway, 2 file edits so far), an input is kept for the gateway, turn runs on the designated node
+  s20: Home is the gateway (set to the gateway, the hub's file says otherwise, 2 file edits so far), turn runs on the gateway
+  s21: Home is the gateway (set to the designated node, 2 file edits so far), turn runs on the gateway
+  s22: Home is the designated node (set to the gateway, 2 file edits so far), an input is kept for the gateway, old home asked to end, turn runs on the designated node
+  s23: Home is the designated node (set to the gateway, 2 file edits so far), an input is kept for the gateway, old home did not answer, turn runs on the designated node
+  s24: Home is the gateway (set to the designated node, 2 file edits so far), an input waits at the gateway, turn runs on the gateway
+  s25: Home is the gateway (set to the designated node, 2 file edits so far), an input is kept for the designated node, turn runs on the gateway
+  s26: Home is the gateway (set to the gateway, 2 file edits so far), an input is handed to the gateway, turn runs on the designated node (old session), the designated node keeps an older tenure's binding log [1 withheld input with no notice]
+  s27: Home is the gateway (set to the designated node, 2 file edits so far), an input is kept for the designated node, old home asked to end, turn runs on the gateway
+  s28: Home is the gateway (set to the designated node, 2 file edits so far), an input is kept for the designated node, old home did not answer, turn runs on the gateway
+  s29: Home is the designated node (set to the designated node, 2 file edits so far), an input is handed to the designated node, turn runs on the gateway (old session), the gateway keeps an older tenure's binding log [1 withheld input with no notice]
+  s30: Home is the designated node (set to the designated node, 2 file edits so far), turn runs on the designated node and the gateway (old session), the gateway keeps an older tenure's binding log [1 withheld input with no notice]
+  s31: Home is the designated node (set to the designated node, 2 file edits so far), turn runs on the designated node, idle session on the gateway, the gateway keeps an older tenure's binding log [1 withheld input with no notice]
+  s32: Home is the designated node (set to the designated node, 2 file edits so far), turn runs on the designated node, the gateway keeps an older tenure's binding log [1 withheld input with no notice]
+  s33: Home is the designated node (set to the designated node, 2 file edits so far), idle session on the designated node, the gateway keeps an older tenure's binding log [1 withheld input with no notice]
+  s34: Home is the designated node (set to the designated node, 2 file edits so far), an input waits at the gateway, idle session on the designated node, the gateway keeps an older tenure's binding log [1 withheld input with no notice]
+  s35: Home is the designated node (set to the designated node, 2 file edits so far), an input is kept for the designated node, idle session on the designated node, the gateway keeps an older tenure's binding log [1 withheld input with no notice]
+  s36: Home is the designated node (set to the designated node, 2 file edits so far), an input is handed to the designated node, idle session on the designated node, the gateway keeps an older tenure's binding log [1 withheld input with no notice]
   [*] --> s0
   s0 --> s1: an operator edits one node's config file
-  s1 --> s2: the hub copies its setting to the database
-  s2 --> s3: an operator edits one node's config file
-  s3 --> s4: you send a message
-  s4 --> s5: the gateway puts the input into shared custody
-  s5 --> s6: the input is handed to the node that owns the channel
-  s6 --> s6: a node reads the owner row again
-  s6 --> s7: the home starts the turn
-  s7 --> s8: the hub copies its setting to the database
-  s8 --> s9: you send a message
-  s9 --> s10: the gateway puts the input into shared custody
-  s10 --> s11: the old home is asked to end its session
-  s11 --> s12: the request's deadline passes without an answer
-  s12 --> s13: the owner row moves to the new home
-  s13 --> s14: the turn ends and its answer is withheld
-  s14 --> s14: a node reads the owner row again
-  s14 --> s15: the home starts the turn
-  s15 --> s16: the answer reaches Discord
-  s16 --> s17: the old home ends its idle session
-  s17 --> s18: you send a message
-  s18 --> s19: the gateway puts the input into shared custody
-  s19 --> s20: the input is handed to the node that owns the channel
-  s20 --> s21: the home starts the turn
-  s21 --> s17: the answer reaches Discord
+  s0 --> s2: you send a message
+  s1 --> s3: the hub copies its setting to the database
+  s2 --> s4: an operator edits one node's config file
+  s3 --> s6: an operator edits one node's config file
+  s4 --> s5: the gateway starts the turn itself
+  s5 --> s7: the answer reaches Discord
+  s6 --> s8: you send a message
+  s7 --> s9: the hub copies its setting to the database
+  s8 --> s10: the gateway puts the input into shared custody
+  s9 --> s11: you send a message
+  s10 --> s12: the input is handed to the node that owns the channel
+  s11 --> s13: the gateway puts the input into shared custody
+  s12 --> s12: a node reads the owner row again
+  s13 --> s13: a node reads the owner row again
+  s12 --> s14: the home starts the turn
+  s14 --> s15: the hub copies its setting to the database
+  s13 --> s16: the input is handed to the node that owns the channel
+  s15 --> s17: you send a message
+  s16 --> s18: an operator edits one node's config file
+  s17 --> s19: the gateway puts the input into shared custody
+  s18 --> s20: the home starts the turn
+  s19 --> s22: the old home is asked to end its session
+  s20 --> s21: the hub copies its setting to the database
+  s21 --> s24: you send a message
+  s22 --> s23: the request's deadline passes without an answer
+  s23 --> s26: the owner row moves to the new home
+  s24 --> s25: the gateway puts the input into shared custody
+  s25 --> s27: the old home is asked to end its session
+  s27 --> s28: the request's deadline passes without an answer
+  s28 --> s29: the owner row moves to the new home
+  s29 --> s29: a node reads the owner row again
+  s29 --> s30: the home starts the turn
+  s30 --> s31: the turn ends and its answer is withheld
+  s31 --> s32: the old home ends its idle session
+  s32 --> s33: the answer reaches Discord
+  s33 --> s34: you send a message
+  s34 --> s35: the gateway puts the input into shared custody
+  s35 --> s36: the input is handed to the node that owns the channel
+  s36 --> s32: the home starts the turn
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   class s0 tan
   class s0 bugPath
@@ -78,39 +109,66 @@ stateDiagram-v2
   class s4 bugPath
   class s5 tan
   class s5 bugPath
-  class s6 teal
+  class s6 tan
   class s6 bugPath
-  class s7 teal
+  class s7 tan
   class s7 bugPath
-  class s8 teal
+  class s8 tan
   class s8 bugPath
-  class s9 teal
+  class s9 tan
   class s9 bugPath
-  class s10 teal
+  class s10 tan
   class s10 bugPath
-  class s11 pink
+  class s11 tan
   class s11 bugPath
-  class s12 pink
+  class s12 teal
   class s12 bugPath
   class s13 blue
-  class s13 breaks
   class s13 bugPath
-  class s14 blue
+  class s14 teal
   class s14 bugPath
-  class s15 blue
+  class s15 teal
   class s15 bugPath
   class s16 blue
   class s16 bugPath
-  class s17 blue
+  class s17 teal
   class s17 bugPath
-  class s17 repeats
   class s18 blue
   class s18 bugPath
-  class s18 repeats
-  class s19 blue
+  class s19 teal
   class s19 bugPath
-  class s19 repeats
   class s20 blue
-  class s20 repeats
+  class s20 bugPath
   class s21 blue
-  class s21 repeats
+  class s21 bugPath
+  class s22 pink
+  class s22 bugPath
+  class s23 pink
+  class s23 bugPath
+  class s24 blue
+  class s24 bugPath
+  class s25 blue
+  class s25 bugPath
+  class s26 blue
+  class s26 breaks
+  class s26 bugPath
+  class s27 pink
+  class s27 bugPath
+  class s28 pink
+  class s28 bugPath
+  class s29 teal
+  class s29 bugPath
+  class s30 teal
+  class s30 bugPath
+  class s31 teal
+  class s31 bugPath
+  class s32 teal
+  class s32 repeats
+  class s33 teal
+  class s33 repeats
+  class s34 teal
+  class s34 repeats
+  class s35 teal
+  class s35 repeats
+  class s36 teal
+  class s36 repeats
