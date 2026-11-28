@@ -2101,8 +2101,6 @@ src/
 │   │   │   │   │   │   ├── herdr_terminal_admission_tests.rs
 │   │   │   │   │   │   ├── herdr_terminal_restart_tests.rs
 │   │   │   │   │   │   └── stamp_guard.rs
-│   │   │   │   │   ├── stream_loop_patch/
-│   │   │   │   │   │   └── response_offset_tests.rs
 │   │   │   │   │   ├── bridge_entry.rs
 │   │   │   │   │   ├── captured_nonce.rs
 │   │   │   │   │   ├── completion_preserve.rs
