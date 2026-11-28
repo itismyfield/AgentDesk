@@ -46,7 +46,7 @@ export async function getDispatchDeliveryEvents(
 
 export async function getDispatchedSessions(
   includeMerged = false,
-  opts?: Pick<RequestOptions, "suppressErrorToast" | "maxRetries" | "signal">,
+  opts?: Pick<RequestOptions, "suppressErrorToast" | "maxRetries" | "signal" | "shareInflight">,
 ): Promise<DispatchedSession[]> {
   const q = includeMerged ? "?includeMerged=1" : "";
   const data = await request<{ sessions: DispatchedSession[] }>(
@@ -100,9 +100,11 @@ export async function getAgentCron(agentId: string): Promise<CronJob[]> {
 
 export async function getAgentDispatchedSessions(
   agentId: string,
+  opts?: Pick<RequestOptions, "suppressErrorToast" | "maxRetries" | "signal" | "shareInflight">,
 ): Promise<DispatchedSession[]> {
   const data = await request<{ sessions: DispatchedSession[] }>(
     `/api/agents/${agentId}/dispatched-sessions`,
+    opts,
   );
   return data.sessions;
 }

@@ -39,8 +39,19 @@ export interface SessionAgentBindingHint {
 
 export type RawSessionInput = DispatchedSession & {
   __authoritySeq?: number;
+  __ownerSeq?: number;
+  __ownerTs?: number;
   last_heartbeat?: string | number | null;
 };
+
+const INTERNAL_MERGE_KEYS = new Set<string>([
+  "linked_agent_id",
+  "agent_id",
+  "inferred_linked_agent",
+  "__authoritySeq",
+  "__ownerSeq",
+  "__ownerTs",
+]);
 
 function sessionIsWorking(status: DispatchedSession["status"]): boolean {
   return status === "turn_active" || status === "awaiting_bg" || status === "working";
@@ -86,6 +97,13 @@ function canonicalSessionId(rawId: unknown): string | null {
   return trimmed ? trimmed : null;
 }
 
+function distinctSessionId(rawId: unknown, sessionKey: string | null | undefined): string | null {
+  const id = canonicalSessionId(rawId);
+  if (!id) return null;
+  const key = nonEmpty(sessionKey);
+  return key && id === key ? null : id;
+}
+
 function sessionMapKey(session: Pick<DispatchedSession, "id" | "session_key">): string | null {
   return canonicalSessionId(session.id) ?? nonEmpty(session.session_key);
 }
@@ -102,6 +120,9 @@ function sessionRecordTimestampMs(session: RawSessionInput): number {
 function stripInternalFields(session: RawSessionInput): DispatchedSession {
   const copy = { ...session };
   delete copy.__authoritySeq;
+  delete copy.__ownerSeq;
+  delete copy.__ownerTs;
+  copy.id = canonicalSessionId(copy.id) ?? nonEmpty(copy.session_key) ?? "";
   return copy;
 }
 
@@ -113,38 +134,53 @@ function mergeTwoRawEntries(left: RawSessionInput, right: RawSessionInput): RawS
   const expL = explicitSessionAgentId(left);
   const expR = explicitSessionAgentId(right);
 
-  let merged: RawSessionInput;
-  let resolvedExplicit: string | null;
+  // Resolve explicit owner using its own provenance so unattributed copies never inflate stale owner timestamps.
+  let resolvedExplicit: string | null = null;
+  let resolvedOwnerSeq: number | undefined;
+  let resolvedOwnerTs: number | undefined;
+  if (expL !== null && expR !== null) {
+    const oSeqL = left.__ownerSeq ?? seqL;
+    const oSeqR = right.__ownerSeq ?? seqR;
+    const oTsL = left.__ownerTs ?? tsL;
+    const oTsR = right.__ownerTs ?? tsR;
+    const rightOwnerWins =
+      oSeqR !== oSeqL
+        ? oSeqR > oSeqL
+        : oTsR !== oTsL
+          ? oTsR > oTsL
+          : expR < expL;
+    resolvedExplicit = rightOwnerWins ? expR : expL;
+    resolvedOwnerSeq = rightOwnerWins ? oSeqR : oSeqL;
+    resolvedOwnerTs = rightOwnerWins ? oTsR : oTsL;
+  } else if (expL !== null) {
+    resolvedExplicit = expL;
+    resolvedOwnerSeq = left.__ownerSeq ?? seqL;
+    resolvedOwnerTs = left.__ownerTs ?? tsL;
+  } else if (expR !== null) {
+    resolvedExplicit = expR;
+    resolvedOwnerSeq = right.__ownerSeq ?? seqR;
+    resolvedOwnerTs = right.__ownerTs ?? tsR;
+  }
 
+  let merged: RawSessionInput;
   if (seqL !== seqR || tsL !== tsR) {
     const rightIsNewer = seqR !== seqL ? seqR > seqL : tsR > tsL;
     const newer = rightIsNewer ? right : left;
     const older = rightIsNewer ? left : right;
-    const expNewer = rightIsNewer ? expR : expL;
-    const expOlder = rightIsNewer ? expL : expR;
-    resolvedExplicit = expNewer ?? expOlder ?? null;
 
     merged = { ...older };
     for (const [k, v] of Object.entries(newer) as Array<[keyof RawSessionInput, unknown]>) {
-      if (k === "linked_agent_id" || k === "agent_id" || k === "inferred_linked_agent" || k === "__authoritySeq") continue;
+      if (INTERNAL_MERGE_KEYS.has(k as string)) continue;
       if (v === undefined) continue;
       if (MUTABLE_RUNTIME_KEYS.has(k as keyof DispatchedSession) || v !== null || merged[k] == null) {
         (merged as unknown as Record<string, unknown>)[k] = v;
       }
     }
   } else {
-    resolvedExplicit =
-      expL && !expR
-        ? expL
-        : expR && !expL
-          ? expR
-          : expL && expR
-            ? (expL <= expR ? expL : expR)
-            : null;
     const allKeys = new Set<string>([...Object.keys(left), ...Object.keys(right)]);
     const out: Record<string, unknown> = {};
     for (const k of allKeys) {
-      if (k === "linked_agent_id" || k === "agent_id" || k === "inferred_linked_agent" || k === "__authoritySeq") continue;
+      if (INTERNAL_MERGE_KEYS.has(k)) continue;
       const vL = (left as unknown as Record<string, unknown>)[k];
       const vR = (right as unknown as Record<string, unknown>)[k];
       if (vL == null) {
@@ -164,10 +200,12 @@ function mergeTwoRawEntries(left: RawSessionInput, right: RawSessionInput): RawS
     merged = out as unknown as RawSessionInput;
   }
 
-  const idL = canonicalSessionId(left.id);
-  const idR = canonicalSessionId(right.id);
   const keyL = nonEmpty(left.session_key);
   const keyR = nonEmpty(right.session_key);
+  const realIdL = distinctSessionId(left.id, left.session_key);
+  const realIdR = distinctSessionId(right.id, right.session_key);
+  const idL = realIdL ?? (realIdR === null ? canonicalSessionId(left.id) : null);
+  const idR = realIdR ?? (realIdL === null ? canonicalSessionId(right.id) : null);
   const canonicalKey =
     seqR > seqL && keyR ? keyR : seqL > seqR && keyL ? keyL : keyL && keyR ? (keyL <= keyR ? keyL : keyR) : (keyL ?? keyR);
   const canonicalId =
@@ -181,13 +219,37 @@ function mergeTwoRawEntries(left: RawSessionInput, right: RawSessionInput): RawS
   }
   merged.inferred_linked_agent = false;
   merged.__authoritySeq = Math.max(seqL, seqR);
+  merged.__ownerSeq = resolvedOwnerSeq;
+  merged.__ownerTs = resolvedOwnerTs;
   return merged;
+}
+
+function compareRawForCanonicalFold(a: RawSessionInput, b: RawSessionInput): number {
+  const seqDiff = (a.__authoritySeq ?? 0) - (b.__authoritySeq ?? 0);
+  if (seqDiff !== 0) return seqDiff;
+  const tsDiff = sessionRecordTimestampMs(a) - sessionRecordTimestampMs(b);
+  if (tsDiff !== 0) return tsDiff;
+  const expA = explicitSessionAgentId(a) ?? "";
+  const expB = explicitSessionAgentId(b) ?? "";
+  if (expA !== expB) return expA < expB ? -1 : 1;
+  const keyA = nonEmpty(a.session_key) ?? "";
+  const keyB = nonEmpty(b.session_key) ?? "";
+  if (keyA !== keyB) return keyA < keyB ? -1 : 1;
+  const idA = canonicalSessionId(a.id) ?? "";
+  const idB = canonicalSessionId(b.id) ?? "";
+  if (idA !== idB) return idA < idB ? -1 : 1;
+  const stDiff = (STATUS_TIE_RANK[a.status] ?? -1) - (STATUS_TIE_RANK[b.status] ?? -1);
+  if (stDiff !== 0) return stDiff;
+  const infoA = a.session_info ?? "";
+  const infoB = b.session_info ?? "";
+  return infoA === infoB ? 0 : infoA < infoB ? -1 : 1;
 }
 
 /** Order-independent raw session merge unifying `by id` and `by session_key`; explicit `linked_agent_id` wins over null. */
 export function mergeRawSessions(sessions: readonly RawSessionInput[]): DispatchedSession[] {
   if (sessions.length === 0) return [];
   const slots: Array<RawSessionInput | null> = [];
+  const slotGroups: Array<RawSessionInput[] | null> = [];
   const byId = new Map<string, number>();
   const byKey = new Map<string, number>();
 
@@ -202,11 +264,16 @@ export function mergeRawSessions(sessions: readonly RawSessionInput[]): Dispatch
 
   for (const raw of sessions) {
     const exp = explicitSessionAgentId(raw);
+    const rawSeq = raw.__authoritySeq ?? 0;
+    const rawTs = sessionRecordTimestampMs(raw);
     const entry: RawSessionInput = {
       ...raw,
       id: canonicalSessionId(raw.id) ?? nonEmpty(raw.session_key) ?? "",
       linked_agent_id: exp,
       inferred_linked_agent: false,
+      __authoritySeq: rawSeq,
+      __ownerSeq: exp !== null ? (raw.__ownerSeq ?? rawSeq) : undefined,
+      __ownerTs: exp !== null ? (raw.__ownerTs ?? rawTs) : undefined,
     };
     const id = canonicalSessionId(raw.id);
     const sKey = nonEmpty(raw.session_key);
@@ -229,15 +296,19 @@ export function mergeRawSessions(sessions: readonly RawSessionInput[]): Dispatch
     if (idxById !== undefined && idxByKey !== undefined && idxById !== idxByKey) {
       const mergedExisting = mergeTwoRawEntries(slots[idxById]!, slots[idxByKey]!);
       slots[idxById] = mergeTwoRawEntries(mergedExisting, entry);
+      slotGroups[idxById] = [...slotGroups[idxById]!, ...slotGroups[idxByKey]!, entry];
       slots[idxByKey] = null;
+      slotGroups[idxByKey] = null;
       redirectSlot(idxByKey, idxById);
       targetIdx = idxById;
     } else if (idxById !== undefined || idxByKey !== undefined) {
       targetIdx = (idxById ?? idxByKey)!;
       slots[targetIdx] = mergeTwoRawEntries(slots[targetIdx]!, entry);
+      slotGroups[targetIdx]!.push(entry);
     } else {
       targetIdx = slots.length;
       slots.push(entry);
+      slotGroups.push([entry]);
     }
 
     if (id) byId.set(id, targetIdx);
@@ -248,7 +319,17 @@ export function mergeRawSessions(sessions: readonly RawSessionInput[]): Dispatch
     if (mergedKey) byKey.set(mergedKey, targetIdx);
   }
 
-  return slots.filter((item): item is RawSessionInput => item !== null).map(stripInternalFields);
+  const out: DispatchedSession[] = [];
+  for (const group of slotGroups) {
+    if (!group || group.length === 0) continue;
+    if (group.length === 1) {
+      out.push(stripInternalFields(group[0]));
+      continue;
+    }
+    const ordered = [...group].sort(compareRawForCanonicalFold);
+    out.push(stripInternalFields(ordered.reduce(mergeTwoRawEntries)));
+  }
+  return out;
 }
 
 function recordUnambiguous(map: Map<string, string | null>, key: string | null | undefined, agentId: string): void {

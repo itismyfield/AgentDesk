@@ -51,17 +51,7 @@ function matchesSessionTarget(
   return Boolean(leftId && rightId && leftId === rightId);
 }
 
-function resolveOverlayMapKey(
-  overlay: Map<string, WsOverlayEntry>,
-  target: { id?: unknown; session_key?: string | null },
-): string | null {
-  for (const [key, entry] of overlay.entries()) {
-    if (matchesSessionTarget({ id: entry.id, session_key: entry.sessionKey }, target)) {
-      return key;
-    }
-  }
-  return trimOrNull(target.session_key) ?? trimOrNull(target.id);
-}
+const MAX_WS_OVERLAY_ENTRIES = 512;
 
 /** What every agent's detail shares: all Discord routes, Provider accounts and 30-day skill calls. */
 export interface AgentDetailShared {
@@ -126,7 +116,7 @@ export function useAgentDetailData(agentId: string, bindings?: Read<DiscordBindi
   const [sessNonce, setSessNonce] = useState(0);
   const [skillNonce, setSkillNonce] = useState(0);
 
-  const wsOverlayRef = useRef<Map<string, WsOverlayEntry>>(new Map());
+  const wsOverlayRef = useRef<Map<number, WsOverlayEntry>>(new Map());
   const mutationSeqRef = useRef(0);
   const requestSeqRef = useRef(0);
   const appliedRequestSeqRef = useRef(0);
@@ -146,12 +136,17 @@ export function useAgentDetailData(agentId: string, bindings?: Read<DiscordBindi
       if (!background) {
         setRestSnapshot(undefined);
       }
+      // Bypass in-flight GET sharing so reconciliation never adopts a pre-WS Promise and prunes newer WS state.
+      const agentOpts = background
+        ? { suppressErrorToast: true, maxRetries: 0, shareInflight: false }
+        : { shareInflight: false };
+      const globalOpts = { suppressErrorToast: true, maxRetries: 0, shareInflight: false };
       const readGlobal = resolveGlobalSessionsReader();
       const globalRead = readGlobal
-        ? readGlobal(true, { suppressErrorToast: true, maxRetries: 0 })
+        ? readGlobal(true, globalOpts)
         : Promise.resolve([] as DispatchedSession[]);
 
-      void Promise.allSettled([api.getAgentDispatchedSessions(agentId), globalRead]).then(([agentRes, globalRes]) => {
+      void Promise.allSettled([api.getAgentDispatchedSessions(agentId, agentOpts), globalRead]).then(([agentRes, globalRes]) => {
         if (!active || requestSeq < appliedRequestSeqRef.current) return;
         if (background) {
           if (agentRes.status !== "fulfilled" || globalRes.status !== "fulfilled") return;
@@ -162,9 +157,9 @@ export function useAgentDetailData(agentId: string, bindings?: Read<DiscordBindi
         }
 
         appliedRequestSeqRef.current = requestSeq;
-        for (const [key, entry] of wsOverlayRef.current.entries()) {
-          if (entry.seq <= fetchStartSeq) {
-            wsOverlayRef.current.delete(key);
+        for (const seq of wsOverlayRef.current.keys()) {
+          if (seq <= fetchStartSeq) {
+            wsOverlayRef.current.delete(seq);
           }
         }
         setRestSnapshot({
@@ -191,49 +186,46 @@ export function useAgentDetailData(agentId: string, bindings?: Read<DiscordBindi
 
   useEffect(() => {
     if (typeof window === "undefined") return undefined;
+    const trimOverlayCap = () => {
+      while (wsOverlayRef.current.size > MAX_WS_OVERLAY_ENTRIES) {
+        const oldest = wsOverlayRef.current.keys().next().value;
+        if (oldest === undefined) break;
+        wsOverlayRef.current.delete(oldest);
+      }
+    };
     const onWs = (e: Event) => {
       const detail = (e as CustomEvent<WSEvent>).detail;
       if (!detail) return;
       if (detail.type === "dispatched_session_new" || detail.type === "dispatched_session_update") {
         const raw = detail.payload as DispatchedSession | undefined;
-        if (!raw || (raw.id == null && !raw.session_key)) return;
-        const key = resolveOverlayMapKey(wsOverlayRef.current, raw);
-        if (!key) return;
+        const id = trimOrNull(raw?.id);
+        const sessionKey = trimOrNull(raw?.session_key);
+        if (!raw || (!id && !sessionKey)) return;
         const seq = ++mutationSeqRef.current;
-        const prev = wsOverlayRef.current.get(key)?.session;
-        const incoming: RawSessionInput = {
-          ...raw,
-          id: trimOrNull(raw.id) ?? prev?.id ?? key,
-          inferred_linked_agent: false,
-          __authoritySeq: seq,
-        };
-        const mergedSession = prev
-          ? mergeRawSessions([{ ...prev, inferred_linked_agent: false, __authoritySeq: 0 }, incoming])[0]
-          : mergeRawSessions([incoming])[0];
-        wsOverlayRef.current.set(key, {
+        wsOverlayRef.current.set(seq, {
           seq,
           eventType: detail.type,
-          id: trimOrNull(mergedSession.id),
-          sessionKey: trimOrNull(mergedSession.session_key),
-          session: mergedSession,
+          id,
+          sessionKey,
+          session: raw,
         });
+        trimOverlayCap();
         setOverlayTick((n) => n + 1);
         return;
       }
       if (detail.type === "dispatched_session_disconnect") {
         const payload = detail.payload as { id?: string | number; session_key?: string } | undefined;
-        if (!payload || (payload.id == null && !payload.session_key)) return;
-        const key = resolveOverlayMapKey(wsOverlayRef.current, payload);
-        if (!key) return;
+        const id = trimOrNull(payload?.id);
+        const sessionKey = trimOrNull(payload?.session_key);
+        if (!payload || (!id && !sessionKey)) return;
         const seq = ++mutationSeqRef.current;
-        const prev = wsOverlayRef.current.get(key);
-        wsOverlayRef.current.set(key, {
+        wsOverlayRef.current.set(seq, {
           seq,
           eventType: "dispatched_session_disconnect",
-          id: trimOrNull(payload.id) ?? prev?.id ?? null,
-          sessionKey: trimOrNull(payload.session_key) ?? prev?.sessionKey ?? null,
-          session: prev?.session ? { ...prev.session, status: "disconnected" } : undefined,
+          id,
+          sessionKey,
         });
+        trimOverlayCap();
         setOverlayTick((n) => n + 1);
       }
     };
@@ -274,24 +266,33 @@ export function useAgentDetailData(agentId: string, bindings?: Read<DiscordBindi
       __authoritySeq: 0,
     }));
 
-    const overlayEntries = Array.from(wsOverlayRef.current.values()).sort((a, b) => a.seq - b.seq);
-    const wsUpserts: RawSessionInput[] = overlayEntries
-      .filter((entry) => entry.session !== undefined)
-      .map((entry) => ({
-        ...entry.session!,
-        inferred_linked_agent: false,
-        __authoritySeq: entry.seq,
-      }));
+    const overlayEntries = Array.from(wsOverlayRef.current.values());
+    const upsertEntries = overlayEntries.filter(
+      (entry): entry is WsOverlayEntry & { session: DispatchedSession } =>
+        entry.eventType !== "dispatched_session_disconnect" && entry.session !== undefined,
+    );
+    const wsUpserts: RawSessionInput[] = upsertEntries.map((entry) => ({
+      ...entry.session,
+      id: trimOrNull(entry.session.id) ?? trimOrNull(entry.session.session_key) ?? "",
+      inferred_linked_agent: false,
+      __authoritySeq: entry.seq,
+    }));
 
     let mergedRaw = mergeRawSessions([...rawAgent, ...rawGlobal, ...wsUpserts]);
 
     const disconnects = overlayEntries.filter((entry) => entry.eventType === "dispatched_session_disconnect");
     if (disconnects.length > 0) {
       mergedRaw = mergedRaw.map((session) => {
-        const hit = disconnects.some((disc) =>
-          matchesSessionTarget(session, { id: disc.id, session_key: disc.sessionKey }),
+        let maxUpsertSeq = 0;
+        for (const up of upsertEntries) {
+          if (up.seq > maxUpsertSeq && matchesSessionTarget(session, { id: up.id, session_key: up.sessionKey })) {
+            maxUpsertSeq = up.seq;
+          }
+        }
+        const disconnected = disconnects.some(
+          (disc) => disc.seq > maxUpsertSeq && matchesSessionTarget(session, { id: disc.id, session_key: disc.sessionKey }),
         );
-        return hit ? { ...session, status: "disconnected" as const } : session;
+        return disconnected ? { ...session, status: "disconnected" as const } : session;
       });
     }
 

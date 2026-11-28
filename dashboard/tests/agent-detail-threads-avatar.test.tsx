@@ -251,7 +251,7 @@ describe("Agent Detail duplicate avatar removal & Discord thread session surfaci
     const agentMap = buildEffectiveSessionAgentMap([mainSession, threadSession]);
     expect(agentMap.get("s-thread")).toBe("agent-alpha");
 
-    // Namespace-aware slug isolation (P2-1): same channel slug in two distinct namespaces maps to each namespace's own agent
+    // Namespace-aware slug isolation: same channel slug in two distinct namespaces maps to each namespace's own agent
     const nsBetaMain = makeSession({
       id: "s-beta-main",
       session_key: "claude/discord_fixture02/fixture-host-b:AgentDesk-claude-shared-chan",
@@ -315,7 +315,7 @@ describe("Agent Detail duplicate avatar removal & Discord thread session surfaci
     expect(homeRoster.some((entry) => entry.agent.id.startsWith("dispatched:"))).toBe(false);
   });
 
-  it("[P1-1 + P2-2] preserves explicit linked_agent_id over parent-inferred attribution regardless of order and re-filters live on WS reassignment", async () => {
+  it("preserves explicit linked_agent_id over parent-inferred attribution regardless of order and re-filters live on WS reassignment", async () => {
     const parentAlpha = makeSession({
       id: "p-alpha",
       session_key: ALPHA_MAIN_KEY,
@@ -422,7 +422,7 @@ describe("Agent Detail duplicate avatar removal & Discord thread session surfaci
     expect(betaPane.textContent).toContain("Reassigned to beta");
   });
 
-  it("[P1-2] reconciles silent server thread_gc deletions on focus/poll without clobbering concurrent in-flight WS events", async () => {
+  it("reconciles silent server thread_gc deletions on focus/poll without clobbering concurrent in-flight WS events", async () => {
     const gcThreadSession = makeSession({
       id: "gc-thread-1",
       session_key: ALPHA_THREAD_KEY,
@@ -627,7 +627,7 @@ describe("Agent Detail duplicate avatar removal & Discord thread session surfaci
     expect(container.querySelector('[data-testid="agent-now-sessions"]')?.textContent).toContain("진행·스레드 세션 2");
   });
 
-  it("[P2-3] resolves thread channel info on mobile while Connections is folded and hides Stop Turn when only inferred unlinked thread sessions run", async () => {
+  it("resolves thread channel info on mobile while Connections is folded and hides Stop Turn when only inferred unlinked thread sessions run", async () => {
     setViewport(true);
     const mainSession = makeSession({
       id: "20",
@@ -683,5 +683,80 @@ describe("Agent Detail duplicate avatar removal & Discord thread session surfaci
     // while Stop Turn stays hidden because the only working session is frontend-inferred (s.agent_id IS NULL in DB).
     expect(container.querySelector('[data-testid="agent-detail-now"] dd')?.textContent).toContain("Working");
     expect(container.querySelector('[data-testid="agent-stop-turn"]')).toBeNull();
+  });
+
+  it("preserves associativity and permutation invariance across all 6 permutations when merging 3+ copies with unattributed newer timestamps", () => {
+    const t1 = NOW - 20_000;
+    const t2 = NOW - 10_000;
+    const t3 = NOW - 1_000;
+
+    const explicitAlphaT1 = makeSession({
+      id: "assoc-1",
+      session_key: ALPHA_THREAD_KEY,
+      linked_agent_id: "agent-alpha",
+      thread_channel_id: "1000000000000000002",
+      status: "idle",
+      session_info: "Alpha copy at t1",
+      last_seen_at: t1,
+    });
+    const unattributedT3 = makeSession({
+      id: "assoc-1",
+      session_key: ALPHA_THREAD_KEY,
+      linked_agent_id: null,
+      thread_channel_id: "1000000000000000002",
+      status: "turn_active",
+      session_info: "Unattributed runtime update at t3",
+      last_seen_at: t3,
+    });
+    const explicitBetaT1 = makeSession({
+      id: "assoc-1",
+      session_key: ALPHA_THREAD_KEY,
+      linked_agent_id: "agent-beta",
+      thread_channel_id: "1000000000000000002",
+      status: "working",
+      session_info: "Beta copy at t1",
+      last_seen_at: t1,
+    });
+
+    const tiedPermutations: DispatchedSession[][] = [
+      [explicitAlphaT1, unattributedT3, explicitBetaT1],
+      [explicitAlphaT1, explicitBetaT1, unattributedT3],
+      [unattributedT3, explicitAlphaT1, explicitBetaT1],
+      [unattributedT3, explicitBetaT1, explicitAlphaT1],
+      [explicitBetaT1, explicitAlphaT1, unattributedT3],
+      [explicitBetaT1, unattributedT3, explicitAlphaT1],
+    ];
+
+    for (const perm of tiedPermutations) {
+      const merged = mergeRawSessions(perm);
+      expect(merged).toHaveLength(1);
+      expect(merged[0].linked_agent_id).toBe("agent-alpha");
+      expect(merged[0].inferred_linked_agent).toBe(false);
+      expect(merged[0].status).toBe("turn_active");
+      expect(merged[0].session_info).toBe("Unattributed runtime update at t3");
+      expect(merged[0].last_seen_at).toBe(t3);
+    }
+
+    // Also verify when explicitBeta has newer owner timestamp t2 (t1 < t2 < t3):
+    // unattributedT3 must NOT inflate explicitAlphaT1's owner provenance above explicitBetaT2!
+    const explicitBetaT2 = { ...explicitBetaT1, last_seen_at: t2, session_info: "Beta copy at t2" };
+    const staggeredPermutations: DispatchedSession[][] = [
+      [explicitAlphaT1, unattributedT3, explicitBetaT2],
+      [explicitAlphaT1, explicitBetaT2, unattributedT3],
+      [unattributedT3, explicitAlphaT1, explicitBetaT2],
+      [unattributedT3, explicitBetaT2, explicitAlphaT1],
+      [explicitBetaT2, explicitAlphaT1, unattributedT3],
+      [explicitBetaT2, unattributedT3, explicitAlphaT1],
+    ];
+
+    for (const perm of staggeredPermutations) {
+      const merged = mergeRawSessions(perm);
+      expect(merged).toHaveLength(1);
+      expect(merged[0].linked_agent_id).toBe("agent-beta");
+      expect(merged[0].inferred_linked_agent).toBe(false);
+      expect(merged[0].status).toBe("turn_active");
+      expect(merged[0].session_info).toBe("Unattributed runtime update at t3");
+      expect(merged[0].last_seen_at).toBe(t3);
+    }
   });
 });
