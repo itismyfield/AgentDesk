@@ -3688,7 +3688,6 @@ src/
 │   │   │   ├── native_policy.rs
 │   │   │   ├── native_prepare.rs
 │   │   │   ├── native_receipt_tests.rs
-│   │   │   ├── native_renumber_tests.rs
 │   │   │   ├── native_restore.rs
 │   │   │   ├── native_restore_gc_tests.rs
 │   │   │   ├── native_supply.rs
@@ -5267,6 +5266,9 @@ src/
 │   │   │   ├── observation.rs
 │   │   │   └── source_tests.rs
 │   │   ├── runtime_binding/
+│   │   │   ├── claude_source/
+│   │   │   │   ├── refresh_check.rs
+│   │   │   │   └── refresh_check_test_support.rs
 │   │   │   ├── codex_hook/
 │   │   │   │   ├── herdr_resume_cause_tests.rs
 │   │   │   │   └── herdr_resume_tests.rs

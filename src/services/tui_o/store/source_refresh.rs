@@ -20,6 +20,18 @@ use crate::services::tui_o::shadow::{SourceId, capture};
 const INTENT: &str = "source_refresh";
 const STAGE: &str = "source_refresh_stage";
 
+#[cfg(any(test, feature = "test-support"))]
+macro_rules! refresh_fault {
+    ($path:expr, $step:ident) => {
+        durable::fault::strike($path, durable::fault::Step::$step)?
+    };
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+macro_rules! refresh_fault {
+    ($path:expr, $step:ident) => {};
+}
+
 #[derive(Serialize, Deserialize)]
 struct Intent {
     old: String,
@@ -111,8 +123,7 @@ fn finish(dir: &Path) -> Result<(), StoreError> {
             Err(error) if error.kind() == io::ErrorKind::NotFound && target.is_file() => {}
             Err(error) => return Err(error.into()),
         }
-        #[cfg(test)]
-        durable::fault::strike(&target, durable::fault::Step::RefreshInstall)?;
+        refresh_fault!(&target, RefreshInstall);
         fsync_parent_dir(&target)?;
         fsync_parent_dir(&stage)?;
     }
@@ -328,8 +339,7 @@ impl ChannelStore {
                 return Err(damage("transcript moved during source refresh"));
             }
             fsync_parent_dir(&staged(dir, 0))?;
-            #[cfg(test)]
-            durable::fault::strike(&dir.join(INTENT), durable::fault::Step::RefreshBeforeIntent)?;
+            refresh_fault!(&dir.join(INTENT), RefreshBeforeIntent);
             durable::create_once(&dir.join(INTENT), &serde_json::to_vec(&intent)?)?;
             finish(dir)?;
             store.sources = spool::recover_sources(dir, &init, &projected)?;

@@ -14,6 +14,14 @@ use crate::services::tui_prompt_dedupe::binding_context::{
 };
 use binding_events::{BindingCause, Committed, SourceId};
 
+#[cfg(not(any(test, feature = "test-support")))]
+mod refresh_check;
+#[cfg(all(feature = "test-support", not(test)))]
+mod refresh_check;
+#[cfg(test)]
+#[path = "claude_source/refresh_check_test_support.rs"]
+mod refresh_check;
+
 /// What a registration writes to the binding event log before it publishes the binding.
 #[derive(Clone, Debug)]
 pub enum Record {
@@ -532,8 +540,7 @@ pub(crate) fn observe_current_claude_hook(
         None
     };
     if let Some(source) = source {
-        #[cfg(test)]
-        after_check();
+        refresh_check::after_path_check!();
         if !binding_events::codex::source_file_matches(&source) {
             return Err(io::Error::other("Claude transcript changed during refresh"));
         }
