@@ -307,6 +307,10 @@ mod engine_probe_tests;
 #[cfg(test)]
 mod ke_assembly_tests;
 #[cfg(test)]
+mod ke_auto_queue_tests;
+#[cfg(all(test, unix))]
+mod ke_auto_queue_unix_tests;
+#[cfg(test)]
 mod ke_routines_tests;
 #[cfg(test)]
 mod krx_claude_tests;
