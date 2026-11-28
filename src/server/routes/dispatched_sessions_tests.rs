@@ -466,6 +466,8 @@ async fn kill_tmux_route_checks_the_host_before_any_probe_or_write_pg() {
         "process",
         "unreadable-marker",
         "probefail",
+        "changes-host",
+        "changes-owner",
     ];
     for (index, n) in names.into_iter().enumerate() {
         let channel = format!("440{index}");
@@ -480,13 +482,14 @@ async fn kill_tmux_route_checks_the_host_before_any_probe_or_write_pg() {
         };
         sqlx::query(
             "INSERT INTO sessions (session_key, provider, status, last_heartbeat, identity_kind,
-                                   discord_token_hash, channel_id, hosted_execution)
-             VALUES ($1, 'claude', 'idle', NOW() - INTERVAL '7 hours', 'discord_channel', $2, $3, $4)",
+                                   discord_token_hash, channel_id, hosted_execution, claude_session_id)
+             VALUES ($1, 'claude', 'idle', NOW() - INTERVAL '7 hours', 'discord_channel', $2, $3, $4, $5)",
         )
         .bind(key(n))
         .bind(TOKEN)
         .bind(&channel)
         .bind(raw)
+        .bind(matches!(n, "changes-host" | "changes-owner").then_some(n))
         .execute(&pool)
         .await
         .unwrap();
@@ -524,7 +527,7 @@ async fn kill_tmux_route_checks_the_host_before_any_probe_or_write_pg() {
         let decision = &candidates["decisions"][key(n)];
         assert_eq!(
             decision["supported"],
-            matches!(n, "legacy" | "probefail"),
+            matches!(n, "legacy" | "probefail" | "changes-host" | "changes-owner"),
             "{n}: {decision}"
         );
         if matches!(
@@ -584,7 +587,81 @@ async fn kill_tmux_route_checks_the_host_before_any_probe_or_write_pg() {
         )
     };
 
-    for n in names.into_iter().filter(|n| *n != "legacy") {
+    sqlx::query(
+        "INSERT INTO session_key_aliases (session_key, session_id)
+         SELECT $1, id FROM sessions WHERE session_key = $2",
+    )
+    .bind(key("changed-host-alias"))
+    .bind(key("changes-host"))
+    .execute(&pool)
+    .await
+    .unwrap();
+    std::fs::write(marker("changed-host-alias"), "herdr").unwrap();
+    let before = row("changes-host").await;
+    assert_eq!(before["claude_session_id"], "changes-host");
+    let (status, Json(body)) = kill("changes-host", "idle 7시간 초과 — 자동 정리").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["preserved_reason"], "host_not_legacy_tmux", "{body}");
+    assert_eq!(body["tmux_was_alive"], serde_json::Value::Null, "{body}");
+    assert_eq!(body["tmux_killed"], false, "{body}");
+    assert_eq!(row("changes-host").await, before);
+    assert!(!tmux_probe.path().join("calls").exists());
+
+    let set_owner = |owner: &str| {
+        let pool = pool.clone();
+        let owner = owner.to_owned();
+        let session_key = key("changes-owner");
+        async move {
+            sqlx::query("UPDATE sessions SET instance_id = $1 WHERE session_key = $2")
+                .bind(owner)
+                .bind(session_key)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+    set_owner("old-owner").await;
+    let mut receiver = state.clone();
+    receiver.cluster_instance_id = Some("old-owner".into());
+    let mut forwarded = axum::http::HeaderMap::new();
+    forwarded.insert(
+        "x-agentdesk-forwarded-by",
+        "candidate-reader".parse().unwrap(),
+    );
+    forwarded.insert("x-agentdesk-session-owner", "old-owner".parse().unwrap());
+    let Json(admitted) = super::idle_cleanup_candidates(
+        State(receiver.clone()),
+        forwarded.clone(),
+        Json(serde_json::from_value(serde_json::json!({"keys": [key("changes-owner")]})).unwrap()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(admitted).unwrap()["decisions"][key("changes-owner")]["supported"],
+        true
+    );
+    set_owner("new-owner").await;
+    let before = row("changes-owner").await;
+    assert_eq!(before["claude_session_id"], "changes-owner");
+    let (status, Json(body)) = super::kill_tmux_session(
+        State(receiver),
+        forwarded,
+        Path(key("changes-owner")),
+        Json(crate::services::dispatched_sessions::KillTmuxOptions {
+            reason: Some("idle 7시간 초과 — 자동 정리".to_string()),
+            minimum_idle_minutes: Some(360),
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "session_forward_owner_conflict");
+    assert_eq!(row("changes-owner").await, before);
+    assert!(!tmux_probe.path().join("calls").exists());
+
+    for n in names
+        .into_iter()
+        .filter(|n| !matches!(*n, "legacy" | "changes-host" | "changes-owner"))
+    {
         let before = row(n).await;
         // A failed probe is preserved whatever the reason, forced ones included.
         let reason = if n == "probefail" {

@@ -1,6 +1,8 @@
 module.exports = function attachIdleKill(timeouts, helpers) {
   var loadOwnerGuard = require("./idle-kill-owners")();
   var scanAfter = null;
+  // Leave time for QuickJS to settle the cursor and log the tick summary.
+  var deadlineReserveMs = 200;
   var sendDeadlockAlert = helpers.sendDeadlockAlert;
   var MAX_DISPATCH_RETRIES = helpers.MAX_DISPATCH_RETRIES;
   var getTimeoutInterval = helpers.getTimeoutInterval;
@@ -32,7 +34,7 @@ module.exports = function attachIdleKill(timeouts, helpers) {
         agentdesk.log.error("[idle-kill] server_port missing — cannot call kill-tmux API");
         return;
       }
-      var ownerEligible = loadOwnerGuard(apiPort);
+      var ownerEligible = loadOwnerGuard(apiPort, deadlineReserveMs, logDeadline);
       if (!ownerEligible) return;
       var agents = loadAgentDirectory();
       backfillMissingSessionAgentIds(agents);
@@ -83,11 +85,6 @@ module.exports = function attachIdleKill(timeouts, helpers) {
         );
       }
 
-      function isDeadline(error) {
-        return typeof error === "string" &&
-          /^(bridge deadline (passed|exceeded)|response deadline exceeded|connect deadline exceeded)\b/.test(error);
-      }
-
       function logDeadline(remaining) {
         agentdesk.log.warn("[idle-kill] kill-tmux deadline reached; remaining=" + remaining);
       }
@@ -121,7 +118,6 @@ module.exports = function attachIdleKill(timeouts, helpers) {
           if (checkedCount >= 50) return false;
 
           var s = sessions[i];
-          var previous = scanAfter;
           scanAfter = [s.idle_cursor_at, s.idle_cursor_id];
           var decision = decisions[s.session_key];
           if (!decision || decision.supported !== true) {
@@ -145,14 +141,14 @@ module.exports = function attachIdleKill(timeouts, helpers) {
             killResp = agentdesk.http.post(killUrl, {
               reason: "idle " + formatIdleDuration(idleMin) + " 초과 — 자동 정리",
               minimum_idle_minutes: minimumIdleMinutes
-            });
+            }, deadlineReserveMs);
           } catch (e) {
             agentdesk.log.error("[idle-kill] kill-tmux API exception for " + s.session_key + ": " + e);
             continue;
           }
 
-          if (killResp && isDeadline(killResp.error)) {
-            scanAfter = previous;
+          if (killResp && killResp.deadline_exceeded === true) {
+            // Revisit this request with fresh admission on the next full sweep.
             logDeadline(remaining);
             return false;
           }
@@ -243,7 +239,8 @@ module.exports = function attachIdleKill(timeouts, helpers) {
         try {
           page = readPage();
         } catch (error) {
-          if (!isDeadline(error.message)) throw error;
+          if (error.message !== "bridge deadline passed before async bridge started" &&
+              error.message !== "bridge deadline exceeded during async bridge operation") throw error;
           logDeadline("unknown");
           return;
         }
@@ -254,8 +251,8 @@ module.exports = function attachIdleKill(timeouts, helpers) {
         var decisions = Object.create(null);
         if (keys.length) {
           var candidates = agentdesk.http.post("http://127.0.0.1:" + apiPort +
-            "/api/sessions/idle-cleanup-candidates", { keys: keys });
-          if (candidates && isDeadline(candidates.error)) {
+            "/api/sessions/idle-cleanup-candidates", { keys: keys }, deadlineReserveMs);
+          if (candidates && candidates.deadline_exceeded === true) {
             logDeadline(keys.length);
             return;
           }

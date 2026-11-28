@@ -1,4 +1,15 @@
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
+use std::time::{Duration, Instant};
+
+#[path = "http_ops/loopback.rs"]
+mod loopback;
+#[cfg(test)]
+use loopback::connect_first_reachable;
+use loopback::{HttpFailure, invoke_localhost_before, loopback_http_request_inner};
+
+#[cfg(test)]
+#[path = "http_ops/idle_deadline_tests.rs"]
+mod idle_deadline_tests;
 
 // ── HTTP ops ────────────────────────────────────────────────────
 //
@@ -117,12 +128,12 @@ fn invoke_localhost_get(url: &str) -> String {
         Ok(timeout) => timeout,
         Err(message) => return format!(r#"{{"error":"{}"}}"#, escape_for_json(&message)),
     };
-    std::thread::spawn(
-        move || match loopback_http_request_inner(&parsed, "", timeout, "GET") {
+    std::thread::spawn(move || {
+        match loopback_http_request_inner(&parsed, "", || Instant::now() + timeout, "GET") {
             Ok(body) => body,
-            Err(message) => format!(r#"{{"error":"{}"}}"#, escape_for_json(&message)),
-        },
-    )
+            Err(error) => format!(r#"{{"error":"{}"}}"#, escape_for_json(&error.message())),
+        }
+    })
     .join()
     .unwrap_or_else(|_| r#"{"error":"thread panic"}"#.to_string())
 }
@@ -160,99 +171,8 @@ fn loopback_http_post_inner(
     body: &str,
     timeout: std::time::Duration,
 ) -> Result<String, String> {
-    loopback_http_request_inner(url, body, timeout, "POST")
-}
-
-fn loopback_http_request_inner(
-    url: &url::Url,
-    body: &str,
-    timeout: std::time::Duration,
-    method: &str,
-) -> Result<String, String> {
-    use std::io::{Read, Write};
-
-    let request_target = request_target(url)?;
-    let authority = url.authority();
-    if authority.is_empty() || contains_ctl(authority) {
-        return Err("unsafe request authority".to_string());
-    }
-
-    let addrs = url
-        .socket_addrs(|| Some(80))
-        .map_err(|e| format!("resolve {authority}: {e}"))?;
-
-    // Total-deadline anchor: the per-read socket timeout below bounds each
-    // `read` syscall, NOT the whole exchange — a peer dribbling one byte per
-    // read window would extend the call indefinitely. Checking elapsed time
-    // against this deadline before every read bounds the worst case at
-    // `timeout + one read window` (≤ 2×timeout) without re-arming
-    // `set_read_timeout` mid-stream, which is the exact syscall-after-peer-
-    // close that EINVALs on macOS (see the #4251 note on
-    // `loopback_http_post`). It also caps the combined connect attempts below.
-    let deadline = std::time::Instant::now() + timeout;
-
-    let mut stream = connect_first_reachable(&addrs, deadline)?;
-
-    // Set the socket timeouts exactly once, immediately after connect while
-    // the fd is guaranteed valid, and never touch them again (see the #4251
-    // note on `loopback_http_post`). std rejects a zero-duration timeout with
-    // EINVAL, so clamp up to at least 1ms.
-    let socket_timeout = timeout.max(std::time::Duration::from_millis(1));
-    stream
-        .set_read_timeout(Some(socket_timeout))
-        .map_err(|e| format!("set_read_timeout: {e}"))?;
-    stream
-        .set_write_timeout(Some(socket_timeout))
-        .map_err(|e| format!("set_write_timeout: {e}"))?;
-
-    let head = if method == "POST" {
-        build_request_head(&request_target, authority, body.len())
-    } else {
-        build_request_head_for_method(&request_target, authority, body.len(), method)
-    };
-    stream
-        .write_all(head.as_bytes())
-        .and_then(|()| stream.write_all(body.as_bytes()))
-        .and_then(|()| stream.flush())
-        .map_err(|e| format!("write request: {e}"))?;
-
-    let mut raw: Vec<u8> = Vec::with_capacity(1024);
-    let mut buf = [0u8; 8192];
-    let mut header_end: Option<usize> = None;
-    let mut content_length: Option<usize> = None;
-    loop {
-        if header_end.is_none() {
-            if let Some(pos) = find_subslice(&raw, b"\r\n\r\n") {
-                header_end = Some(pos + 4);
-                content_length = parse_content_length(&raw[..pos]);
-            }
-        }
-        // Early exit once the declared body has fully arrived, so a peer that
-        // ignores `Connection: close` cannot make us block until the read
-        // timeout.
-        if let (Some(he), Some(cl)) = (header_end, content_length) {
-            if raw.len() >= he.saturating_add(cl) {
-                return build_response(&raw, he, Some(cl));
-            }
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err("response deadline exceeded".to_string());
-        }
-        match stream.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                raw.extend_from_slice(&buf[..n]);
-                if raw.len() > MAX_RESPONSE_BYTES {
-                    return Err("response exceeds 8 MiB cap".to_string());
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(format!("read response: {e}")),
-        }
-    }
-    let he =
-        header_end.ok_or_else(|| "incomplete response: missing header terminator".to_string())?;
-    build_response(&raw, he, content_length)
+    loopback_http_request_inner(url, body, || Instant::now() + timeout, "POST")
+        .map_err(HttpFailure::message)
 }
 
 /// Build the request line target (`path[?query]`) and fail closed if it
@@ -291,34 +211,6 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
-}
-
-/// Try every resolved address until one connects, all under the caller's
-/// total deadline (codex #4391 r3-1: macOS resolves `localhost` to `::1`
-/// before `127.0.0.1`; taking only the first address made an IPv4-only
-/// loopback server unreachable — ureq looped the list too).
-fn connect_first_reachable(
-    addrs: &[std::net::SocketAddr],
-    deadline: std::time::Instant,
-) -> Result<std::net::TcpStream, String> {
-    if addrs.is_empty() {
-        return Err("no socket address for target".to_string());
-    }
-    let mut last_error = String::new();
-    for addr in addrs {
-        let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
-            return Err(if last_error.is_empty() {
-                "connect deadline exceeded".to_string()
-            } else {
-                format!("connect deadline exceeded (last attempt: {last_error})")
-            });
-        };
-        match std::net::TcpStream::connect_timeout(addr, remaining) {
-            Ok(stream) => return Ok(stream),
-            Err(e) => last_error = format!("connect {addr}: {e}"),
-        }
-    }
-    Err(last_error)
 }
 
 /// Request head for the loopback POST. Deliberately `HTTP/1.0`: a compliant
@@ -471,6 +363,12 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::time::{Duration, Instant};
+
+    #[path = "http_ops/loopback.rs"]
+    mod loopback;
+    #[cfg(test)]
+    use loopback::connect_first_reachable;
+    use loopback::{HttpFailure, invoke_localhost_before, loopback_http_request_inner};
 
     #[test]
     fn policy_http_get_uses_read_only_loopback_transport_and_js_registration() {
@@ -827,7 +725,7 @@ mod tests {
             .unwrap();
         let stream = connect_first_reachable(&[good], deadline);
         assert!(
-            matches!(&stream, Err(message) if message == "connect deadline exceeded"),
+            matches!(&stream, Err(HttpFailure::Deadline(message)) if message == "connect deadline exceeded"),
             "a passed deadline must stop the walk, got {:?}",
             stream.map(|_| ())
         );
@@ -1037,16 +935,38 @@ pub(super) fn register_http_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
         })?,
     )?;
 
+    http_obj.set(
+        "__request_before_raw",
+        Function::new(
+            ctx.clone(),
+            |url: String, body: String, reserve_ms: u32, post: bool| {
+                invoke_localhost_before(
+                    &url,
+                    body,
+                    Duration::from_millis(u64::from(reserve_ms)),
+                    post,
+                )
+            },
+        )?,
+    )?;
+
     ad.set("http", http_obj)?;
 
     let _: rquickjs::Value = ctx.eval(
         r#"
         (function() {
-            agentdesk.http.get = function(url) {
+            agentdesk.http.get = function(url, reserveMs) {
+                if (reserveMs > 0) {
+                    return JSON.parse(agentdesk.http.__request_before_raw(url, "", reserveMs, false));
+                }
                 return JSON.parse(agentdesk.http.__get_raw(url));
             };
-            agentdesk.http.post = function(url, body) {
-                return JSON.parse(agentdesk.http.__post_raw(url, JSON.stringify(body)));
+            agentdesk.http.post = function(url, body, reserveMs) {
+                var payload = JSON.stringify(body);
+                if (reserveMs > 0) {
+                    return JSON.parse(agentdesk.http.__request_before_raw(url, payload, reserveMs, true));
+                }
+                return JSON.parse(agentdesk.http.__post_raw(url, payload));
             };
         })();
     "#,

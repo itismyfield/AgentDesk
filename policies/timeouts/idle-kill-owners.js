@@ -4,10 +4,14 @@ module.exports = function createIdleKillOwnerGuard() {
   var warnedOwners = Object.create(null);
   var lastUnavailableWarningAt = null;
 
-  return function loadOwnerGuard(apiPort) {
+  return function loadOwnerGuard(apiPort, deadlineReserveMs, logDeadline) {
     var snapshot;
     try {
-      snapshot = agentdesk.http.get("http://127.0.0.1:" + apiPort + "/api/cluster/nodes");
+      snapshot = agentdesk.http.get("http://127.0.0.1:" + apiPort + "/api/cluster/nodes", deadlineReserveMs);
+      if (snapshot && snapshot.deadline_exceeded === true) {
+        logDeadline("unknown");
+        return null;
+      }
       if (!snapshot || !snapshot.cluster || !Array.isArray(snapshot.nodes)
           || !Array.isArray(snapshot.cluster.configured_forward_owner_ids)
           || !Object.prototype.hasOwnProperty.call(snapshot.cluster, "local_instance_id")) {

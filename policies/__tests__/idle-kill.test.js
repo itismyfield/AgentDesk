@@ -75,7 +75,7 @@ test("idle-kill resumes after the last classified page when the next page times 
     idleCleanupCandidates({ keys }) {
       pages++;
       if (pages === 1) return { decisions: {} };
-      if (pages === 2) return { error: "bridge deadline passed before http.post started" };
+      if (pages === 2) return { error: "read response: Resource temporarily unavailable (os error 35)", deadline_exceeded: true };
       return { decisions: { [keys[0]]: { supported: true } } };
     },
     httpPost() { return { ok: true, tmux_killed: true }; }
@@ -92,6 +92,51 @@ test("idle-kill resumes after the last classified page when the next page times 
   assert.deepEqual(state.idleCleanupChecks.map(({ keys }) => keys.length), [64, 1, 1]);
   assert.equal(state.httpPosts.length, 1);
   assert.match(state.httpPosts[0].url, /-legacy\/kill-tmux$/);
+});
+
+test("idle-kill reports a preflight deadline without classifying or posting candidates", () => {
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    config: { server_port: 8791 },
+    httpGet() { return { error: "socket timeout", deadline_exceeded: true }; }
+  });
+
+  policy.onTick5min({});
+
+  assert.equal(state.idleCleanupChecks.length, 0);
+  assert.equal(state.httpPosts.length, 0);
+  assert.deepEqual(state.logs.warn.filter((line) => line.includes("[idle-kill]")), [
+    "[idle-kill] kill-tmux deadline reached; remaining=unknown"
+  ]);
+  assert.equal(state.logs.error.length, 0);
+});
+
+test("idle-kill advances past a repeatedly timed-out POST and rechecks it on the next sweep", () => {
+  const rows = orderedRows([idleRow("slow"), idleRow("ready")]);
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    config: { server_port: 8791 },
+    dbQuery(sql, params) { return readPage(rows, sql, params); },
+    httpPost(url) {
+      if (url.includes("-slow/")) {
+        return { error: "read response: Resource temporarily unavailable (os error 35)", deadline_exceeded: true };
+      }
+      return { ok: true, tmux_was_alive: true, tmux_killed: true };
+    }
+  });
+
+  const [slow, ready] = rows.map(({ session_key }) => session_key);
+  const targets = () => state.httpPosts.map(({ url }) => decodeURIComponent(url.split("/").at(-2)));
+  policy.onTick5min({});
+  assert.deepEqual(targets(), [slow]);
+  policy.onTick5min({});
+  assert.deepEqual(targets(), [slow, ready]);
+  policy.onTick5min({});
+  assert.deepEqual(targets(), [slow, ready, slow]);
+  assert.deepEqual(state.idleCleanupChecks.map(({ keys }) => keys), [[slow, ready], [ready], [slow, ready]]);
+  assert.deepEqual(state.logs.warn.filter((line) => line.includes("deadline reached")), [
+    "[idle-kill] kill-tmux deadline reached; remaining=1",
+    "[idle-kill] kill-tmux deadline reached; remaining=1"
+  ]);
+  assert.equal(state.logs.error.length, 0);
 });
 
 test("idle-kill caps supported candidates at 50 across read pages", () => {
@@ -132,7 +177,7 @@ for (const error of [
         if (url.includes("-deadline-1") || url.includes("-deadline-2")) {
           return { error: "status code 500" };
         }
-        return { error };
+        return { error, deadline_exceeded: true };
       }
     });
 
