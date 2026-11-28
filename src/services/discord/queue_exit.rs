@@ -202,7 +202,7 @@ pub(super) async fn apply_queue_exit_feedback(
     }
 }
 
-pub(crate) struct QueueExitPendingPlaceholderDeleter {
+pub(super) struct QueueExitPendingPlaceholderDeleter {
     pub(super) http: Arc<serenity::Http>,
 }
 

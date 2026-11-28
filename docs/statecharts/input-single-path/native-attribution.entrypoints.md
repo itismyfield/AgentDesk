@@ -327,8 +327,8 @@ main `984d802d9f`에서 아래 4개 시험 파일이 삭제됐다. 이 파일의
 | `src/services/discord/inflight/save_store/rebind_adoption.rs:58` | `save_existing_inflight_rebind_adoption_with_offset_rebase_if_matches_episode` | BootRestore / ProjectionSave / ProjectionClear |
 | `src/services/discord/inflight/save_store/rebind_adoption.rs:68` | `save_existing_inflight_rebind_adoption_with_offset_rebase_if_matches_episode` | BootRestore / ProjectionSave / ProjectionClear |
 | `src/services/discord/inflight_heartbeat_sweeper.rs:151` | `run_heartbeat_sweep_pass_inner` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
-| `src/services/discord/mod.rs:457` | `clear_inflight_state_for_channel` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
-| `src/services/discord/mod.rs:458` | `clear_inflight_state_for_channel` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
+| `src/services/discord/bot_runtime.rs:61` | `clear_inflight_state_for_channel` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
+| `src/services/discord/bot_runtime.rs:62` | `clear_inflight_state_for_channel` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
 | `src/services/discord/placeholder_sweeper/abandon_guard.rs:279` | `delete_state_if_allowed` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
 | `src/services/discord/receipt_settle.rs:155` | `settle_marked` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
 | `src/services/discord/receipt_settle.rs:323` | `stopped` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |

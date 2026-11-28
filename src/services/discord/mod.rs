@@ -705,7 +705,7 @@ use queue_exit::queue_exit_card_body;
 use queue_exit::queue_exit_drain_queued_placeholders;
 pub(in crate::services::discord) use queue_exit::queue_exit_feedback_emoji;
 
-pub(crate) use queue_exit::QueueExitPendingPlaceholderDeleter;
+use queue_exit::QueueExitPendingPlaceholderDeleter;
 
 #[cfg(test)]
 mod queue_exit_feedback_reconciler_tests {
