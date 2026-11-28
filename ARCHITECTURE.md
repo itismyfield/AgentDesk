@@ -2168,6 +2168,7 @@ src/
 │   │   │   ├── read_only_owner_snapshot.rs
 │   │   │   ├── rebind_reap.rs
 │   │   │   ├── receipt_boundary_tests.rs
+│   │   │   ├── relay_circuit_evidence.rs
 │   │   │   ├── removal.rs
 │   │   │   ├── replay_projection_tests.rs
 │   │   │   ├── restart_mark.rs
@@ -2177,6 +2178,7 @@ src/
 │   │   │   ├── runtime_view.rs
 │   │   │   ├── save_store.rs
 │   │   │   ├── store.rs
+│   │   │   ├── synthetic_claim.rs
 │   │   │   ├── terminal_delivery_evidence_loss.rs
 │   │   │   ├── terminal_receipt_stamp.rs
 │   │   │   ├── terminal_receipt_stamp_tests.rs
@@ -2245,6 +2247,7 @@ src/
 │   │   │   │   ├── raw_request_tests.rs
 │   │   │   │   └── transport.rs
 │   │   │   ├── body_census.rs
+│   │   │   ├── bot_http.rs
 │   │   │   ├── completed_turn_ledger.rs
 │   │   │   ├── confirmation.rs
 │   │   │   ├── decision.rs
@@ -2272,6 +2275,7 @@ src/
 │   │   │   ├── raw_output.rs
 │   │   │   ├── reaction_control.rs
 │   │   │   ├── receipt_index.rs
+│   │   │   ├── restart_report_types.rs
 │   │   │   ├── result.rs
 │   │   │   ├── send_api.rs
 │   │   │   ├── send_gate.rs
@@ -2350,7 +2354,8 @@ src/
 │   │   │   ├── canary_workspace_tests.rs
 │   │   │   ├── cancel_backstop_race_support_tests.rs
 │   │   │   ├── input_effect_tests.rs
-│   │   │   └── kickoff.rs
+│   │   │   ├── kickoff.rs
+│   │   │   └── owner_race_hook_test_support.rs
 │   │   ├── queue_io/
 │   │   │   ├── decision_drain/
 │   │   │   │   ├── queued.rs
@@ -2417,6 +2422,7 @@ src/
 │   │   │   ├── decision_drain.rs
 │   │   │   ├── decision_drain_tests.rs
 │   │   │   ├── held_sources.rs
+│   │   │   ├── human_input.rs
 │   │   │   ├── idle_queue_tests.rs
 │   │   │   ├── ledger_settlement_tests.rs
 │   │   │   ├── owned_backstop_tests.rs
@@ -2543,7 +2549,8 @@ src/
 │   │   │   ├── restart.rs
 │   │   │   └── shared.rs
 │   │   ├── relay_health/
-│   │   │   └── frontier.rs
+│   │   │   ├── frontier.rs
+│   │   │   └── retry_delay.rs
 │   │   ├── relay_recovery/
 │   │   │   ├── tests/
 │   │   │   │   ├── circuit_breaker_apply.rs
@@ -3057,8 +3064,10 @@ src/
 │   │   │   ├── validation.rs
 │   │   │   └── write.rs
 │   │   ├── shared_state/
+│   │   │   ├── catch_up_retry.rs
 │   │   │   ├── g7_host.rs
-│   │   │   └── g7_host_tests.rs
+│   │   │   ├── g7_host_tests.rs
+│   │   │   └── health_ports.rs
 │   │   ├── stall_recovery/
 │   │   │   ├── ke_queue_tests.rs
 │   │   │   └── ke_queue_unix_tests.rs
@@ -3891,6 +3900,10 @@ src/
 │   │   ├── destructive_cancel_gate.rs
 │   │   ├── discord_io.rs
 │   │   ├── dispatch_policy.rs
+│   │   ├── dl_turn_bridge_test_host.rs
+│   │   ├── dl_turn_bridge_unix_test_host.rs
+│   │   ├── dl_turn_presence_test_host.rs
+│   │   ├── dl_turn_presence_unix_test_host.rs
 │   │   ├── e2e_control.rs
 │   │   ├── execution_identity.rs
 │   │   ├── footer_retirement.rs
@@ -3969,7 +3982,6 @@ src/
 │   │   ├── relay_recovery_auto_heal_confirm.rs
 │   │   ├── relay_recovery_circuit_alert_producer.rs
 │   │   ├── relay_recovery_circuit_breaker.rs
-│   │   ├── relay_recovery_circuit_evidence.rs
 │   │   ├── relay_recovery_circuit_evidence_tests.rs
 │   │   ├── relay_recovery_completion_footer.rs
 │   │   ├── relay_recovery_leaked_row_sweep.rs
