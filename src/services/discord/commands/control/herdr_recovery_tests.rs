@@ -84,6 +84,7 @@ mod retired_selector {
         shared: Arc<crate::services::discord::SharedData>,
         channel: ChannelId,
         key: String,
+        nonce: String,
         _switches: herdr::LiveSwitches,
     }
 
@@ -97,12 +98,16 @@ mod retired_selector {
         let shared =
             crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
         let channel = ChannelId::new(channel);
-        gate::map_channel(&shared, channel, "p11-clear").await;
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let logical = format!("p11-clear-{nonce}");
+        gate::map_channel(&shared, channel, &logical).await;
         let key = crate::services::discord::adk_session::build_adk_session_key;
         let key = key(&shared, channel, &ProviderKind::Claude, None)
             .await
             .unwrap();
-        let switches = rig.bind(&pool, &shared.token_hash, &key, state).await;
+        let switches = rig
+            .bind_with_nonce(&pool, (&shared.token_hash, &key), state, &nonce)
+            .await;
         let root = crate::config::runtime_root().unwrap().display().to_string();
         sqlx::query("UPDATE sessions SET hosted_execution = jsonb_set(jsonb_set(hosted_execution, '{owner,runtime_root}', to_jsonb($2::text)), '{source_ref,runtime_root}', to_jsonb($2::text)), claude_session_id = $3, raw_provider_session_id = $3 WHERE session_key = $1")
             .bind(&key).bind(root).bind(SELECTOR).execute(&pool).await.unwrap();
@@ -112,6 +117,7 @@ mod retired_selector {
             shared,
             channel,
             key,
+            nonce,
             _switches: switches,
         };
         assert_eq!(seeded.selected().await.as_deref(), Some(SELECTOR));
@@ -119,6 +125,10 @@ mod retired_selector {
     }
 
     impl Seeded {
+        fn retired(&self) -> Option<(herdr::HostedState, String)> {
+            Some((herdr::HostedState::Retired, self.nonce.clone()))
+        }
+
         /// The selector the provider-session route hands a turn whose clear flag is gone.
         async fn selected(&self) -> Option<String> {
             let load = crate::db::dispatched_sessions::load_provider_session_ids_pg;
@@ -168,10 +178,6 @@ mod retired_selector {
         }
     }
 
-    fn retired() -> Option<(herdr::HostedState, String)> {
-        Some((herdr::HostedState::Retired, herdr::EXECUTION.to_string()))
-    }
-
     // The clear of a live execution terminates it; a later input that lost the clear flag to a
     // requeue still finds no selector to resume, so the cleared reply holds.
     #[test]
@@ -192,7 +198,10 @@ mod retired_selector {
 
             let cleared = format!("{SESSION_CLEARED_RESPONSE}\n대기 메시지 0건을 비웠어요.");
             assert_eq!(report.reply(), cleared, "{report:?}");
-            assert_eq!(herdr::row(&seeded.pool, &seeded.key).await, retired());
+            assert_eq!(
+                herdr::row(&seeded.pool, &seeded.key).await,
+                seeded.retired()
+            );
             assert!(seeded.take_clear_flag().await, "the clear set its flag");
             assert_eq!(seeded.selected().await, None, "the next input starts fresh");
             seeded.done().await;
@@ -224,7 +233,7 @@ mod retired_selector {
             let report = seeded.clear().await;
 
             let reply = report.reply();
-            assert_eq!(herdr::row(&seeded.pool, &seeded.key).await, retired());
+            assert_eq!(herdr::row(&seeded.pool, &seeded.key).await, seeded.retired());
             assert_eq!(seeded.selected().await.as_deref(), Some(SELECTOR));
             assert_eq!(report.failed, ["session_selector"], "{report:?}");
             assert!(!reply.contains(SESSION_CLEARED_RESPONSE), "{reply}");
@@ -254,7 +263,10 @@ mod retired_selector {
             let cleared = format!("{SESSION_CLEARED_RESPONSE}\n대기 메시지 0건을 비웠어요.");
             assert_eq!(report.reply(), cleared, "{report:?}");
             assert!(rig.writes().is_empty(), "the restored shell is not closed");
-            assert_eq!(herdr::row(&seeded.pool, &seeded.key).await, retired());
+            assert_eq!(
+                herdr::row(&seeded.pool, &seeded.key).await,
+                seeded.retired()
+            );
             assert!(seeded.take_clear_flag().await, "the clear set its flag");
             assert_eq!(seeded.selected().await, None, "the next input starts fresh");
             let recent = crate::services::discord::load_channel_recent_context(
@@ -292,14 +304,14 @@ mod retired_selector {
         }
         let rig = herdr::P11TerminationRig::boot(REPLACED);
         runtime(&rig).block_on(async {
-            let root = crate::config::TestRuntimeRootGuard::new();
-            let _claude = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
-                "CLAUDE_CONFIG_DIR",
-                root.path(),
-            );
             let mut observed = Vec::new();
             let mut expected = Vec::new();
             for (cache, raw_wins) in [(true, true), (false, true), (true, false), (false, false)] {
+                let root = crate::config::TestRuntimeRootGuard::with_isolated_config();
+                let _claude = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+                    "CLAUDE_CONFIG_DIR",
+                    root.path(),
+                );
                 let seeded = seeded(&rig, REPLACED, herdr::HostedState::Bound).await;
                 let (legacy, raw) = super::super::super::clear_end_tests::selector_fixture(
                     &seeded.pool,
@@ -539,7 +551,7 @@ mod retired_selector {
             );
             assert_eq!(
                 herdr::row(&seeded.pool, &seeded.key).await,
-                Some((herdr::HostedState::Bound, herdr::EXECUTION.to_owned()))
+                Some((herdr::HostedState::Bound, seeded.nonce.clone()))
             );
             assert_eq!(
                 target
@@ -577,7 +589,10 @@ mod retired_selector {
                 .unwrap()
                 .unwrap();
             assert!(!report.end_unconfirmed, "{report:?}");
-            assert_eq!(herdr::row(&seeded.pool, &seeded.key).await, retired());
+            assert_eq!(
+                herdr::row(&seeded.pool, &seeded.key).await,
+                seeded.retired()
+            );
             assert_eq!(seeded.selected().await, None);
             assert_eq!(
                 rig.writes(),

@@ -37,7 +37,7 @@ use crate::services::session_host::herdr_for_test::transport::{
 };
 use crate::services::session_host::herdr_for_test::wire::{LineJsonFraming, MAX_FRAME_BYTES};
 use crate::services::session_host::herdr_gate::HerdrGateRefusal;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -81,6 +81,7 @@ struct Seen {
 
 struct Server {
     path: PathBuf,
+    _socket_dir: tempfile::TempDir,
     conns: Arc<Mutex<BTreeMap<usize, Seen>>>,
     stop: Arc<AtomicBool>,
     version: Arc<Mutex<String>>,
@@ -93,19 +94,16 @@ struct Server {
     thread: Option<JoinHandle<()>>,
 }
 
-fn socket_path() -> PathBuf {
-    static SOCKETS: AtomicU64 = AtomicU64::new(0);
-    let n = SOCKETS.fetch_add(1, Ordering::SeqCst);
-    PathBuf::from("/tmp").join(format!("adk-hg-{}-{n}.sock", std::process::id()))
-}
-
 /// A whole reply that takes the default one's place for its request.
 type Scripted = Arc<Mutex<Option<Value>>>;
 
 /// Answers by method, one request per connection, like Herdr.
 fn serve() -> Server {
-    let path = socket_path();
-    let _ = std::fs::remove_file(&path);
+    let socket_dir = tempfile::Builder::new()
+        .prefix("adk-hg-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let path = socket_dir.path().join("herdr.sock");
     let listener = UnixListener::bind(&path).unwrap();
     listener.set_nonblocking(true).unwrap();
     let conns = Arc::new(Mutex::new(BTreeMap::new()));
@@ -141,6 +139,7 @@ fn serve() -> Server {
     });
     Server {
         path,
+        _socket_dir: socket_dir,
         conns,
         stop,
         version,
@@ -2234,8 +2233,19 @@ pub(crate) mod p11 {
             session_key: &str,
             state: HostedState,
         ) -> LiveSwitches {
+            self.bind_with_nonce(pool, (token_hash, session_key), state, NONCE)
+                .await
+        }
+
+        pub(crate) async fn bind_with_nonce(
+            &self,
+            pool: &sqlx::PgPool,
+            (token_hash, session_key): (&str, &str),
+            state: HostedState,
+            nonce: &str,
+        ) -> LiveSwitches {
             let held = state != HostedState::Retired;
-            self.insert(pool, (token_hash, session_key), state, held, true)
+            self.insert(pool, (token_hash, session_key, nonce), state, held, true)
                 .await
         }
 
@@ -2247,7 +2257,7 @@ pub(crate) mod p11 {
             session_key: &str,
         ) -> LiveSwitches {
             let pending = HostedState::Pending;
-            self.insert(pool, (token_hash, session_key), pending, false, true)
+            self.insert(pool, (token_hash, session_key, NONCE), pending, false, true)
                 .await
         }
 
@@ -2259,8 +2269,14 @@ pub(crate) mod p11 {
             session_key: &str,
         ) -> LiveSwitches {
             let pending = HostedState::Pending;
-            self.insert(pool, (token_hash, session_key), pending, false, false)
-                .await
+            self.insert(
+                pool,
+                (token_hash, session_key, NONCE),
+                pending,
+                false,
+                false,
+            )
+            .await
         }
 
         fn record_at_runtime_root(&self, state: HostedState) -> HostedExecution {
@@ -2279,7 +2295,7 @@ pub(crate) mod p11 {
         async fn insert(
             &self,
             pool: &sqlx::PgPool,
-            (token_hash, session_key): (&str, &str),
+            (token_hash, session_key, nonce): (&str, &str, &str),
             state: HostedState,
             held: bool,
             evidence: bool,
@@ -2288,9 +2304,13 @@ pub(crate) mod p11 {
             let marker = crate::services::tmux_common::session_temp_path(logical, "host_kind");
             std::fs::write(marker, "herdr").unwrap();
             self.os
-                .swap(Arc::new(FakeOs::launched(env_naming(&context(NONCE)))));
+                .swap(Arc::new(FakeOs::launched(env_naming(&context(nonce)))));
             let mut record = self.record_at_runtime_root(state);
-            if !evidence {
+            record.execution_nonce = nonce.into();
+            record.source_ref.execution_nonce = nonce.into();
+            if evidence {
+                record.expected.as_mut().unwrap().binding_nonce = nonce.into();
+            } else {
                 record.expected = None;
             }
             record.owner.discord_token_hash = token_hash.into();
@@ -2303,7 +2323,7 @@ pub(crate) mod p11 {
                 .bind(serde_json::to_value(&record).unwrap())
                 .execute(pool).await.unwrap();
             if held {
-                crate::services::claude::herdr_turn::hold(NONCE).unwrap();
+                crate::services::claude::herdr_turn::hold(nonce).unwrap();
             }
             let switches = LiveSwitches(LiveTerminateSwitch::new());
             switches.set_terminate(Some(true));

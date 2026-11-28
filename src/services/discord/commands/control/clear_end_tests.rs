@@ -644,7 +644,7 @@ async fn tmux_clear_uses_the_authoritative_selector_with_or_without_memory_pg() 
         .enumerate()
     {
         let channel = ChannelId::new(1_479_671_305_341_100_070 + index as u64);
-        let name = format!("selector-authority-{index}");
+        let name = format!("selector-authority-{}", uuid::Uuid::new_v4().simple());
         let managed = Managed::start(&shared, &pool, &provider, (channel, &name)).await;
         let (legacy, raw) = selector_fixture(&pool, &managed.key, root.path(), raw_wins).await;
         let mut core = shared.core.lock().await;
@@ -675,13 +675,8 @@ async fn tmux_clear_reports_selector_read_failure_and_keeps_the_boundary_pg() {
     let shared = make_shared_data_for_tests_with_storage(Some(pool.clone()));
     let provider = ProviderKind::Claude;
     let channel = ChannelId::new(1_479_671_305_341_100_079);
-    let managed = Managed::start(
-        &shared,
-        &pool,
-        &provider,
-        (channel, "selector-read-failure"),
-    )
-    .await;
+    let name = format!("selector-read-failure-{}", uuid::Uuid::new_v4().simple());
+    let managed = Managed::start(&shared, &pool, &provider, (channel, &name)).await;
     sqlx::query("ALTER TABLE sessions RENAME COLUMN cwd TO unreadable_cwd")
         .execute(&pool)
         .await
