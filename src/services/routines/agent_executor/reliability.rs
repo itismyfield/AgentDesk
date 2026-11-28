@@ -217,14 +217,6 @@ impl RoutineAgentExecutor {
         })?;
         Ok(settled_terminal_turn_error(run, row, Utc::now()))
     }
-    #[cfg(all(unix, any(test, feature = "test-support")))]
-    pub(crate) async fn fresh_provider_session_failure_for_test(
-        &self,
-        run: &RunningAgentRoutineRun,
-    ) -> Option<String> {
-        self.fresh_provider_session_failure(run).await
-    }
-
     /// A fresh managed-tmux turn that lost its pane cannot produce a
     /// transcript or terminal quality event. Detect that state before the
     /// routine's long completion timeout so the existing cleanup and
@@ -302,7 +294,8 @@ fn recorded_channel_id(value: Option<&Value>) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{completion_with_evidence, running_run};
+    use super::super::test_support::running_run;
+    use super::super::tests::completion_with_evidence;
     use super::*;
     use chrono::{DateTime, Duration, Utc};
     use serde_json::json;

@@ -13,6 +13,8 @@ mod run_policy;
 mod settlement;
 pub(crate) mod start_deferral;
 mod surface;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 use reliability::{current_attempt_started_at, provider_error_from_completion};
 use serde_json::{Map, Value, json};
 use sqlx::PgPool;
@@ -1833,29 +1835,9 @@ fn started_turn_is_dm(result_json: &Value) -> bool {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use super::test_support::running_run;
     use super::*;
     use chrono::Utc;
-
-    pub(crate) fn running_run(timeout_secs: Option<i32>) -> RunningAgentRoutineRun {
-        RunningAgentRoutineRun {
-            run_id: "run-1".to_string(),
-            routine_id: "routine-1".to_string(),
-            agent_id: Some("agent-1".to_string()),
-            fallback_agent_id: None,
-            max_retries: 0,
-            retry_count: 0,
-            script_ref: "agent-checkpoint-review.js".to_string(),
-            name: "Agent Checkpoint Review".to_string(),
-            execution_strategy: "fresh".to_string(),
-            discord_thread_id: None,
-            turn_id: Some("discord:123:456".to_string()),
-            next_retry_at: None,
-            attempts: serde_json::json!([]),
-            result_json: None,
-            started_at: Utc::now(),
-            timeout_secs,
-        }
-    }
 
     fn running_run_with_result(result_json: Value) -> RunningAgentRoutineRun {
         RunningAgentRoutineRun {

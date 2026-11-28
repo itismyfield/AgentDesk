@@ -200,6 +200,21 @@ class FileReferencePolicy(unittest.TestCase):
             "#[cfg(test)]", '#[cfg(any(test, feature = "test-support"))]\n'))
         self.check(WRAPPER + WRITE, True)
 
+    def test_routine_test_support_mount_preserves_gate_and_env_policy(self):
+        parent = "src/services/routines/agent_executor.rs"
+        fixture = "src/services/routines/agent_executor/test_support.rs"
+        mount = "pub mod test_support;"
+        self.write(parent, '#[cfg(any(test, feature = "test-support"))]\n' + mount)
+        self.check(WRITE, False, fixture)
+        self.check(RAW + WRITE, True, fixture)
+        for cfg in ("", "#[cfg(test)]\n"):
+            with self.subTest(cfg=cfg):
+                self.write(parent, cfg + mount)
+                errors, _, _ = audit(self.root)
+                self.assertEqual(errors, [
+                    "UNKNOWN canonical source: routine executor fixtures must use the test-support gate",
+                ])
+
     def test_unreviewed_test_support_gate_is_unknown_red(self):
         for gate in ('#[cfg(any(test, feature = "other"))]',
                      '#[cfg(feature = "test-support")]',

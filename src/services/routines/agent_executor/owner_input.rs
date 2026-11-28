@@ -434,7 +434,7 @@ mod tests {
     }
     #[test]
     fn old_started_runs_keep_the_legacy_poll_path() {
-        let mut run = super::super::tests::running_run(None);
+        let mut run = super::super::test_support::running_run(None);
         run.result_json = Some(json!({"status":"started","turn_id":"old-turn"}));
         assert!(!needs_owner(&run));
         for status in ["input_pending", "accepted"] {

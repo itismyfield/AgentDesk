@@ -139,6 +139,9 @@ mod server;
 // (with a residual count) to be retired subtree-by-subtree.
 mod services;
 
+#[cfg(feature = "test-support")]
+pub use services::routines::agent_executor::test_support as routine_agent_executor_test_support;
+
 /// Opaque capability for a resolved Claude executable.
 ///
 /// ```compile_fail

@@ -2,7 +2,9 @@
 use crate::services::discord::health::routine_ports::build_routine_agent_executor;
 use crate::services::provider::ProviderKind;
 use crate::services::routines::agent_executor::routine_agent_session_name;
-use crate::services::routines::agent_executor::tests::running_run;
+use crate::services::routines::agent_executor::test_support::{
+    fresh_provider_session_failure_for_test, running_run,
+};
 use crate::services::routines::store::RunningAgentRoutineRun;
 use chrono::{Duration, Utc};
 use serde_json::{Value, json};
@@ -210,24 +212,18 @@ async fn fresh_probe_failure_stands_only_for_a_found_legacy_row_pg() {
     for (label, provider, name, channel, liveness, fails) in cases {
         let _pane = PaneLivenessOverrideGuard::set(&probe_session(provider, name), liveness);
         let run = probe_run(provider, name, channel);
-        let failure = registered
-            .fresh_provider_session_failure_for_test(&run)
-            .await;
+        let failure = fresh_provider_session_failure_for_test(&registered, &run).await;
         assert_eq!(failure.is_some(), fails, "{label}: {failure:?}");
     }
     let _pane = PaneLivenessOverrideGuard::set(&probe_session("claude", "w2b legacy"), dead);
     let run = probe_run("claude", "w2b legacy", text(1));
-    let unregistered = executor(None)
-        .fresh_provider_session_failure_for_test(&run)
-        .await;
+    let unregistered = fresh_provider_session_failure_for_test(&executor(None), &run).await;
     assert_eq!(
         unregistered, None,
         "no registered hash is not a legacy answer"
     );
     pool.close().await;
-    let failed = registered
-        .fresh_provider_session_failure_for_test(&run)
-        .await;
+    let failed = fresh_provider_session_failure_for_test(&registered, &run).await;
     assert_eq!(failed, None, "a failed lookup is not a legacy answer");
     db.drop().await;
 }

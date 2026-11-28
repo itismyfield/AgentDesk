@@ -19,6 +19,7 @@ ROOT = "__ROOT_LITERAL__"
 SUPPORT_SOURCE = Path("src/services/turn_orchestrator/test_support_tests.rs")
 SUPPORT_PATH = "__SUPPORT_PATH_LITERAL__"
 TEST_SUPPORT_FEATURE = '"test-support"'
+ROUTINE_EXECUTOR = Path("src/services/routines/agent_executor.rs")
 CONFIG = "crate::config"
 SUPPORT = "crate::services::turn_orchestrator::test_support"
 OBS = "crate::services::observability"
@@ -190,6 +191,10 @@ def canonical_owners(sources: dict[Path, str]) -> set[str]:
     orchestrator = compact(sources[Path("src/services/turn_orchestrator.rs")])
     if not any(gate + declaration in orchestrator for gate in test_gates):
         raise ValueError("test_support must use the reviewed test-only module source")
+    if ROUTINE_EXECUTOR in sources:
+        fixture_mount = f"{test_gates[1]}pubmodtest_support;"
+        if fixture_mount not in compact(sources[ROUTINE_EXECUTOR]):
+            raise ValueError("routine executor fixtures must use the test-support gate")
     support = sources[SUPPORT_SOURCE]
     wrapper = block(support, r"\bimpl\s+SharedEnvLock\b")
     checks += [
@@ -227,8 +232,9 @@ def audit(root: Path) -> tuple[list[str], int, list[str]]:
     for tree in ("src", "tests"):
         for path in sorted((root / tree).rglob("*.rs")):
             source = path.read_text()
-            if path.relative_to(root) == Path("src/services/turn_orchestrator.rs") or any(word in source for word in ("AGENTDESK_ROOT_DIR", "shared_test_env_lock", "set_agentdesk_root_for_test", "set_var", "remove_var", "lock_env_then_runtime", "TestEnvVarGuard", "TestRuntimeRootGuard")):
-                sources[path.relative_to(root)] = rust_text(source)
+            relative = path.relative_to(root)
+            if relative in (Path("src/services/turn_orchestrator.rs"), ROUTINE_EXECUTOR) or any(word in source for word in ("AGENTDESK_ROOT_DIR", "shared_test_env_lock", "set_agentdesk_root_for_test", "set_var", "remove_var", "lock_env_then_runtime", "TestEnvVarGuard", "TestRuntimeRootGuard")):
+                sources[relative] = rust_text(source)
     try:
         owners = canonical_owners(sources)
     except (KeyError, ValueError) as error:
