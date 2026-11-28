@@ -11,8 +11,8 @@ subcommand starts the server.
 
 Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this file drifts.
 
-- Top-level commands: 57
-- Commands including nested subcommands: 106
+- Top-level commands: 56
+- Commands including nested subcommands: 104
 
 ## Global options
 
@@ -105,8 +105,6 @@ Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this 
 | [`agentdesk api`](#agentdesk-api) | Call any API endpoint (curl replacement) |  |
 | [`agentdesk terminations`](#agentdesk-terminations) | List session termination events |  |
 | [`agentdesk doctor`](#agentdesk-doctor) | Environment diagnostics |  |
-| [`agentdesk migrate`](#agentdesk-migrate) | Migration helpers |  |
-| [`agentdesk migrate openclaw`](#agentdesk-migrate-openclaw) | Import OpenClaw durable state into AgentDesk |  |
 | [`agentdesk release-migrate-postgres`](#agentdesk-release-migrate-postgres) | Apply pending PostgreSQL migrations before release activation | hidden from `--help` |
 | [`agentdesk provider-cli`](#agentdesk-provider-cli) | Provider CLI safe migration management |  |
 | [`agentdesk provider-cli status`](#agentdesk-provider-cli-status) | Show current registry channels and migration states |  |
@@ -1031,45 +1029,6 @@ Usage: `agentdesk doctor [OPTIONS]`
 | `--repair-sqlite-cache` | flag |  | Allow doctor --fix to run SQLite schema repair and remove stale SQLite cache files |
 | `--allow-remote` | flag |  | Allow sending configured auth tokens to a non-loopback AGENTDESK_API_URL |
 | `--profile <PROFILE>` | `quick`, `deep`, `security` |  | Restrict checks to a profile |
-
-## `agentdesk migrate`
-
-Migration helpers
-
-Usage: `agentdesk migrate <COMMAND>`
-
-Subcommands:
-
-- `openclaw` — Import OpenClaw durable state into AgentDesk
-
-### `agentdesk migrate openclaw`
-
-Import OpenClaw durable state into AgentDesk
-
-Usage: `agentdesk migrate openclaw [OPTIONS] [ROOT_PATH]`
-
-| Argument | Value | Default | Description |
-|---|---|---|---|
-| `[ROOT_PATH]` | `String` |  | OpenClaw root path or openclaw.json path. Defaults to the current directory. (conflicts with `resume`) |
-| `--agentdesk-root <PATH>` | `String` |  | Override the target AgentDesk runtime root. |
-| `--agent <AGENT_ID>...` | `String` (repeatable) |  | Select a specific source agent id. May be repeated. (conflicts with `all_agents`) |
-| `--all-agents` | flag |  | Import every source agent. (conflicts with `agent_ids`) |
-| `--dry-run` | flag |  | Print the canonical import plan without writing files. |
-| `--resume <IMPORT_ID>` | `String` |  | Resume an unfinished import from $AGENTDESK_ROOT_DIR/openclaw/imports/<import_id>. (conflicts with `root_path`) |
-| `--fallback-provider <FALLBACK_PROVIDER>` | `String` |  | Fallback provider to use when the source provider is unsupported. |
-| `--workspace-root-rewrite <OLD=NEW>...` | `String` (repeatable) |  | Rewrite absolute OpenClaw workspace prefixes during import planning. May be repeated as OLD=NEW. |
-| `--write-org` | flag |  | Preview writing config/org.yaml mutations. |
-| `--write-bot-settings` | flag |  | Preview writing config/bot_settings.json mutations. |
-| `--write-db` | flag |  | Preview PostgreSQL upserts. |
-| `--overwrite` | flag |  | Preview replacing generated artifacts for the selected role(s). |
-| `--with-channel-bindings` | flag |  | Preview Discord channel binding imports. |
-| `--with-sessions` | flag |  | Preview lossy session import. |
-| `--snapshot-source` | flag |  | Preview snapshotting the source tree into audit outputs. |
-| `--no-workspace` | flag |  | Skip workspace copy while still inspecting source workspaces for prompt/memory. |
-| `--no-memory` | flag |  | Skip Markdown memory import. |
-| `--no-prompts` | flag |  | Skip merged prompt generation. |
-| `--tool-policy-mode <TOOL_POLICY_MODE>` | `String` | `report` | Tool-policy handling mode for bot_settings import. |
-| `--discord-token-mode <DISCORD_TOKEN_MODE>` | `String` | `report` | Discord token handling mode for bot_settings import. |
 
 ## `agentdesk release-migrate-postgres`
 

@@ -6,6 +6,11 @@
 
 use super::*;
 
+#[path = "store/response_offset_observation.rs"]
+mod response_offset_observation;
+pub(super) use response_offset_observation::StreamResponseOffsetInputs;
+use response_offset_observation::response_offset_details;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services::discord) enum InflightDeliveryRewindReason {
     TerminalErrorReset,
@@ -441,31 +446,54 @@ pub(super) fn validate_inflight_state_for_save_with_delivery_rewind_reason(
     code_location: &'static str,
     delivery_rewind_reason: Option<InflightDeliveryRewindReason>,
 ) -> bool {
+    validate_inflight_state_for_save_with_offset_inputs(
+        root,
+        path,
+        state,
+        code_location,
+        delivery_rewind_reason,
+        None,
+    )
+}
+
+fn validate_inflight_state_for_save_with_offset_inputs(
+    root: &Path,
+    path: &Path,
+    state: &InflightTurnState,
+    code_location: &'static str,
+    delivery_rewind_reason: Option<InflightDeliveryRewindReason>,
+    offset_inputs: Option<StreamResponseOffsetInputs<'_>>,
+) -> bool {
     let offset_in_bounds = state.response_sent_offset <= state.full_response.len()
         && state
             .full_response
             .is_char_boundary(state.response_sent_offset);
-    record_inflight_invariant(
-        offset_in_bounds,
-        state,
-        "response_sent_offset_in_bounds",
-        code_location,
-        "inflight response_sent_offset must stay within full_response",
-        serde_json::json!({
-            "response_sent_offset": state.response_sent_offset,
-            "full_response_len": state.full_response.len(),
-            "path": path.display().to_string(),
-        }),
-    );
+    let existing = fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<InflightTurnState>(&content).ok());
+    if !offset_in_bounds {
+        record_inflight_invariant(
+            false,
+            state,
+            "response_sent_offset_in_bounds",
+            code_location,
+            "inflight response_sent_offset must stay within full_response",
+            serde_json::json!({
+                "response_sent_offset": state.response_sent_offset,
+                "full_response_len": state.full_response.len(),
+                "path": path.display().to_string(),
+                "response_offset": response_offset_details(
+                    state, offset_in_bounds, existing.as_ref(), code_location, offset_inputs,
+                ),
+            }),
+        );
+    }
     debug_assert!(
         offset_in_bounds,
         "inflight response_sent_offset must stay within full_response"
     );
 
-    let Ok(existing_content) = fs::read_to_string(path) else {
-        return true;
-    };
-    let Ok(existing) = serde_json::from_str::<InflightTurnState>(&existing_content) else {
+    let Some(existing) = existing else {
         return true;
     };
 
@@ -510,30 +538,35 @@ pub(super) fn validate_inflight_state_for_save_with_delivery_rewind_reason(
     let warn_downgrade_selected = enforce_skips_backward_write || is_legitimate_delivery_rewind;
     let offset_monotonic_severity = offset_monotonic_invariant_severity(warn_downgrade_selected);
 
-    record_inflight_invariant_with_severity(
-        monotonic_offset,
-        state,
-        "response_sent_offset_monotonic",
-        code_location,
-        "inflight response_sent_offset must not move backwards for the same turn identity",
-        serde_json::json!({
-            "previous": existing.response_sent_offset,
-            "next": state.response_sent_offset,
-            "same_turn_identity": same_turn_identity,
-            "path": path.display().to_string(),
-            "delivery_rewind_reason": delivery_rewind_reason.map(InflightDeliveryRewindReason::as_str),
-            // #5500: lets a stored event be triaged after the fact.
-            // `full_reset_signature_matched` is a SHAPE test (same_turn_identity
-            // + empty full_response + offset 0), not proof of legitimacy. Pair
-            // is exhaustive for WARN: enforce_skips_backward_write → skipped;
-            // only full_reset_signature_matched → proceeded (mutually
-            // exclusive); neither → #4110 reasoned rewind. Missing key = older
-            // event, never "false".
-            "full_reset_signature_matched": is_legitimate_full_reset,
-            "enforce_skips_backward_write": enforce_skips_backward_write,
-        }),
-        offset_monotonic_severity,
-    );
+    if !monotonic_offset {
+        record_inflight_invariant_with_severity(
+            false,
+            state,
+            "response_sent_offset_monotonic",
+            code_location,
+            "inflight response_sent_offset must not move backwards for the same turn identity",
+            serde_json::json!({
+                "previous": existing.response_sent_offset,
+                "next": state.response_sent_offset,
+                "same_turn_identity": same_turn_identity,
+                "path": path.display().to_string(),
+                "delivery_rewind_reason": delivery_rewind_reason.map(InflightDeliveryRewindReason::as_str),
+                // #5500: lets a stored event be triaged after the fact.
+                // `full_reset_signature_matched` is a SHAPE test (same_turn_identity
+                // + empty full_response + offset 0), not proof of legitimacy. Pair
+                // is exhaustive for WARN: enforce_skips_backward_write → skipped;
+                // only full_reset_signature_matched → proceeded (mutually
+                // exclusive); neither → #4110 reasoned rewind. Missing key = older
+                // event, never "false".
+                "full_reset_signature_matched": is_legitimate_full_reset,
+                "enforce_skips_backward_write": enforce_skips_backward_write,
+                "response_offset": response_offset_details(
+                    state, offset_in_bounds, Some(&existing), code_location, offset_inputs,
+                ),
+            }),
+            offset_monotonic_severity,
+        );
+    }
     // #3933: a write the enforce guard is about to SKIP never persists, so the
     // debug tripwire has nothing to catch there; relax it only for that case —
     // a backward move that actually PERSISTS still trips it.
@@ -622,6 +655,7 @@ fn persist_under_lock_inner(
     caller: &'static str,
     bump_updated_at: bool,
     coordinate_change: Option<bool>,
+    offset_inputs: Option<StreamResponseOffsetInputs<'_>>,
 ) -> Result<Option<InflightTurnState>, String> {
     let mut updated = state.clone();
     updated.ensure_finalizer_turn_id();
@@ -634,7 +668,14 @@ fn persist_under_lock_inner(
                 .full_response
                 .is_char_boundary(updated.response_sent_offset)
     } else {
-        validate_inflight_state_for_save(root, path, &updated, caller)
+        validate_inflight_state_for_save_with_offset_inputs(
+            root,
+            path,
+            &updated,
+            caller,
+            None,
+            offset_inputs,
+        )
     };
     if !valid {
         return Ok(None);
@@ -696,7 +737,7 @@ pub(super) fn persist_under_lock(
     state: &InflightTurnState,
     caller: &'static str,
 ) -> Result<(), String> {
-    persist_under_lock_inner(root, path, state, caller, true, None).map(|_| ())
+    persist_under_lock_inner(root, path, state, caller, true, None, None).map(|_| ())
 }
 
 /// The coordinate replay RMW's lock-held write: the only path that may change the coordinate
@@ -709,7 +750,7 @@ pub(super) fn persist_coordinate_change_under_lock(
     caller: &'static str,
     source_rebase: bool,
 ) -> Result<Option<InflightTurnState>, String> {
-    persist_under_lock_inner(root, path, state, caller, true, Some(source_rebase))
+    persist_under_lock_inner(root, path, state, caller, true, Some(source_rebase), None)
 }
 
 /// Persists while returning the exact stamped row written under the lock.
@@ -721,7 +762,35 @@ pub(super) fn persist_under_lock_with_snapshot(
     state: &InflightTurnState,
     caller: &'static str,
 ) -> Result<Option<InflightTurnState>, String> {
-    persist_under_lock_inner(root, path, state, caller, true, None)
+    persist_under_lock_inner(root, path, state, caller, true, None, None)
+}
+
+pub(super) fn persist_stream_merge_under_lock(
+    root: &Path,
+    path: &Path,
+    state: &InflightTurnState,
+    offset_inputs: StreamResponseOffsetInputs<'_>,
+) -> Result<Option<InflightTurnState>, String> {
+    const CODE_LOCATION: &str = "src/services/discord/inflight/save_store/identity_gate/stream_loop_patch.rs:save_stream_tick_state_preserving_current_message_races_in_root";
+    if !validate_inflight_state_for_save_with_offset_inputs(
+        root,
+        path,
+        state,
+        CODE_LOCATION,
+        None,
+        Some(offset_inputs),
+    ) {
+        return Ok(None);
+    }
+    persist_under_lock_inner(
+        root,
+        path,
+        state,
+        CODE_LOCATION,
+        true,
+        None,
+        Some(offset_inputs),
+    )
 }
 
 /// Complete a successful restart readoption while the caller owns the canonical
@@ -753,7 +822,7 @@ pub(super) fn persist_under_lock_preserving_updated_at(
     state: &InflightTurnState,
     caller: &'static str,
 ) -> Result<(), String> {
-    persist_under_lock_inner(root, path, state, caller, false, None).map(|_| ())
+    persist_under_lock_inner(root, path, state, caller, false, None, None).map(|_| ())
 }
 
 #[cfg(test)]

@@ -561,7 +561,7 @@ pub(super) async fn run_bridge_stream_tick(
                 bridge_created_response_placeholder_msg_id,
                 captured_nonce,
             },
-            "turn_bridge::stream_tick::dirty_flush",
+            guarded_persist::dirty_flush_entrypoint(o_body_cut == Ok(true)),
         )
         .await;
         session_row_writer.observe(flush_outcome);
