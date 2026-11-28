@@ -655,8 +655,8 @@ fn clear_if_current(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::sweep_test_support::{legacy, with_root};
+    use super::*;
 
     fn record_busy_retry_at(
         provider: &ProviderKind,
