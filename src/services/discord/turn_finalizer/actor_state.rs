@@ -119,7 +119,7 @@ impl LedgerEntry {
 }
 
 pub(in crate::services::discord) struct PendingCompletionAdmission {
-    pub(in crate::services::discord) completion_admission: CompletionAdmission,
+    pub(super) completion_admission: CompletionAdmission,
     pub(super) updated_at: Instant,
 }
 

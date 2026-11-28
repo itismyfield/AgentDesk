@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
+use crate::services::discord::bot_runtime::saturating_decrement_global_active;
 use crate::services::discord::queue_io::backstop::DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY;
 use crate::services::discord::queue_io::*;
 use crate::services::discord::{
