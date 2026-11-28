@@ -11,6 +11,9 @@ function waiting(v) {
   if (!v.approved) notes.push("파일 승인 없음");
   if (v.otherBad) notes.push("다른 source 복구 실패");
   if (v.writer !== "alive") notes.push("writer 멈춤");
+  if (!v.receipt) notes.push("membership receipt 없음");
+  if (v.host && v.host !== "herdr") notes.push({ tmuxReboot: "tmux, 재부팅 뒤", tmuxDead: "tmux, 죽은 pane", tmuxUnknown: "tmux, 종료 판독 불가" }[v.host]);
+  if (v.entry === "restore") notes.push("boot restore 진입");
   const note = notes.length ? ` (${notes.join(", ")})` : "";
   if (v.endRec) {
     const end = v.cutKnown ? "N1 종료 기록됨" : "N1 종료 기록됨(길이 모름)";
@@ -34,7 +37,8 @@ export function state(v) {
   }
   if (v.outcome === "Executed") {
     const file = v.file === "ok" ? "" : ` (${{ late: "파일 잠시 없음", gone: "파일 없음", changed: "파일 바뀜" }[v.file]})`;
-    return (v.completion === "pending" ? "결과 저장됨, 본문 읽기 대기" : "본문 처리 끝, 정리 대기") + file;
+    const again = v.fx > 0 && v.completion === "pending" ? ", 완료 부작용 이미 실행" : "";
+    return (v.completion === "pending" ? "결과 저장됨, 본문 읽기 대기" : "본문 처리 끝, 정리 대기") + file + again;
   }
   return waiting(v);
 }
@@ -64,6 +68,9 @@ const labels = {
   ReadCompletion: "봉인된 본문을 읽어 완료를 기록함",
   SkipCompletion: "본문을 읽을 수 없어 완료 기록을 건너뜀",
   Cleanup: "원본 행을 정리함",
+  WriterReceipt: "writer가 membership receipt를 durable하게 남김",
+  ScanReceipt: "finalizer scan이 membership receipt를 durable하게 남김",
+  CleanupDefer: "정리가 미뤄져 완료 기록이 다시 대기로 돌아감",
 };
 
 export function step(action) {

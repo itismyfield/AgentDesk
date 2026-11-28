@@ -1,0 +1,52 @@
+---
+title: "재시작 뒤 원본 ticket 정산과 채널 문"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: open
+    lg1: progress
+    lg2: Breaks OneCompletionEffect in some cases
+    lg3: Path to the ChannelEventuallyReady or OneCompletionEffect bug
+    lg4: Repeats forever, so ChannelEventuallyReady breaks
+  }
+  class lg0 teal
+  class lg1 blue
+  class lg2 mayBreak
+  class lg3 bugPath
+  class lg4 repeats
+  s0: 결과 저장됨, 본문 읽기 대기 (파일 바뀜)
+  s1: 결과 저장됨, 본문 읽기 대기 (파일 없음)
+  s2: 결과 저장됨, 본문 읽기 대기 (파일 잠시 없음)
+  s3: 결과 저장됨, 본문 읽기 대기
+  s4: 본문 처리 끝, 정리 대기 (파일 바뀜)
+  s5: 본문 처리 끝, 정리 대기
+  s6: 결과 저장됨, 본문 읽기 대기, 완료 부작용 이미 실행
+  s7: 채널 열림: 결과와 완료 기록 뒤 정리
+  [*] --> s0
+  [*] --> s1
+  [*] --> s2
+  [*] --> s3
+  s0 --> s4: 본문을 읽을 수 없어 완료 기록을 건너뜀
+  s2 --> s3: transcript가 다시 보임
+  s3 --> s5: 봉인된 본문을 읽어 완료를 기록함
+  s1 --> s1: 후속 N2가 뜸 or N2에 입력이 들어와 파일 승인이 생김 or N2 턴이 채널 행을 차지함 or N2가 idle이 됨
+  s4 --> s7: 원본 행을 정리함
+  s5 --> s6: 정리가 미뤄져 완료 기록이 다시 대기로 돌아감
+  s5 --> s7: 원본 행을 정리함
+  s6 --> s5: 봉인된 본문을 읽어 완료를 기록함
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
+  class s0 blue
+  class s1 blue
+  class s1 bugPath
+  class s1 repeats
+  class s2 blue
+  class s3 blue
+  class s3 bugPath
+  class s4 blue
+  class s5 blue
+  class s5 mayBreak
+  class s5 bugPath
+  class s6 blue
+  class s6 bugPath
+  class s7 teal
+  class s7 mayBreak

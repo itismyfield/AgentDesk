@@ -1,0 +1,33 @@
+---
+title: "재시작 뒤 원본 ticket 정산과 채널 문"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: open
+    lg1: progress
+    lg2: Breaks OneCompletionEffect in some cases
+    lg3: Path to the OneCompletionEffect bug
+  }
+  class lg0 teal
+  class lg1 blue
+  class lg2 mayBreak
+  class lg3 bugPath
+  s0: 결과 저장됨, 본문 읽기 대기
+  s1: 본문 처리 끝, 정리 대기
+  s2: 결과 저장됨, 본문 읽기 대기, 완료 부작용 이미 실행
+  s3: 채널 열림: 결과와 완료 기록 뒤 정리
+  [*] --> s0
+  s0 --> s1: 봉인된 본문을 읽어 완료를 기록함
+  s1 --> s2: 정리가 미뤄져 완료 기록이 다시 대기로 돌아감
+  s1 --> s3: 원본 행을 정리함
+  s2 --> s1: 봉인된 본문을 읽어 완료를 기록함
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
+  class s0 blue
+  class s0 bugPath
+  class s1 blue
+  class s1 mayBreak
+  class s1 bugPath
+  class s2 blue
+  class s2 bugPath
+  class s3 teal
+  class s3 mayBreak
