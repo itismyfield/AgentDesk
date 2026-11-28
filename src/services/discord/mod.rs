@@ -198,6 +198,10 @@ mod dl_herdr_terminate_tests;
 #[cfg(all(test, unix))]
 mod dl_herdr_terminate_unix_tests;
 #[cfg(test)]
+mod dl_tmux_watcher_tests;
+#[cfg(all(test, unix))]
+mod dl_tmux_watcher_unix_tests;
+#[cfg(test)]
 mod dl_turn_bridge_tests;
 #[cfg(all(test, unix))]
 mod dl_turn_bridge_unix_tests;
