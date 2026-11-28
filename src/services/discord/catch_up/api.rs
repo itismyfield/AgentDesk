@@ -1,6 +1,7 @@
 //! Discord and mailbox I/O performed by one catch-up sweep. Sweep tests swap
 //! the whole trait to script fetch pages and enqueue outcomes.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use poise::serenity_prelude as serenity;
@@ -81,6 +82,11 @@ pub(super) trait CatchUpDiscordApi: Sync {
         channel_id: ChannelId,
         message_id: MessageId,
     );
+
+    /// Active threads Discord lists under `parents`, each with its parent.
+    async fn child_threads(&self, _parents: &BTreeSet<u64>) -> Vec<(u64, u64)> {
+        Vec::new()
+    }
 
     /// Both phases commit recoveries through this one call.
     async fn enqueue_intervention(
@@ -164,6 +170,34 @@ impl CatchUpDiscordApi for SerenityCatchUpDiscordApi<'_> {
             .messages(self.http, request.into_get_messages())
             .await
             .map_err(|err| err.to_string())
+    }
+
+    async fn child_threads(&self, parents: &BTreeSet<u64>) -> Vec<(u64, u64)> {
+        let mut guilds = std::collections::HashSet::new();
+        for &parent in parents {
+            if let Ok(serenity::Channel::Guild(channel)) =
+                ChannelId::new(parent).to_channel(self.http).await
+            {
+                guilds.insert(channel.guild_id);
+            }
+        }
+        let mut threads = Vec::new();
+        for guild in guilds {
+            let active = match guild.get_active_threads(self.http).await {
+                Ok(active) => active.threads,
+                Err(error) => {
+                    tracing::warn!(%guild, %error, "catch-up: active O threads unreadable");
+                    continue;
+                }
+            };
+            threads.extend(active.into_iter().filter_map(|thread| {
+                let parent = thread.parent_id?.get();
+                parents
+                    .contains(&parent)
+                    .then_some((thread.id.get(), parent))
+            }));
+        }
+        threads
     }
 
     async fn cleanup_recovered_catch_up_hourglass(

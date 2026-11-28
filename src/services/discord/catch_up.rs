@@ -79,6 +79,7 @@ mod deps;
 mod frontier_evidence;
 pub(in crate::services::discord) mod handled_command;
 mod held_range;
+mod o_children;
 mod phase1_sweep;
 mod phase2;
 mod phase2_sweep;
@@ -161,6 +162,8 @@ struct CatchUpChannelCandidate {
     fallback_name: Option<String>,
     checkpoint_path: Option<PathBuf>,
     disk_checkpoint: Option<u64>,
+    /// The selected O parent Discord lists for a thread the home never recorded.
+    o_parent: Option<u64>,
 }
 
 fn insert_configured_catch_up_candidate(
@@ -188,6 +191,7 @@ fn insert_configured_catch_up_candidate(
                 fallback_name,
                 checkpoint_path: None,
                 disk_checkpoint: None,
+                o_parent: None,
             });
             true
         }
@@ -199,6 +203,12 @@ fn catch_up_candidate_allowed_for_bot(
     provider: &ProviderKind,
     candidate: &CatchUpChannelCandidate,
 ) -> bool {
+    // A thread is routed by its parent's binding.
+    if let Some(parent) = candidate.o_parent {
+        let parent = ChannelId::new(parent);
+        return settings::validate_bot_channel_routing(settings, provider, parent, None, false)
+            .is_ok();
+    }
     if candidate.disk_checkpoint.is_some()
         || scan_progress::has_file(provider, candidate.channel_id)
     {
@@ -260,6 +270,7 @@ fn collect_catch_up_channel_candidates(
                     fallback_name: None,
                     checkpoint_path: Some(path),
                     disk_checkpoint: Some(disk_checkpoint),
+                    o_parent: None,
                 },
             );
         }
@@ -540,6 +551,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
     }
 
     let mut candidates = collect_catch_up_channel_candidates(&dir, provider);
+    o_children::add_unrecorded(api, provider, &mut candidates).await;
     for channel_id in retry_checkpoints
         .keys()
         .copied()
@@ -566,6 +578,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 fallback_name: None,
                 checkpoint_path: None,
                 disk_checkpoint: None,
+                o_parent: None,
             });
     }
     if candidates.is_empty() {
@@ -652,7 +665,7 @@ mod catch_up_recovery_tests {
         EnqueueRefusalReason, Intervention, InterventionMode, MAX_INTERVENTIONS_PER_CHANNEL,
     };
     use poise::serenity_prelude as serenity;
-    use std::collections::{BTreeMap, HashMap, HashSet};
+    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
@@ -705,6 +718,7 @@ mod catch_up_recovery_tests {
         fetch_attempts: Option<Arc<AtomicUsize>>,
         empty_after_first_fetch: bool,
         cleanup_hook: Option<CleanupHook>,
+        child_threads: Vec<(u64, u64)>,
     }
 
     impl TestCatchUpDiscordApi {
@@ -717,6 +731,7 @@ mod catch_up_recovery_tests {
                 fetch_attempts: None,
                 empty_after_first_fetch: false,
                 cleanup_hook: None,
+                child_threads: Vec::new(),
             }
         }
 
@@ -729,6 +744,7 @@ mod catch_up_recovery_tests {
                 fetch_attempts: None,
                 empty_after_first_fetch: false,
                 cleanup_hook: None,
+                child_threads: Vec::new(),
             }
         }
     }
@@ -763,6 +779,10 @@ mod catch_up_recovery_tests {
                 Some(error) => Err(error.to_string()),
                 None => Ok(self.messages.clone()),
             }
+        }
+
+        async fn child_threads(&self, _parents: &BTreeSet<u64>) -> Vec<(u64, u64)> {
+            self.child_threads.clone()
         }
 
         async fn cleanup_recovered_catch_up_hourglass(
@@ -918,6 +938,7 @@ mod catch_up_recovery_tests {
                     "runtime/last_message/claude/1479671298497183835.txt",
                 )),
                 disk_checkpoint: Some(1504812094456070174),
+                o_parent: None,
             },
         );
 
@@ -1316,6 +1337,7 @@ mod catch_up_recovery_tests {
             fetch_attempts: Some(Arc::clone(&fetch_attempts)),
             empty_after_first_fetch: false,
             cleanup_hook: None,
+            child_threads: Vec::new(),
         };
         run_catch_up_sweep(
             CatchUpDeps::new(&api, &shared, &provider)
@@ -1384,6 +1406,7 @@ mod catch_up_recovery_tests {
                         .expect("block subsequent queue persistence");
                 }
             })),
+            child_threads: Vec::new(),
         };
         run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &provider)).await;
         std::fs::remove_file(&pending_queue_dir).expect("remove queue persistence blocker");
@@ -1500,6 +1523,7 @@ mod catch_up_recovery_tests {
             fetch_attempts: Some(Arc::clone(&fetch_attempts)),
             empty_after_first_fetch: true,
             cleanup_hook: None,
+            child_threads: Vec::new(),
         };
         run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &provider)).await;
 
@@ -1529,6 +1553,53 @@ mod catch_up_recovery_tests {
             (Duration::from_secs(179)..=Duration::from_secs(181)).contains(&gap),
             "catch-up should preserve the real inter-message gap, got {gap:?}"
         );
+    }
+
+    /// A Foreign node held the first input of an O thread the home never recorded, storing
+    /// nothing: the home's catch-up reads that thread under its selected parent and enqueues the
+    /// input exactly once.
+    #[tokio::test(flavor = "current_thread")]
+    async fn home_catch_up_recovers_an_unrecorded_o_thread_once() {
+        use crate::services::tui_o::{channel_policy::BootChannels, cutover::test_override};
+        let root = scoped_runtime_root();
+        let shared = super::super::make_shared_data_for_tests();
+        {
+            let mut settings = shared.settings.write().await;
+            settings.owner_user_id = Some(OTHER_OWNER_ID);
+            settings.allow_all_users = true;
+        }
+        let provider = ProviderKind::Claude;
+        let (parent, thread) = (1479671298497183835_u64, 1479671298497183899_u64);
+        let agents = serde_json::json!([{"id": "adk-cc", "name": "Catch up", "provider": "claude",
+            "channels": {"claude": {"id": parent.to_string(), "runtime": "tui"}}}]);
+        super::agentdesk_config::write_bindings_for_test(root.path(), agents.clone());
+        let config = serde_json::json!({"server": {}, "agents": agents,
+            "tui_o": {"writer": {"channels": [parent]}}});
+        let boot = BootChannels::validate(&serde_json::from_value(config).unwrap()).unwrap();
+        let _home = test_override::force_boot(boot);
+        let first = recent_message_id(1);
+        let api = TestCatchUpDiscordApi {
+            messages: vec![catch_up_test_message(
+                ChannelId::new(thread),
+                first,
+                343742347365974026,
+                "첫 입력",
+            )],
+            child_threads: vec![(thread, parent)],
+            binding_status: RuntimeChannelBindingStatus::Owned,
+            ..TestCatchUpDiscordApi::unknown_binding()
+        };
+        for _ in 0..2 {
+            run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &provider)).await;
+        }
+
+        let snapshot = super::super::mailbox_snapshot(&shared, ChannelId::new(thread)).await;
+        let queued: Vec<_> = snapshot
+            .intervention_queue
+            .iter()
+            .map(|i| i.message_id)
+            .collect();
+        assert_eq!(queued, vec![first]);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1564,6 +1635,7 @@ mod catch_up_recovery_tests {
             fetch_attempts: None,
             empty_after_first_fetch: false,
             cleanup_hook: None,
+            child_threads: Vec::new(),
         };
         run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &provider)).await;
 
@@ -1615,6 +1687,7 @@ mod catch_up_recovery_tests {
             fetch_attempts: None,
             empty_after_first_fetch: false,
             cleanup_hook: None,
+            child_threads: Vec::new(),
         };
         run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &provider)).await;
 
