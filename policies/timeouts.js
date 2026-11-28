@@ -64,7 +64,7 @@ timeouts.onTick5min = function(ev) {
   var start = Date.now();
   function runSection(name, work) {
     var t = Date.now();
-    var expired = agentdesk.db.withWorkDeadline(timeouts._idleKillReserveMs, function() {
+    var expired = agentdesk.withWorkDeadline(timeouts._idleKillReserveMs, function() {
       try {
         return work.call(timeouts) === true;
       } catch (e) {

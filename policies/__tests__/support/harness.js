@@ -212,10 +212,10 @@ function createAgentdeskMock(options) {
     registerPolicy(policy) {
       state.registeredPolicies.push(policy);
     },
+    withWorkDeadline(reserveMs, work) {
+      return settings.withWorkDeadline ? settings.withWorkDeadline(reserveMs, work) : work();
+    },
     db: {
-      withWorkDeadline(reserveMs, work) {
-        return settings.withWorkDeadline ? settings.withWorkDeadline(reserveMs, work) : work();
-      },
       query(sql, params, reserveMs) {
         state.queries.push({ sql, params: params || [] });
         return clone(dbQuery(sql, params || [], state, reserveMs));

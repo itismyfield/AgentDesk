@@ -1252,8 +1252,8 @@ mod tests {
             "#).unwrap();
             super::super::db_ops::register_db_ops(&ctx, Some(policy_pool.clone())).unwrap();
             ctx.eval::<(), _>(r#"
-                var withWorkDeadline = agentdesk.db.withWorkDeadline;
-                agentdesk.db.withWorkDeadline = function(reserve, work) {
+                var withWorkDeadline = agentdesk.withWorkDeadline;
+                agentdesk.withWorkDeadline = function(reserve, work) {
                     var cutoffAfterO = !slowG && ++resumedSections === 4;
                     return withWorkDeadline(reserve, work) || cutoffAfterO;
                 };

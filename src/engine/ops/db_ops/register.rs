@@ -12,7 +12,7 @@ pub(in crate::engine::ops) fn register_db_ops<'js>(
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let db_obj = Object::new(ctx.clone())?;
 
-    db_obj.set(
+    ad.set(
         "withWorkDeadline",
         Function::new(
             ctx.clone(),
