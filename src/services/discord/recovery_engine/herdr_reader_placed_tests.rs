@@ -61,9 +61,10 @@ fn placed_recovery(snapshot: Snapshot) {
     }))
     .unwrap();
     let _hosts = crate::config::session_hosts::force_config_for_test(&cfg);
-    let mut endpoint = HerdrEndpoint::new(NODE, KEY, rig.socket(), SESSION).unwrap();
+    let mut endpoint = HerdrEndpoint::new_for_test(NODE, KEY, rig.socket(), SESSION).unwrap();
     if matches!(snapshot, Snapshot::ReplacedUserDefault) {
-        endpoint = endpoint.with_mode(crate::config::session_hosts::EndpointMode::UserDefault);
+        endpoint =
+            endpoint.with_mode_for_test(crate::config::session_hosts::EndpointMode::UserDefault);
     }
     let _registry = rig.policy_registry_on_this_thread(endpoint, |mut host| {
         host.set_read_restore_for_test(|transport, _| RestoreResume::Off {
