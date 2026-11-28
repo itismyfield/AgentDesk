@@ -27,23 +27,23 @@ pub(in crate::services::discord) struct SessionStop {
     shared: Arc<SharedData>,
     channel: ChannelId,
     observed: ObservedTurn,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     binding_root: Option<std::path::PathBuf>,
 }
 
 impl SessionStop {
-    pub(super) async fn judge(
+    pub(in crate::services::discord) async fn judge(
         shared: &Arc<SharedData>,
         provider: &ProviderKind,
         channel: ChannelId,
     ) -> CommandStop {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let binding_root = crate::services::tui_prompt_dedupe::binding_events::test_root();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let root_read = binding_root.clone();
         let (shared_read, provider_read) = (shared.clone(), provider.clone());
         let observed = tokio::task::spawn_blocking(move || {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             let _root = TestBindingRoot::enter(root_read.as_deref());
             observe(&shared_read, &provider_read, channel)
         })
@@ -67,7 +67,7 @@ impl SessionStop {
             shared: shared.clone(),
             channel,
             observed,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             binding_root,
         })
     }
@@ -83,10 +83,10 @@ impl SessionStop {
             self.channel,
             self.observed.clone(),
         );
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let binding_root = self.binding_root.clone();
         let open = Arc::new(move || {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             let _root = TestBindingRoot::enter(binding_root.as_deref());
             observe(&shared, &provider, channel).ok().flatten().as_ref() == Some(&expected)
         });
@@ -172,25 +172,8 @@ fn observe(
     }))
 }
 
-#[cfg(test)]
-struct TestBindingRoot(Option<std::path::PathBuf>);
-
-#[cfg(test)]
-impl TestBindingRoot {
-    fn enter(root: Option<&std::path::Path>) -> Self {
-        let p5 = crate::services::tui_prompt_dedupe::binding_events::test_root();
-        crate::services::tui_prompt_dedupe::binding_events::set_test_root(root);
-        Self(p5)
-    }
-}
-
-#[cfg(test)]
-impl Drop for TestBindingRoot {
-    fn drop(&mut self) {
-        crate::services::tui_prompt_dedupe::binding_events::set_test_root(self.0.as_deref());
-    }
-}
-
-#[cfg(all(test, unix))]
-#[path = "session_stop_tests.rs"]
-mod tests;
+#[cfg(any(test, feature = "test-support"))]
+#[path = "session_stop_hook_tests.rs"]
+mod session_stop_hook_tests;
+#[cfg(any(test, feature = "test-support"))]
+pub(in crate::services::discord) use session_stop_hook_tests::TestBindingRoot;

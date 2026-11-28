@@ -13,14 +13,17 @@ use crate::db::dispatched_sessions::hosted_execution::test_support::{owner, reco
 use crate::services::discord::inflight::seed_session_row;
 use crate::services::provider::CancelToken;
 
-mod replay_turn_tests;
 mod turn_mode_retry_tests;
 
 pub(super) fn assert_completed_summary(summary: &str) {
     crate::services::turn_summary_line::assert_completed_footer(summary);
 }
 
-pub(super) fn assert_body_and_summary(shown: &[String], body: &str, summary: bool) {
+pub(in crate::services::discord) fn assert_body_and_summary(
+    shown: &[String],
+    body: &str,
+    summary: bool,
+) {
     assert_eq!(shown.len(), 1 + usize::from(summary), "{shown:?}");
     assert_eq!(shown[0], body, "{shown:?}");
     if summary {
@@ -133,7 +136,8 @@ impl TurnGateway for RetryCounter {
     }
 }
 
-fn resumable_session() -> crate::services::discord::DiscordSession {
+pub(in crate::services::discord) fn resumable_session() -> crate::services::discord::DiscordSession
+{
     crate::services::discord::DiscordSession {
         session_id: Some("sid-core".to_string()),
         memento_context_loaded: false,

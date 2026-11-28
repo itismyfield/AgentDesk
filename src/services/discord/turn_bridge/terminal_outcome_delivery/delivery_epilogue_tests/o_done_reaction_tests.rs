@@ -8,7 +8,7 @@ use crate::services::discord::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION
 use crate::services::discord::turn_view_reconciler::{
     note_intake_queue_marker_added_current, note_intake_turn_started_current,
 };
-use crate::test_support::wait::{WAIT_CAP, await_within};
+use adk_test_support::test_support::wait::{WAIT_CAP, await_within};
 
 /// A user message id the reaction view treats as a real Discord message.
 const USER: u64 = 1_430_000_000_000_008_152;

@@ -123,7 +123,7 @@ mod tests {
                 module_path!(),
                 "::terminal_prompt_too_long_replace_delivers_actionable_folded_guidance"
             )
-            .trim_start_matches("agentdesk::"),
+            .trim_start_matches(concat!(env!("CARGO_CRATE_NAME"), "::")),
         ) {
             return;
         }

@@ -12,7 +12,8 @@ use super::super::stop_host::tests::{
     herdr_target, mark, run,
 };
 use super::*;
-use crate::services::discord::health::{HealthRegistry, InflightDisposition};
+use crate::services::discord::health::HealthRegistry;
+use crate::services::engine_runtime::health_port::InflightDisposition;
 use crate::services::session_host::HostMutation;
 use crate::services::turn_lifecycle::TurnLifecycleTarget;
 

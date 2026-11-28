@@ -3,13 +3,22 @@ use std::sync::atomic::Ordering;
 use poise::serenity_prelude as serenity;
 use serde_json::json;
 
-use super::super::stop_host::tests::{Fixture, Mark, bound_token, mark, run};
-use super::*;
+use crate::services::discord::SharedData;
+use crate::services::discord::turn_bridge::tmux_runtime::stop_host::tests::{
+    Fixture, Mark, bound_token, mark, run,
+};
+use crate::services::discord::turn_bridge::tmux_runtime::{
+    judged_stop::CommandStop,
+    session_stop::{SessionStop, TestBindingRoot},
+};
 use crate::services::discord::{Data, TmuxWatcherHandle};
+use crate::services::provider::ProviderKind;
 use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::capture::file_identity;
 use crate::services::tui_o::turn_mode::TestConfirmation;
 use crate::services::tui_prompt_dedupe::binding_events as p5;
+use poise::serenity_prelude::ChannelId;
+use std::sync::Arc;
 
 use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
 
@@ -166,7 +175,10 @@ fn c1_stop_some_none_and_unreachable_preserve_exact_authority() {
             )
             .await
         );
-        let stopped = super::super::begin_command_stop(&shared, &provider, channel, true).await;
+        let stopped = crate::services::discord::turn_bridge::tmux_runtime::begin_command_stop(
+            &shared, &provider, channel, true,
+        )
+        .await;
         let CommandStop::Stop(stop) = stopped else {
             panic!("Some token must retain ChannelStop authority")
         };
@@ -175,14 +187,20 @@ fn c1_stop_some_none_and_unreachable_preserve_exact_authority() {
         crate::services::discord::mailbox_finish_turn(&shared, &provider, channel).await;
         let mailbox = shared.mailbox_peek(channel).unwrap();
         assert!(mailbox.cancel_token().await.unwrap().is_none());
-        let empty = super::super::begin_command_stop(&shared, &provider, channel, true).await;
+        let empty = crate::services::discord::turn_bridge::tmux_runtime::begin_command_stop(
+            &shared, &provider, channel, true,
+        )
+        .await;
         assert!(
             matches!(empty, CommandStop::Session(_)),
             "Ok(None) retains SessionStop fallback"
         );
         shared.mailboxes.remove_fixture_for_test(channel);
         shared.mailboxes.insert_unreachable_for_test(channel);
-        let unreachable = super::super::begin_command_stop(&shared, &provider, channel, true).await;
+        let unreachable = crate::services::discord::turn_bridge::tmux_runtime::begin_command_stop(
+            &shared, &provider, channel, true,
+        )
+        .await;
         assert!(
             matches!(unreachable, CommandStop::HostRefused),
             "Err cannot borrow the parent SessionStop authority"
@@ -273,8 +291,13 @@ fn n1b_actual_stop_targets_open_parent_without_lease_and_keeps_idle_or_refused()
         HERDR_CANCEL_OVERRIDE.set(Some(true));
         mark(session, Mark::Herdr);
         assert!(matches!(
-            super::super::judged_stop::begin_command_stop(&shared, &data.provider, channel, true)
-                .await,
+            crate::services::discord::turn_bridge::tmux_runtime::judged_stop::begin_command_stop(
+                &shared,
+                &data.provider,
+                channel,
+                true
+            )
+            .await,
             CommandStop::HostRefused
         ));
         assert!(fx.take_calls().is_empty());
@@ -510,7 +533,13 @@ fn n1c_confirmed_stop_keeps_a_discord_token_on_the_channel_stop_and_refuses_an_u
             .join(format!("{}.log", channel.get()));
         let good_log = std::fs::read(&log).unwrap();
         std::fs::write(&log, "corrupt O binding log\n").unwrap();
-        let judged = super::super::begin_command_stop(&shared, &data.provider, channel, true).await;
+        let judged = crate::services::discord::turn_bridge::tmux_runtime::begin_command_stop(
+            &shared,
+            &data.provider,
+            channel,
+            true,
+        )
+        .await;
         assert!(
             matches!(judged, CommandStop::HostRefused),
             "an unreadable binding is not proof the turn ended"
@@ -672,9 +701,13 @@ fn owner_stop_case(name: &str, case: OwnerCase) {
         let expected = match case {
             OwnerCase::Multiple | OwnerCase::ForeignProvider => HOST_REFUSED_STOP_RESPONSE,
             OwnerCase::Nonowner | OwnerCase::Mirror => NO_ACTIVE_TURN_RESPONSE,
-            OwnerCase::Slash => super::super::NativeStop::observed_text(true),
+            OwnerCase::Slash => {
+                crate::services::discord::turn_bridge::tmux_runtime::NativeStop::observed_text(true)
+            }
             OwnerCase::OwnerChanged | OwnerCase::SourceChanged => {
-                super::super::NativeStop::observed_text(false)
+                crate::services::discord::turn_bridge::tmux_runtime::NativeStop::observed_text(
+                    false,
+                )
             }
             _ => STOPPING_RESPONSE,
         };

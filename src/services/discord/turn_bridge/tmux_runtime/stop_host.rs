@@ -5,23 +5,23 @@ use std::sync::Arc;
 
 use super::TmuxCleanupPolicy;
 use super::interrupt_policy::ProviderTurnInterruptOutcome;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use crate::services::claude_tui::host_input::MutationGate;
 use crate::services::provider::cancel_token_cleanup::executor::ExpectedBinding;
 use crate::services::provider::{CancelToken, ProviderKind};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use crate::services::session_host::HostKind;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use crate::services::session_host::InteractiveSessionHost;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use crate::services::session_host::ResolvedSessionTarget;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use crate::services::session_host::TargetHost;
 
 /// A tmux name whose `.host_kind` marker is absent or tmux when the stop began, or that a
 /// force-kill verdict `approved` after reading its host.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct LegacyTmuxName {
+pub(in crate::services::discord) struct LegacyTmuxName {
     name: String,
     approved: bool,
 }
@@ -33,23 +33,23 @@ impl LegacyTmuxName {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum StopRefusal {
+pub(in crate::services::discord) enum StopRefusal {
     /// The token's `.host_kind` marker is not tmux; `local_tmux` logs what it holds.
     Marker,
     /// The token names a session other than the one the force-kill verdict approved.
     NotApproved,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     Unknown,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     Conflict,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     Unsupported { kind: HostKind, op: &'static str },
 }
 
 /// A verified Herdr pane; the session name keys the turn's generation and composer fences.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone)]
-pub(super) struct HerdrStopTarget {
+pub(in crate::services::discord) struct HerdrStopTarget {
     pub(super) session: String,
     pub(super) pane: String,
     pub(super) host: Arc<dyn InteractiveSessionHost>,
@@ -57,12 +57,12 @@ pub(super) struct HerdrStopTarget {
 }
 
 #[derive(Clone)]
-pub(super) enum StopTarget {
+pub(in crate::services::discord) enum StopTarget {
     /// No tmux name: the process backend, unchanged.
     Process,
     LegacyTmux(LegacyTmuxName),
     /// Test-only until a Herdr turn carries its verified target to the stop.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     Herdr(HerdrStopTarget),
     Refused {
         name: String,
@@ -77,7 +77,7 @@ pub(in crate::services::discord) enum StopSettlement {
     /// The host was not admitted, by the stop's verdict or by the executor's claim.
     Refused,
     /// The host's own source owner still owes the turn's output.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     HostOwned,
 }
 
@@ -96,7 +96,7 @@ impl StopOutcome {
 }
 
 /// Herdr's answer to an Escape the gate admitted; both outcomes keep the claim spent.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum HerdrStopWrite {
     Confirmed,
@@ -105,7 +105,7 @@ pub(super) enum HerdrStopWrite {
 
 impl StopTarget {
     /// The production verdict: the marker filter alone admits tmux, and no tmux is probed.
-    pub(super) fn for_token(token: &CancelToken) -> Self {
+    pub(in crate::services::discord) fn for_token(token: &CancelToken) -> Self {
         Self::judge(token.tmux_session_name(), None)
     }
 
@@ -137,7 +137,7 @@ impl StopTarget {
     }
 
     /// Resolved host evidence for a Herdr turn; Unknown and Conflict never become tmux.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn from_session_target(
         provider: &ProviderKind,
         session: &str,
@@ -177,7 +177,7 @@ impl StopTarget {
     }
 
     /// Only the process backend and a legacy tmux name keep the PID and session paths.
-    pub(super) fn reaches_legacy_host(&self) -> bool {
+    pub(in crate::services::discord) fn reaches_legacy_host(&self) -> bool {
         matches!(self, Self::Process | Self::LegacyTmux(_))
     }
 
@@ -188,7 +188,7 @@ impl StopTarget {
             Self::Process => ExpectedBinding::Decided(None),
             Self::LegacyTmux(name) if name.approved => ExpectedBinding::Approved(Some(&name.name)),
             Self::LegacyTmux(name) => ExpectedBinding::Decided(Some(&name.name)),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             Self::Herdr(target) => ExpectedBinding::Decided(Some(&target.session)),
             Self::Refused { name, .. } => ExpectedBinding::Decided(Some(name)),
         }
@@ -198,14 +198,17 @@ impl StopTarget {
     pub(super) fn settlement(&self, host_refused: bool) -> StopSettlement {
         match self {
             Self::Process | Self::LegacyTmux(_) if !host_refused => StopSettlement::Legacy,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             Self::Herdr(_) => StopSettlement::HostOwned,
             _ => StopSettlement::Refused,
         }
     }
 
     /// Any other host keeps its session: a session cleanup becomes a preserve.
-    pub(super) fn effective_policy(&self, policy: TmuxCleanupPolicy) -> TmuxCleanupPolicy {
+    pub(in crate::services::discord) fn effective_policy(
+        &self,
+        policy: TmuxCleanupPolicy,
+    ) -> TmuxCleanupPolicy {
         match policy {
             TmuxCleanupPolicy::CleanupSession { .. } if !self.reaches_legacy_host() => {
                 TmuxCleanupPolicy::PreserveSession
@@ -216,16 +219,16 @@ impl StopTarget {
 }
 
 /// The interrupt for a target outside tmux: no I/O, except a Claude Herdr pane's Escape.
-pub(super) async fn interrupt_unhosted(
+pub(in crate::services::discord) async fn interrupt_unhosted(
     target: &StopTarget,
     provider: &ProviderKind,
     token: &Arc<CancelToken>,
     reason: &str,
 ) -> ProviderTurnInterruptOutcome {
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     let _ = token;
     match target {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         StopTarget::Herdr(herdr) if matches!(provider, ProviderKind::Claude) => {
             super::claude_stop_delivery::herdr::interrupt_claude_turn_on_herdr(token, herdr, reason)
                 .await
@@ -258,5 +261,5 @@ pub(super) fn not_sent() -> ProviderTurnInterruptOutcome {
 }
 
 #[cfg(test)]
-#[path = "stop_host_tests.rs"]
-pub(super) mod tests;
+#[path = "stop_host_fixture_tests.rs"]
+pub(in crate::services::discord) mod tests;

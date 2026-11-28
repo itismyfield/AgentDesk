@@ -21,13 +21,13 @@ pub(in crate::services::discord) fn spawn_turn_bridge(
 }
 
 // The non-Clone receiver is the phase witness: capture consumes it before stream processing.
-pub(super) async fn capture_bridge_clear_fence(
+pub(in crate::services::discord) async fn capture_bridge_clear_fence(
     shared: &SharedData,
     channel: ChannelId,
     rx: mpsc::Receiver<StreamMessage>,
     fence: &tokio::sync::OnceCell<ChannelClearFence>,
 ) -> StreamMessageReceiverAdapter {
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     let channel = resume_pin_tests::capture_channel(channel);
     crate::db::session_transcripts::observe_channel_clear_fence_once(
         fence,
@@ -1534,5 +1534,5 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "entry_abort_mailbox_tests.rs"]
-pub(super) mod entry_abort_mailbox_tests;
+#[path = "entry_abort_fixture_tests.rs"]
+pub(in crate::services::discord) mod entry_abort_mailbox_tests;

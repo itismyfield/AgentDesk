@@ -13,7 +13,7 @@
 
 use super::*;
 
-pub(super) fn resume_pinned_watcher(
+pub(in crate::services::discord) fn resume_pinned_watcher(
     watchers: &crate::services::discord::TmuxWatcherRegistry,
     pin: Option<&WatcherClaimIncarnation>,
     offset: u64,

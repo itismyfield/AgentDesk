@@ -10,7 +10,7 @@ impl IntakeOutboxArgument {
     }
 }
 
-pub(in crate::services::discord::turn_bridge) struct HeadlessDeliveryArguments<'a> {
+pub(in crate::services::discord) struct HeadlessDeliveryArguments<'a> {
     shared: &'a Arc<SharedData>,
     channel_id: ChannelId,
     // `None` for a recovery turn with no anchored user message (user_msg_id == 0).
@@ -26,14 +26,14 @@ pub(in crate::services::discord::turn_bridge) struct HeadlessDeliveryArguments<'
     cancel_token: Option<&'a CancelToken>,
 }
 
-pub(in crate::services::discord::turn_bridge) struct HeadlessDeliveryInputs<'a> {
-    pub(in crate::services::discord::turn_bridge) shared: &'a Arc<SharedData>,
-    pub(in crate::services::discord::turn_bridge) channel_id: ChannelId,
-    pub(in crate::services::discord::turn_bridge) owning_user_msg_id: Option<MessageId>,
-    pub(in crate::services::discord::turn_bridge) session_key: Option<&'a str>,
-    pub(in crate::services::discord::turn_bridge) provider: &'a ProviderKind,
-    pub(in crate::services::discord::turn_bridge) content: &'a str,
-    pub(in crate::services::discord::turn_bridge) cancel_token: Option<&'a CancelToken>,
+pub(in crate::services::discord) struct HeadlessDeliveryInputs<'a> {
+    pub(in crate::services::discord) shared: &'a Arc<SharedData>,
+    pub(in crate::services::discord) channel_id: ChannelId,
+    pub(in crate::services::discord) owning_user_msg_id: Option<MessageId>,
+    pub(in crate::services::discord) session_key: Option<&'a str>,
+    pub(in crate::services::discord) provider: &'a ProviderKind,
+    pub(in crate::services::discord) content: &'a str,
+    pub(in crate::services::discord) cancel_token: Option<&'a CancelToken>,
 }
 
 #[derive(Clone)]
@@ -75,7 +75,7 @@ impl<'a> HeadlessDeliveryArguments<'a> {
     }
 }
 
-pub(in crate::services::discord::turn_bridge) fn assemble_headless_delivery_arguments<'a>(
+pub(in crate::services::discord) fn assemble_headless_delivery_arguments<'a>(
     inflight_state: &'a InflightTurnState,
     inputs: HeadlessDeliveryInputs<'a>,
 ) -> HeadlessDeliveryArguments<'a> {

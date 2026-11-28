@@ -47,8 +47,8 @@ mod contracts;
 mod delivery_epilogue;
 pub(in crate::services::discord) use delivery_epilogue::NoVisibleResultLease;
 #[cfg(test)]
-mod delivery_epilogue_tests;
-mod empty_response_recovery;
+pub(in crate::services::discord) mod delivery_epilogue_tests;
+pub(in crate::services::discord) mod empty_response_recovery;
 mod foreign_terminal_handoff;
 pub(in crate::services::discord) use foreign_terminal_handoff::resume as resume_foreign_terminal_custody;
 mod prompt_too_long_guidance;

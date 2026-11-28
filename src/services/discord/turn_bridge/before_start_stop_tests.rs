@@ -1,17 +1,27 @@
-use super::consume_once as consume;
-use super::*;
 use crate::db::dispatched_sessions::hosted_execution::HostedOwner;
 use crate::services::discord;
+use crate::services::discord::inflight::InflightTurnState;
 use crate::services::discord::inflight::RelayOwnerKind;
+use crate::services::discord::recovery_engine::herdr_admitted_restart::ADMITTED_ABORT_NOTICE;
+use crate::services::discord::turn_bridge::before_start_stop::consume_once as consume;
+use crate::services::discord::turn_bridge::before_start_stop::{
+    exit_held, policy_intent, send_stop_reply, test_hooks,
+};
+use crate::services::discord::turn_finalizer::{TurnFinalizer, TurnKey};
+use crate::services::discord::{SharedData, formatting::ReplaceLongMessageOutcome};
+use crate::services::provider::CancelToken;
 use crate::services::provider::ProviderKind;
 use crate::services::provider::cancel_token_claude_interrupt::{
     HERDR_SETTLEMENT_OVERRIDE, HerdrSubmission,
 };
 use crate::services::provider::herdr_before_start::seal_exit;
+use crate::services::provider::herdr_before_start::{BeforeStartProof, ExitDecision};
 use crate::services::provider::herdr_before_start::{
     InputPhase, finish_execution, prelaunch_closed,
 };
 use poise::serenity_prelude::UserId;
+use poise::serenity_prelude::{self as serenity, ChannelId, MessageId};
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 fn prepared(provider: ProviderKind, channel: u64) -> (Arc<CancelToken>, HostedOwner) {
@@ -362,7 +372,7 @@ impl crate::services::codex::herdr_turn::CodexHerdrPorts for NoLaunch {
     }
 }
 
-pub(in crate::services::discord::turn_bridge) async fn actual_fresh_exit(
+pub(super) async fn actual_fresh_exit(
     actor: Arc<CancelToken>,
     owner: HostedOwner,
     provider: ProviderKind,

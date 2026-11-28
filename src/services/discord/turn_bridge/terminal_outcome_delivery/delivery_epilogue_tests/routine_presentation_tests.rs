@@ -18,9 +18,9 @@ async fn i8117_no_reply_settles_without_body_banner_or_retry() {
         TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0).with_body(body.into());
     pin(&mut driver.inflight, "no_reply");
     let (ctx, state) = driver.parts();
-    let output = crate::test_support::wait::await_within(
+    let output = adk_test_support::test_support::wait::await_within(
         run_terminal_outcome_delivery(ctx, state),
-        crate::test_support::wait::WAIT_CAP,
+        adk_test_support::test_support::wait::WAIT_CAP,
     )
     .await;
     assert!(output.terminal_delivery_committed);
@@ -63,9 +63,9 @@ async fn i8117_non_no_reply_and_unknown_evidence_preserve_full_body() {
                 )
         );
         let (ctx, state) = driver.parts();
-        let output = crate::test_support::wait::await_within(
+        let output = adk_test_support::test_support::wait::await_within(
             run_terminal_outcome_delivery(ctx, state),
-            crate::test_support::wait::WAIT_CAP,
+            adk_test_support::test_support::wait::WAIT_CAP,
         )
         .await;
         assert!(output.terminal_delivery_committed);
@@ -143,9 +143,9 @@ async fn i8117_no_visible_respects_existing_owner_and_raw_range() {
         let before = format!("{:?}", cell.read());
         let (mut ctx, state) = driver.parts();
         ctx.tmux_last_offset = Some(9876);
-        let output = crate::test_support::wait::await_within(
+        let output = adk_test_support::test_support::wait::await_within(
             run_terminal_outcome_delivery(ctx, state),
-            crate::test_support::wait::WAIT_CAP,
+            adk_test_support::test_support::wait::WAIT_CAP,
         )
         .await;
         assert_eq!(output.terminal_delivery_committed, !other_owner);

@@ -1286,7 +1286,7 @@ mod protected;
 async fn native_8148_review_receipt_callback_preserves_native_authority() {
     use crate::services::discord::turn_finalizer::native_prepare::Handle;
     use crate::services::tui_input::human_frame::history::v2::native_support::Fixture;
-    use crate::test_support::wait::{WAIT_CAP, await_within};
+    use adk_test_support::test_support::wait::{WAIT_CAP, await_within};
     let runtime = crate::config::TestRuntimeRootGuard::new();
     HERDR_SETTLEMENT_OVERRIDE.set(true);
     let mut f = Fixture::at(

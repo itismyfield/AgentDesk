@@ -61,7 +61,7 @@ mod first_admission_tests {
     use crate::services::agent_protocol::RuntimeHandoffKind;
     use crate::services::tui_o::channel_policy::{Adoption, BootChannels};
     use crate::services::tui_o::cutover::{BodySend, claim_then_send, test_override};
-    use crate::test_support::wait::{WAIT_CAP, await_within};
+    use adk_test_support::test_support::wait::{WAIT_CAP, await_within};
 
     #[tokio::test]
     async fn bridge_factory_retains_only_its_own_admitted_turn_before_legacy_claim() {

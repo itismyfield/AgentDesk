@@ -5,7 +5,9 @@ use super::*;
 /// Detached bridge loops require a non-zero serenity id even when the durable
 /// owner explicitly cleared its placeholder. This synthetic id is an in-memory
 /// `None`; it must never cross a durable or observability boundary.
-pub(super) fn detached_current_msg_id_from_durable(durable_id: u64) -> MessageId {
+pub(in crate::services::discord) fn detached_current_msg_id_from_durable(
+    durable_id: u64,
+) -> MessageId {
     crate::services::discord::inflight::optional_message_id(durable_id).unwrap_or_else(|| {
         MessageId::new(headless_delivery::SYNTHETIC_HEADLESS_RECOVERY_PLACEHOLDER_ID)
     })

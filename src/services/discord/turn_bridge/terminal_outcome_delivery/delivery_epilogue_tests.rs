@@ -25,10 +25,11 @@ mod codex_empty_tests;
 mod o_done_reaction_tests;
 mod provider_failure_tests;
 #[cfg(all(test, unix))]
-mod recovery_retry_guard_tests;
+pub(in crate::services::discord) mod recovery_retry_guard_tests;
 #[cfg(unix)]
-mod rowless_receipt_tests;
+pub(in crate::services::discord) mod rowless_receipt_tests;
 mod settled_delivery_tests;
+
 mod turn_mode_anchor_tests;
 
 #[tokio::test]
@@ -57,7 +58,10 @@ async fn scheduled_recovery_keeps_dispatch_unsettled_after_notice_delivery() {
 }
 
 /// Positive terminal fixtures include the input receipt that the provider emitted in this attempt.
-fn prove_claude_input(root: &std::path::Path, row: &mut InflightTurnState) {
+pub(in crate::services::discord) fn prove_claude_input(
+    root: &std::path::Path,
+    row: &mut InflightTurnState,
+) {
     use crate::services::agent_protocol::RuntimeHandoffKind;
     use crate::services::tui_prompt_dedupe::{self, TuiRuntimeBinding};
     assert_eq!(row.runtime_kind, Some(RuntimeHandoffKind::ClaudeTui));
@@ -401,7 +405,7 @@ struct DriverObservation {
 
 /// What the driver's terminal replace resolves to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ReplaceBehaviour {
+pub(in crate::services::discord) enum ReplaceBehaviour {
     Edited,
     /// #5191 L3: the body IS posted but the outcome is not a commit. Kept here
     /// so S1-wit can pin that known residue without re-deriving the harness.
@@ -621,13 +625,14 @@ impl TurnGateway for DriverGateway {
     }
 }
 
-const DRIVER_CHANNEL_ID: u64 = 5_191_001;
-const DRIVER_USER_MSG_ID: u64 = 5_191_002;
-const DRIVER_CURRENT_MSG_ID: u64 = 5_191_003;
+pub(in crate::services::discord) const DRIVER_CHANNEL_ID: u64 = 5_191_001;
+pub(in crate::services::discord) const DRIVER_USER_MSG_ID: u64 = 5_191_002;
+pub(in crate::services::discord) const DRIVER_CURRENT_MSG_ID: u64 = 5_191_003;
 const DRIVER_STALE_PREFIX_MSG_ID: u64 = 5_191_004;
-const DRIVER_FALLBACK_ANCHOR_MSG_ID: u64 = 5_191_005;
-const DRIVER_TMUX_SESSION: &str = "adk-5191-driver";
-const DRIVER_BODY: &str = "terminal answer body for the #5191 delivery driver";
+pub(in crate::services::discord) const DRIVER_FALLBACK_ANCHOR_MSG_ID: u64 = 5_191_005;
+pub(in crate::services::discord) const DRIVER_TMUX_SESSION: &str = "adk-5191-driver";
+pub(in crate::services::discord) const DRIVER_BODY: &str =
+    "terminal answer body for the #5191 delivery driver";
 const DRIVER_PUBLISH_PANIC: &str = "driver panic inside the terminal publish";
 /// Hard bound on the manual-poll sweep. Expiry is a FAILURE, never a quiet
 /// green: a driver that stops making progress must look like a broken witness.
@@ -636,19 +641,19 @@ const DRIVER_POLL_BUDGET: usize = 4_096;
 const DRIVER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Owns everything the driven future borrows for the length of a run.
-struct TerminalDeliveryDriver {
+pub(in crate::services::discord) struct TerminalDeliveryDriver {
     #[cfg(unix)]
     published_census: Arc<Mutex<Vec<serde_json::Value>>>,
-    shared: Arc<SharedData>,
-    gateway: Arc<dyn TurnGateway>,
+    pub(in crate::services::discord) shared: Arc<SharedData>,
+    pub(in crate::services::discord) gateway: Arc<dyn TurnGateway>,
     marker: Arc<AtomicBool>,
     observations: Arc<Mutex<Vec<DriverObservation>>>,
     completed_publications: Arc<AtomicUsize>,
     published_bodies: Arc<Mutex<Vec<String>>>,
     body_check: Arc<std::sync::OnceLock<crate::services::tui_o::channel_policy::BodyCheck>>,
-    inflight: InflightTurnState,
+    pub(in crate::services::discord) inflight: InflightTurnState,
     body: String,
-    _temp: tempfile::TempDir,
+    pub(in crate::services::discord) _temp: tempfile::TempDir,
     _env_reset: crate::config::TestEnvVarGuard,
     _env_lock: std::sync::MutexGuard<'static, ()>,
     posted_restart_serialization: Option<std::sync::MutexGuard<'static, ()>>,
@@ -668,7 +673,10 @@ impl TerminalDeliveryDriver {
     /// controls how many times each production gateway call suspends, which is
     /// what makes the drop sweep below land at real interior points rather than
     /// only before the first poll.
-    fn new(replace: ReplaceBehaviour, yields_per_call: usize) -> Self {
+    pub(in crate::services::discord) fn new(
+        replace: ReplaceBehaviour,
+        yields_per_call: usize,
+    ) -> Self {
         let env_lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());

@@ -5,7 +5,10 @@ use crate::services::discord::inflight::{
 #[cfg(unix)]
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64};
 
-fn runtime_seed(provider: ProviderKind, channel_id: u64) -> InflightTurnState {
+pub(in crate::services::discord) fn runtime_seed(
+    provider: ProviderKind,
+    channel_id: u64,
+) -> InflightTurnState {
     InflightTurnState::new(
         provider,
         channel_id,
@@ -36,18 +39,18 @@ fn live_watcher_handle(tmux_session_name: &str, output_path: &str) -> TmuxWatche
     }
 }
 
-struct HandoffObservation {
-    outcome: Option<GuardedSaveOutcome>,
-    retry_message: Option<RuntimeHandoffLoopMessage>,
-    terminal_control_ready_observed: bool,
+pub(in crate::services::discord) struct HandoffObservation {
+    pub(in crate::services::discord) outcome: Option<GuardedSaveOutcome>,
+    pub(in crate::services::discord) retry_message: Option<RuntimeHandoffLoopMessage>,
+    pub(in crate::services::discord) terminal_control_ready_observed: bool,
     tmux_last_offset: Option<u64>,
-    watcher_owner_channel_id: ChannelId,
+    pub(in crate::services::discord) watcher_owner_channel_id: ChannelId,
     terminal_control_drain_until: Option<std::time::Instant>,
-    claim_outcome: WatcherHandoffClaimOutcome,
-    tmux_handed_off: bool,
-    watcher_relay_available: bool,
-    watcher_delivery_pin: Option<WatcherClaimIncarnation>,
-    watcher_slots: usize,
+    pub(in crate::services::discord) claim_outcome: WatcherHandoffClaimOutcome,
+    pub(in crate::services::discord) tmux_handed_off: bool,
+    pub(in crate::services::discord) watcher_relay_available: bool,
+    pub(in crate::services::discord) watcher_delivery_pin: Option<WatcherClaimIncarnation>,
+    pub(in crate::services::discord) watcher_slots: usize,
     adopted_after_done: bool,
 }
 
@@ -125,7 +128,7 @@ async fn dispatch_process_handoff_with_pin(
     }
 }
 
-async fn dispatch_process_handoff(
+pub(in crate::services::discord) async fn dispatch_process_handoff(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     state: &mut InflightTurnState,
@@ -712,10 +715,6 @@ fn provisional_cleanup_preserves_replacement_incarnation() {
 #[cfg(unix)]
 #[path = "herdr_owner_tests.rs"]
 mod herdr_owner;
-
-#[cfg(unix)]
-#[path = "codex_replacement_tests.rs"]
-pub(super) mod codex_replacement;
 
 #[cfg(unix)]
 #[path = "read_error_fallback_tests.rs"]

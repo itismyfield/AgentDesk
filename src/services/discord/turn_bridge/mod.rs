@@ -1,19 +1,19 @@
 mod activity_heartbeat;
 pub(in crate::services::discord) mod before_start_stop;
-mod bridge_entry_persist;
+pub(in crate::services::discord) mod bridge_entry_persist;
 mod bridge_latency_spans;
 mod cancel_finalize_policy;
 pub(in crate::services::discord) mod chunk_compose;
 mod completion_guard;
 mod completion_postlude;
 mod context_window;
-mod current_message_anchor;
+pub(in crate::services::discord) mod current_message_anchor;
 #[cfg(unix)]
 mod early_tui_completion;
-mod finalize_epilogue;
+pub(in crate::services::discord) mod finalize_epilogue;
 pub(in crate::services::discord) mod followup_requeue;
 mod guards;
-mod headless_delivery;
+pub(in crate::services::discord) mod headless_delivery;
 mod memory_lifecycle;
 mod output_lifecycle;
 mod panel_lifecycle;
@@ -30,8 +30,8 @@ pub(in crate::services::discord) use response_delivery::{
 };
 pub(in crate::services::discord) mod retry_prompt_store;
 mod retry_state;
-mod runtime_handoff_loop;
-mod single_message_footer;
+pub(in crate::services::discord) mod runtime_handoff_loop;
+pub(in crate::services::discord) mod single_message_footer;
 mod skill_usage;
 pub(in crate::services::discord) use adk_runtime::services::discord::turn_bridge::stale_resume;
 
@@ -44,16 +44,16 @@ pub(crate) use stream_loop::types::terminal_prepare_test::{
 };
 mod session_row_writer;
 mod stream_receiver;
-mod stream_tick;
+pub(in crate::services::discord) mod stream_tick;
 mod streaming_edit_text;
 mod task_notification_lifecycle;
 mod terminal_controller_cutover;
 #[cfg(unix)]
 pub(in crate::services::discord) use stream_loop::types::publish_retained_terminal_recovery;
-mod terminal_delivery;
-mod terminal_outcome_delivery;
+pub(in crate::services::discord) mod terminal_delivery;
+pub(in crate::services::discord) mod terminal_outcome_delivery;
 mod thinking;
-mod tmux_runtime;
+pub(in crate::services::discord) mod tmux_runtime;
 mod turn_analytics;
 mod two_message_panel;
 mod watcher_handoff;
@@ -171,7 +171,7 @@ use current_message_anchor::{
     unbound_current_message_candidate,
 };
 use guards::{make_bridge_guards, resolve_guard_owner_channel};
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(in crate::services::discord) use headless_delivery::enqueue_headless_turn_row_for_test;
 use headless_delivery::{
     cleanup_headless_streaming_placeholder_after_delivery, enqueue_claimed_headless_delivery,
@@ -225,7 +225,7 @@ use turn_analytics::{
     turn_duration_ms,
 };
 use watcher_handoff::{live_watcher_registered_for_relay, should_delegate_bridge_relay_to_watcher};
-mod context;
+pub(in crate::services::discord) mod context;
 use super::tmux_watcher_registry::WatcherClaimIncarnation;
 pub(super) use bridge_entry_persist::spawn_turn_bridge;
 pub(super) use context::{BridgeCompletionSignal, TurnBridgeContext, WatcherHandoffClaimOutcome};
@@ -262,7 +262,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         session_key = tracing::field::debug(bridge.adk_session_key.as_deref()),
         turn_id = %bridge_turn_id,
     );
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     let probe_channel = bridge.channel_id;
     let _bridge_task = super::task_supervisor::spawn_observed("discord_turn_bridge", async move {
         let _bridge_lifetime = bridge_lifetime;
@@ -439,7 +439,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         // #5707: observe after own clear; the unbounded prior window can overlap provider work.
         let clear_fence = tokio::sync::OnceCell::new();
         let mut rx = capture_bridge_clear_fence(shared_owned.as_ref(), channel_id, rx, &clear_fence).await;
-        #[cfg(all(test, unix))]
+        #[cfg(all(any(test, feature = "test-support"), unix))]
         resume_pin_tests::after_bridge_capture(channel_id).await;
         // #3813: observation-only bridge latency spans share `turn_start`.
         let mut bridge_spans = BridgeLatencySpans::starting_at(turn_start);
@@ -973,7 +973,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
     #[cfg(test)]
     #[cfg(unix)]
     cancel_backstop_test_support::record(probe_channel, _bridge_task.abort_handle());
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     resume_pin_tests::observe_bridge_completion(probe_channel, _bridge_task);
 }
 
@@ -981,7 +981,8 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
 pub(in crate::services::discord) mod cancel_backstop_test_support;
 #[cfg(test)]
 pub(in crate::services::discord) use terminal_outcome_delivery::custody_test_adapter;
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
+#[path = "resume_pin_hook_tests.rs"]
 pub(in crate::services::discord) mod resume_pin_tests;
 pub(in crate::services::discord) use terminal_outcome_delivery::resume_foreign_terminal_custody;
 

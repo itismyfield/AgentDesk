@@ -1,7 +1,19 @@
 //! Protected attempts driven through the real turn bridge: a stale resume, recovery sentinel or
 //! terminal is decided before any reset, retry, body replacement or ordinary session effect.
 
-use super::*;
+use crate::services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::{DRIVER_CURRENT_MSG_ID, DRIVER_FALLBACK_ANCHOR_MSG_ID, DRIVER_TMUX_SESSION, ReplaceBehaviour, TerminalDeliveryDriver};
+use crate::services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests::{assert_body_and_summary, resumable_session};
+use crate::services::discord::turn_bridge::recovery_text::{auto_retry_with_history, release_retry_pending};
+use crate::db::dispatched_sessions::hosted_execution::test_support::record;
+use crate::services::agent_protocol::StreamMessage;
+use crate::services::discord::{gateway, http, inflight};
+use crate::services::discord::formatting::ReplaceLongMessageOutcome;
+use crate::services::discord::gateway::{GatewayFuture, TurnGateway};
+use crate::services::discord::inflight::InflightTurnState;
+use crate::services::provider::{CancelToken, ProviderKind};
+use crate::services::turn_orchestrator::Intervention;
+use poise::serenity_prelude::{ChannelId, MessageId};
+use std::sync::{Arc, Mutex, atomic::{AtomicUsize, Ordering}};
 use crate::db::replay_disposition::write::{self, BeginFrom, CanonicalInput, EffectProjection};
 use crate::services::discord::replay_policy::live::{Activity, LiveAttempt, Seen, TerminalKind};
 use crate::services::discord::replay_policy::{ExactHandoff, ExactRetry};
@@ -696,8 +708,8 @@ async fn held_request_refuses_the_legacy_history_retry_pg() {
 fn held_request_leaves_its_dispatch_unsettled_pg() {
     use crate::services::discord::admin_host_guard::tests::{Recorder, api_child};
     if !api_child(concat!(
-        "services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::",
-        "recovery_retry_guard_tests::replay_turn_tests::held_request_leaves_its_dispatch_unsettled_pg"
+        module_path!(),
+        "::held_request_leaves_its_dispatch_unsettled_pg"
     )) {
         return;
     }

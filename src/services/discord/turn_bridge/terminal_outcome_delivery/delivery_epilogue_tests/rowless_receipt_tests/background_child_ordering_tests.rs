@@ -1,10 +1,20 @@
 //! Real tool registration, transcript collection, and terminal HTTP write races.
 
-use super::*;
+use crate::services::agent_protocol::{RuntimeHandoffKind, StreamMessage};
+use crate::services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::{
+    DRIVER_CHANNEL_ID, DRIVER_CURRENT_MSG_ID, DRIVER_USER_MSG_ID, ReplaceBehaviour,
+    TerminalDeliveryDriver, prove_claude_input,
+};
 use crate::services::discord::turn_bridge::{
     BridgeCompletionSignal, TurnBridgeContext, spawn_turn_bridge,
 };
+use crate::services::discord::{gateway, inflight, mailbox_try_start_turn, tmux};
 use crate::services::dispatched_sessions::{HookSessionBody, HookSessionQuery};
+use crate::services::memory::TokenUsage;
+use crate::services::provider::{CancelToken, ProviderKind};
+use crate::services::tui_prompt_dedupe::{self, TuiRuntimeBinding};
+use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+use std::sync::Arc;
 
 const JOB: &str = "toolu_ordered_job";
 const BG_INPUT: &str = r#"{"command":"sleep 600","run_in_background":true}"#;
@@ -260,7 +270,7 @@ async fn terminal_body(rx: &mut TerminalBodyRx) -> serde_json::Value {
 }
 
 async fn collector(driver: &TerminalDeliveryDriver) {
-    crate::services::discord::tui_prompt_relay::background_child_completion::claude_bindings_after_child_completions(
+    crate::services::discord::task_notification_delivery::background_child_completion::claude_bindings_after_child_completions(
         &driver.shared,
     ).await;
 }
@@ -392,7 +402,7 @@ fn bridge_child_completion_before_insert_commit_reconciles_both_cursors_pg() {
             let scan = if retry_close {
                 let shared = driver.shared.clone();
                 let scan = tokio::spawn(async move {
-                    crate::services::discord::tui_prompt_relay::background_child_completion::claude_bindings_after_child_completions(&shared).await;
+                    crate::services::discord::task_notification_delivery::background_child_completion::claude_bindings_after_child_completions(&shared).await;
                 });
                 tokio::time::timeout(std::time::Duration::from_secs(10), async {
                     loop {

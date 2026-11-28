@@ -9,7 +9,7 @@ use super::SharedData;
 use crate::utils::observed_task::panic_payload_summary;
 pub(in crate::services::discord) use crate::utils::observed_task::spawn_observed;
 pub(in crate::services::discord) mod watcher_completion;
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 #[path = "task_supervisor/watcher_spawn_observation_tests.rs"]
 pub(in crate::services::discord) mod watcher_spawn_observation;
 
@@ -24,9 +24,9 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     let future = Box::pin(future);
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     let observed = watcher_spawn_observation::submitted(&shared, &cancel);
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     let observed_task = observed.clone();
     let completion = watcher_completion::Registration::new(cancel.clone());
     let task = spawn_observed(task_name, async move {
@@ -58,11 +58,11 @@ where
                 watcher_completion::Outcome::Panicked
             }
         };
-        #[cfg(all(test, unix))]
+        #[cfg(all(any(test, feature = "test-support"), unix))]
         watcher_spawn_observation::finished(&observed_task, result);
         completion.finish(result);
     });
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     watcher_spawn_observation::attach(&observed, task.abort_handle());
     task
 }

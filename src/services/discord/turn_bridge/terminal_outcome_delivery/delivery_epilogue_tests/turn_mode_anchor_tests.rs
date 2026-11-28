@@ -196,7 +196,7 @@ async fn deliver(
     kind: crate::services::agent_protocol::RuntimeHandoffKind,
 ) -> Delivered {
     use crate::services::tui_o::cutover::{BodyClaim, BodySend, BodySite, claim_then_send_at};
-    use crate::test_support::wait::{WAIT_CAP, await_within};
+    use adk_test_support::test_support::wait::{WAIT_CAP, await_within};
     let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0);
     driver.inflight.runtime_kind = Some(kind);
     crate::services::discord::inflight::save_inflight_state(&driver.inflight).unwrap();

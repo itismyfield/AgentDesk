@@ -1,5 +1,18 @@
-use super::*;
+use crate::services::discord::inflight::InflightTurnState;
+#[cfg(unix)]
+use crate::services::discord::turn_bridge::headless_delivery::enqueue_headless_turn_row_for_test;
+use crate::services::discord::turn_bridge::headless_delivery::outcome::HeadlessDeliveryOutcome;
+use crate::services::discord::turn_bridge::headless_delivery::{
+    HeadlessDeliveryArguments, HeadlessDeliveryInputs, assemble_headless_delivery_arguments,
+    durable_outbox, enqueue_claimed_headless_delivery, enqueue_headless_delivery,
+    headless_direct_fallback_prefers_notify_http, outcome,
+};
+use crate::services::discord::{Error, SharedData};
 use crate::services::message_outbox::{OutboxEnqueueOutcome, OutboxMessage};
+use crate::services::provider::{CancelToken, ProviderKind};
+use poise::serenity_prelude::{ChannelId, MessageId};
+use std::sync::Arc;
+use std::time::Duration;
 
 #[path = "observation_tests.rs"]
 mod observation_tests;

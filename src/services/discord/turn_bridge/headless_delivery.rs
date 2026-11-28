@@ -251,25 +251,27 @@ pub(super) fn headless_delivery_bot_alias<'a>(
 /// own provider (#5159's user-turn default) that preference is dropped, because
 /// the `shared` http this function falls through to already *is* that provider's
 /// bot — the identity the placeholder-edit arm would have posted under.
-fn headless_direct_fallback_prefers_notify_http(delivery_bot: Option<&str>) -> bool {
+pub(in crate::services::discord) fn headless_direct_fallback_prefers_notify_http(
+    delivery_bot: Option<&str>,
+) -> bool {
     caller_supplied_delivery_bot(delivery_bot).is_some()
 }
 
-mod durable_outbox;
+pub(in crate::services::discord) mod durable_outbox;
 mod intake_outbox_argument;
 use intake_outbox_argument::HeadlessDeliveryRuntimeArguments;
-pub(super) use intake_outbox_argument::{
+pub(in crate::services::discord) use intake_outbox_argument::{
     HeadlessDeliveryArguments, HeadlessDeliveryInputs, assemble_headless_delivery_arguments,
 };
 
-mod outcome;
+pub(in crate::services::discord) mod outcome;
 pub(crate) use outcome::{
     HeadlessDeliveryDisposition, HeadlessDeliveryOutcome, headless_delivery_disposition,
     preserve_ambiguous_headless_delivery_for_retry,
 };
 use outcome::{classify_visible_outbox_result, run_headless_direct_fallback};
 
-pub(super) async fn enqueue_headless_delivery(
+pub(in crate::services::discord) async fn enqueue_headless_delivery(
     arguments: HeadlessDeliveryArguments<'_>,
 ) -> HeadlessDeliveryOutcome {
     let runtime = arguments.into_runtime_arguments();
@@ -557,7 +559,7 @@ async fn enqueue_headless_turn_row(
 }
 
 /// The production row write for `state`'s turn, without waiting for the worker to send it.
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(in crate::services::discord) async fn enqueue_headless_turn_row_for_test(
     shared: &Arc<SharedData>,
     state: &InflightTurnState,
@@ -585,7 +587,7 @@ pub(in crate::services::discord) async fn enqueue_headless_turn_row_for_test(
 
 /// Enqueues under `claim`; O owning the channel or a held identity enqueues nothing and the
 /// turn stays preserved for retry.
-pub(super) async fn enqueue_claimed_headless_delivery(
+pub(in crate::services::discord) async fn enqueue_claimed_headless_delivery(
     claim: Option<crate::services::tui_o::cutover::BodyClaim<'_>>,
     arguments: HeadlessDeliveryArguments<'_>,
 ) -> HeadlessDeliveryOutcome {
@@ -606,10 +608,6 @@ pub(super) async fn enqueue_claimed_headless_delivery(
         })
         .await
 }
-
-#[cfg(test)]
-#[path = "headless_delivery/production_seam_tests.rs"]
-mod production_seam_tests;
 
 #[cfg(test)]
 mod headless_delivery_tests {
@@ -637,7 +635,7 @@ mod headless_delivery_tests {
             );
             assert_ne!(
                 bot,
-                super::super::super::bot_role::UtilityBotRole::Notify.alias(),
+                crate::domain::bot_role::UtilityBotRole::Notify.alias(),
                 "user turn answer must not be posted by the notify utility bot"
             );
         }
@@ -689,7 +687,7 @@ mod headless_delivery_tests {
         assert!(!provider.is_supported());
         assert_eq!(
             headless_delivery_bot_alias(None, &provider),
-            super::super::super::bot_role::UtilityBotRole::Notify.alias()
+            crate::domain::bot_role::UtilityBotRole::Notify.alias()
         );
     }
 

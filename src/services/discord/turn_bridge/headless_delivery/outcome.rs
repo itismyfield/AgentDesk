@@ -43,7 +43,7 @@ pub(super) fn classify_visible_outbox_result(
     }
 }
 
-pub(super) async fn run_headless_direct_fallback<F, Fut>(
+pub(in crate::services::discord) async fn run_headless_direct_fallback<F, Fut>(
     suppress_for_cancel: bool,
     direct_fallback: F,
 ) -> HeadlessDeliveryOutcome

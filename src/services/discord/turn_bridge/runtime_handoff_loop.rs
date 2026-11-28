@@ -14,7 +14,7 @@ use watcher_handoff::{
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum RuntimeHandoffLoopMessage {
+pub(in crate::services::discord) enum RuntimeHandoffLoopMessage {
     TmuxReady {
         output_path: String,
         input_fifo_path: String,
@@ -63,7 +63,7 @@ impl RuntimeHandoffLoopMessage {
     }
 }
 
-pub(super) fn adopt_claimed_watcher_delivery_marker(
+pub(in crate::services::discord) fn adopt_claimed_watcher_delivery_marker(
     pin: &mut Option<WatcherClaimIncarnation>,
     incarnation: &WatcherClaimIncarnation,
 ) {
@@ -103,12 +103,12 @@ pub(super) struct RuntimeHandoffLoopState<'a> {
 
 mod guarded_save;
 #[cfg(test)]
-mod tests;
+pub(in crate::services::discord) mod tests;
 
 /// Whether the bot's gateway session is up; without it this process relays on standby.
 #[cfg(unix)]
 fn gateway_session_ready(shared: &SharedData) -> bool {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if test_gateway::connected() {
         return true;
     }
@@ -116,29 +116,9 @@ fn gateway_session_ready(shared: &SharedData) -> bool {
 }
 
 /// Lets a test report a live gateway session on its thread.
-#[cfg(all(test, unix))]
-pub(super) mod test_gateway {
-    thread_local! {
-        static CONNECTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    }
-
-    pub(super) fn connected() -> bool {
-        CONNECTED.with(std::cell::Cell::get)
-    }
-
-    /// Restores the previous state when dropped.
-    pub(in crate::services::discord::turn_bridge) struct Guard(bool);
-
-    pub(in crate::services::discord::turn_bridge) fn connect() -> Guard {
-        Guard(CONNECTED.with(|cell| cell.replace(true)))
-    }
-
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            CONNECTED.with(|cell| cell.set(self.0));
-        }
-    }
-}
+#[cfg(all(any(test, feature = "test-support"), unix))]
+#[path = "runtime_handoff_loop/gateway_ready_hook_tests.rs"]
+pub(in crate::services::discord) mod test_gateway;
 use guarded_save::{
     guarded_runtime_atomic_stamp, guarded_runtime_handoff_save,
     tmux_ready_state_dirty_after_guarded_save,
@@ -984,6 +964,9 @@ pub(super) async fn handle_runtime_handoff_loop_message(
 }
 
 #[cfg(all(test, unix))]
-pub(in crate::services::discord) use tests::codex_replacement::adopt_codex_replacement_for_test;
+#[path = "runtime_handoff_loop/codex_replacement_fixture_tests.rs"]
+mod codex_replacement_fixture_tests;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use codex_replacement_fixture_tests::adopt_codex_replacement_for_test;
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) use tests::read_error_fallback::hand_failed_followup_read_to_watcher_for_test;

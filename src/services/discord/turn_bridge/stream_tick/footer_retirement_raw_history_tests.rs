@@ -266,7 +266,7 @@ async fn failed_rollover_records_the_freeze_and_restored_body_but_not_the_anchor
             module_path!(),
             "::failed_rollover_records_the_freeze_and_restored_body_but_not_the_anchor"
         )
-        .trim_start_matches("agentdesk::"),
+        .trim_start_matches(concat!(env!("CARGO_CRATE_NAME"), "::")),
     ) {
         return;
     }

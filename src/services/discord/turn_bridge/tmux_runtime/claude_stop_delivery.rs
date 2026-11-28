@@ -677,7 +677,7 @@ async fn interrupt_observed_claude_session(
 }
 
 /// The Herdr pane stop, test-only until a Herdr turn carries its verified target to the stop.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) mod herdr {
     use super::super::stop_host::{HerdrStopTarget, HerdrStopWrite, not_sent};
     use super::*;

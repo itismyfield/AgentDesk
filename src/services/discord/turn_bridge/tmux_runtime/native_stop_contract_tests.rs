@@ -1,7 +1,7 @@
 use super::*;
 use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
 use crate::services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::{
-    cold_error::Shown, seed_context,
+    Shown, seed_context,
 };
 use crate::services::discord::turn_bridge::cancel_backstop_test_support::BridgePause;
 use crate::services::discord::{self as discord, Data};

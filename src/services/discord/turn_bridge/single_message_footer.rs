@@ -17,7 +17,7 @@ pub(super) fn make_owner_now(
     (started_at_unix, make_owner(user_msg_id, started_at_unix))
 }
 pub(super) fn bridge_single_message_panel_footer_enabled() -> bool {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if SEPARATE_PANEL_FOR_TESTS.get() {
         return false;
     }
@@ -25,12 +25,11 @@ pub(super) fn bridge_single_message_panel_footer_enabled() -> bool {
         crate::services::discord::single_message_panel_enabled(),
     )
 }
-#[cfg(test)]
-thread_local! {
-    /// Lets a test reach the two-message completion that the process-wide footer flag hides.
-    pub(super) static SEPARATE_PANEL_FOR_TESTS: std::cell::Cell<bool> =
-        const { std::cell::Cell::new(false) };
-}
+#[cfg(any(test, feature = "test-support"))]
+#[path = "panel_mode_hook_tests.rs"]
+mod panel_mode_hook_tests;
+#[cfg(any(test, feature = "test-support"))]
+pub(in crate::services::discord) use panel_mode_hook_tests::SEPARATE_PANEL_FOR_TESTS;
 pub(super) fn bridge_status_panel_dirty_should_edit_separate_panel(
     status_panel_dirty: bool,
     single_message_panel_footer_mode: bool,
@@ -319,7 +318,9 @@ pub(super) async fn refresh_bridge_footer(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn complete_bridge_terminal_footer_or_status_panel<G: TurnGateway + ?Sized>(
+pub(in crate::services::discord) async fn complete_bridge_terminal_footer_or_status_panel<
+    G: TurnGateway + ?Sized,
+>(
     shared: &SharedData,
     gateway: &G,
     channel_id: ChannelId,

@@ -10,7 +10,7 @@ pub(super) mod guarded_persist;
 #[path = "stream_tick/o_panel.rs"]
 mod o_panel;
 #[path = "stream_tick/rollover_guard.rs"]
-mod rollover_guard;
+pub(in crate::services::discord) mod rollover_guard;
 use guarded_persist::{
     GuardedSaveOutcome, StreamTickCandidateSaveContext, VisibleMutationAuthority,
     dirty_after_guarded_save, fence_stream_tick_visible_mutation_with_candidate_cleanup,

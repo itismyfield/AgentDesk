@@ -360,7 +360,7 @@ thread_local! {
 
 /// Runs `test` with this thread's SIGINTs sent for real as well as recorded.
 #[cfg(all(unix, test))]
-pub(super) fn with_real_sigint<T>(test: impl FnOnce() -> T) -> T {
+pub(in crate::services::discord) fn with_real_sigint<T>(test: impl FnOnce() -> T) -> T {
     struct Restore;
     impl Drop for Restore {
         fn drop(&mut self) {

@@ -139,7 +139,10 @@ fn idle_evidence_survives_the_shipped_filter_as_one_line() {
     tracing::subscriber::with_default(subscriber, || evidence.emit());
     let logs = String::from_utf8(writer.0.lock().unwrap().clone()).unwrap();
     assert_eq!(logs.lines().count(), 1, "{logs}");
-    assert!(logs.contains(" INFO agentdesk::"), "{logs}");
+    assert!(
+        logs.contains(concat!(" INFO ", env!("CARGO_CRATE_NAME"), "::")),
+        "{logs}"
+    );
     assert!(
         logs.contains("event=\"herdr_stop_idle_evidence\""),
         "{logs}"

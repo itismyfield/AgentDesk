@@ -1,44 +1,24 @@
-use super::*;
+use crate::services::agent_protocol::StreamMessage;
+use crate::services::discord::gateway::TurnGateway;
+use crate::services::discord::inflight::InflightTurnState;
+use crate::services::discord::queue_io::mailbox_recovery_kickoff;
+use crate::services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::seed_context;
+use crate::services::discord::turn_bridge::{BridgeCompletionSignal, spawn_turn_bridge};
 use crate::services::discord::{
     self,
     health::mailbox::{ResidualOccupancy, mailbox_agent_turn_status},
 };
-
-pub(in crate::services::discord::turn_bridge) fn seed_context(
-    seed: &str,
-    row: InflightTurnState,
-) -> TurnBridgeContext {
-    let gateway: std::sync::Arc<dyn TurnGateway> =
-        std::sync::Arc::new(crate::services::discord::gateway::HeadlessGateway);
-    TurnBridgeContext {
-        provider: ProviderKind::Codex,
-        gateway,
-        channel_id: ChannelId::new(row.channel_id),
-        user_msg_id: None,
-        user_text_owned: String::new(),
-        request_owner_name: String::new(),
-        role_binding: None,
-        adk_session_key: None,
-        adk_session_name: None,
-        adk_session_info: None,
-        adk_cwd: None,
-        dispatch_id: None,
-        dispatch_kind: None,
-        memory_recall_usage: TokenUsage::default(),
-        context_window_tokens: 0,
-        context_compact_percent: 0,
-        current_msg_id: None,
-        response_sent_offset: 0,
-        full_response: seed.to_string(),
-        tmux_last_offset: None,
-        new_session_id: None,
-        defer_watcher_resume: false,
-        reuse_status_panel_message: false,
-        completion_tx: None,
-        is_external_input_tui_direct: false,
-        inflight_state: row,
-    }
-}
+use crate::services::discord::{
+    SharedData, gateway, mailbox_try_start_turn, mailbox_try_start_turn_kinded, queue_io,
+};
+use crate::services::provider::{CancelToken, ProviderKind};
+use crate::services::turn_orchestrator::Intervention;
+use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+use std::fs;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, mpsc};
+use std::time::Duration;
+use tokio::sync::Mutex;
 
 #[tokio::test]
 async fn headless_entry_abort_releases_mailbox_without_touching_durable_owner() {
@@ -654,7 +634,7 @@ async fn herdr_cold_case(
     cold: Cold,
 ) -> (BridgeCompletionSignal, bool, bool, usize) {
     use crate::db::dispatched_sessions::hosted_execution::HostedOwner;
-    use crate::services::discord::turn_bridge::before_start_stop::tests::actual_fresh_exit;
+    use crate::services::discord::dl_turn_bridge_tests::before_start_stop_tests::actual_fresh_exit;
     use crate::services::provider::cancel_token_claude_interrupt::HerdrSubmission;
     use std::sync::atomic::Ordering;
     let mut shared = discord::make_shared_data_for_tests();
@@ -780,8 +760,10 @@ pub(in crate::services::discord::turn_bridge) mod cold_error;
 mod herdr_settlement {
     use crate::db::dispatched_sessions::hosted_execution::HostedOwner;
     use crate::services::discord::formatting::ReplaceLongMessageOutcome;
+    use crate::services::discord::gateway::TurnGateway;
     use crate::services::discord::gateway::{GatewayFuture, TurnGateway};
     use crate::services::discord::inflight::InflightTurnState;
+    use crate::services::discord::queue_io::mailbox_recovery_kickoff;
     use crate::services::discord::turn_bridge::{BridgeCompletionSignal, TurnBridgeContext};
     use crate::services::discord::{self, Intervention};
     use crate::services::provider::cancel_token_claude_interrupt::{
@@ -789,6 +771,7 @@ mod herdr_settlement {
     };
     use crate::services::provider::{CancelToken, ProviderKind};
     use crate::services::tui_prompt_dedupe::binding_events as events;
+    use crate::services::turn_orchestrator::Intervention;
     use poise::serenity_prelude::{ChannelId, MessageId, UserId};
     use std::os::unix::fs::MetadataExt;
     use std::sync::{Arc, Mutex};
@@ -1171,6 +1154,8 @@ impl TurnBridgeContext {
         token: Arc<CancelToken>,
         rx: mpsc::Receiver<StreamMessage>,
     ) {
-        super::spawn_turn_bridge(shared, token, rx, self);
+        crate::services::discord::turn_bridge::bridge_entry_persist::spawn_turn_bridge(
+            shared, token, rx, self,
+        );
     }
 }

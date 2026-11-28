@@ -14,7 +14,7 @@ use crate::services::tui_o::store::{Initialized, OStore, StoreConfig};
 const USER: u64 = 1_430_000_000_000_000_001;
 
 fn notice() -> String {
-    crate::services::discord::commands::owner_error_response(
+    crate::services::discord::formatting::owner_error_response(
         &format!("{PROVIDER_FAILURE_SUMMARY}\n같은 요청을 다시 시도해 주세요."),
         "Error: herdr launch did not complete: evidence EnvUnreadable",
     )

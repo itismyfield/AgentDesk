@@ -20,13 +20,13 @@ pub(in crate::services::discord) use native_stop::NativeStop;
 #[cfg(unix)]
 mod codex_stop_delivery;
 mod interrupt_policy;
-mod judged_stop;
+pub(in crate::services::discord) mod judged_stop;
 mod owned_input_stop;
 mod pid_exit;
 mod process_backend_cancel;
-mod process_table;
-mod session_stop;
-mod stop_host;
+pub(in crate::services::discord) mod process_table;
+pub(in crate::services::discord) mod session_stop;
+pub(in crate::services::discord) mod stop_host;
 
 use claude_stop_delivery::interrupt_claude_turn_session_preserving;
 use interrupt_policy::*;
@@ -538,7 +538,7 @@ pub(in crate::services::discord) async fn stop_approved_turn(
 }
 
 /// Every stage acts on `target`, never on a name the token holds by then.
-async fn stop_active_turn_on(
+pub(in crate::services::discord) async fn stop_active_turn_on(
     target: &StopTarget,
     provider: &ProviderKind,
     token: &Arc<CancelToken>,
@@ -878,4 +878,4 @@ pub(super) fn is_dcserver_restart_command(input: &str) -> bool {
 
 #[cfg(test)]
 #[path = "tmux_runtime_tests.rs"]
-mod tests;
+pub(in crate::services::discord) mod tests;

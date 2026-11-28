@@ -17,7 +17,10 @@ use crate::services::provider::cancel_token_cleanup::target::CapturedProcess;
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::session_backend::SessionHandle;
 
-const TEST: &str = "services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests::force_kill_ends_a_process_backend_wrapper_and_its_cli_group_pg";
+const TEST: &str = concat!(
+    module_path!(),
+    "::force_kill_ends_a_process_backend_wrapper_and_its_cli_group_pg"
+);
 /// Set in the re-run of this test binary that plays the wrapper: the CLI it starts.
 const WRAPPER_CLI: &str = "ADK_FORCE_KILL_FIXTURE_CLI";
 
@@ -78,7 +81,11 @@ fn wrapper_with_cli(dir: &std::path::Path, ignored: &str, spawned: &mut Spawned)
     std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
-        .args(["--exact", TEST, "--test-threads=1"])
+        .args([
+            "--exact",
+            TEST.split_once("::").unwrap().1,
+            "--test-threads=1",
+        ])
         .env(WRAPPER_CLI, &cli);
     let command = command
         .stdin(Stdio::piped())
@@ -155,14 +162,16 @@ fn force_kill_ends_a_process_backend_wrapper_and_its_cli_group_pg() {
         return;
     }
     let _root = crate::config::TestRuntimeRootGuard::new();
-    let sigint = super::super::tests::SIGINT_TEST_LOCK.lock();
+    let sigint =
+        crate::services::discord::turn_bridge::tmux_runtime::tests::SIGINT_TEST_LOCK.lock();
     let _sigint = sigint.unwrap_or_else(|poison| poison.into_inner());
     let dir = tempfile::TempDir::new().unwrap();
     let mut spawned = Spawned(Vec::new());
     let mut runtime = tokio::runtime::Builder::new_current_thread();
     let runtime = runtime.enable_all().build().unwrap();
     // Every step of this current-thread runtime runs here, so its signals are sent for real.
-    let real_sigint = super::super::process_table::with_real_sigint;
+    let real_sigint =
+        crate::services::discord::turn_bridge::tmux_runtime::process_table::with_real_sigint;
     with_real_pid_kill(|| {
         real_sigint(|| {
             runtime.block_on(async {

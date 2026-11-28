@@ -26,7 +26,7 @@ const NOTICE_RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(1), Duration::fr
 const ADMITTED_ABORT_NOTICE: &str = "⏹ 중단됨";
 
 /// The bridge exit; true keeps the turn held. A held row is never sealed or closed by policy.
-pub(super) async fn exit_held(
+pub(in crate::services::discord) async fn exit_held(
     shared: &Arc<SharedData>,
     gateway: &dyn TurnGateway,
     actor: &Arc<CancelToken>,
@@ -102,7 +102,7 @@ async fn run_policy_close(
             let Some(delay) = NOTICE_RETRY_DELAYS.get(attempts - 1) else {
                 break false;
             };
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             test_hooks::boundary("before_notice_retry", row);
             tokio::time::sleep(*delay).await;
         }
@@ -159,7 +159,7 @@ where
     if !mailbox_owns(mailbox, actor).await {
         return CloseAttempt::Held;
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     test_hooks::boundary("before_receipt", row);
     // The receipt is durable before anything is shown or released; a refusal keeps the hold.
     let generation = shared.restart.current_generation;
@@ -169,7 +169,7 @@ where
     else {
         return CloseAttempt::Held;
     };
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     test_hooks::boundary("after_receipt", &admitted);
     // The stop shows on the durable row's message, as a reply where O owns that body; an
     // unreadable ownership shows nothing.
@@ -221,17 +221,17 @@ where
         };
         acked
     };
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     test_hooks::boundary("after_notice_ack", &admitted);
     let Some(intent) = policy_intent(shared, actor, row, proof, mailbox.clone(), acked) else {
         return CloseAttempt::Held;
     };
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     test_hooks::boundary("before_submit", &admitted);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     test_hooks::submitting();
     let outcome = fin.submit_policy_close(intent, shared.clone()).await;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     test_hooks::boundary("after_submit", &admitted);
     let reason: &dyn std::fmt::Debug = match &outcome {
         PolicyCloseOutcome::Settled | PolicyCloseOutcome::DuplicateConfirmed => {
@@ -311,8 +311,8 @@ async fn mailbox_owns(mailbox: &ChannelMailboxHandle, actor: &Arc<CancelToken>) 
         .is_some_and(|current| Arc::ptr_eq(current, actor))
 }
 
-#[cfg(all(test, unix))]
-async fn consume_once(
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(in crate::services::discord) async fn consume_once(
     shared: &Arc<SharedData>,
     fin: &TurnFinalizer,
     actor: &Arc<CancelToken>,
@@ -340,7 +340,7 @@ async fn consume_once(
 
 /// The typed close of the row the notice ACK returned. The captured actor's own step clears its
 /// receipt and only then releases the turn, so a successor never starts over it.
-fn policy_intent(
+pub(in crate::services::discord) fn policy_intent(
     shared: &Arc<SharedData>,
     actor: &Arc<CancelToken>,
     row: &InflightTurnState,
@@ -371,7 +371,7 @@ fn policy_intent(
         trace: Default::default(),
     };
     // Tests bind the request's own probe and settlement switch to it here.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let request = crate::services::turn_orchestrator::policy_close::test_hooks::bind(request);
     Some(PolicyCloseIntent {
         key,
@@ -382,56 +382,8 @@ fn policy_intent(
     })
 }
 
-#[cfg(test)]
-#[cfg(unix)]
-#[path = "before_start_stop_tests.rs"]
-pub(in crate::services::discord::turn_bridge) mod tests;
-
 /// Test seams at each step of `consume`: a per-thread observer, a policy-submit count, and a
 /// child-process stop named by `STOP_AT`.
-#[cfg(test)]
-pub(in crate::services::discord) mod test_hooks {
-    use crate::services::discord::inflight::InflightTurnState;
-    use std::cell::{Cell, RefCell};
-
-    type Observer = Box<dyn FnMut(&'static str, &InflightTurnState)>;
-
-    thread_local! {
-        static OBSERVER: RefCell<Option<Observer>> = const { RefCell::new(None) };
-        static SUBMITTED: Cell<usize> = const { Cell::new(0) };
-    }
-
-    pub(in crate::services::discord) const STOP_AT: &str = "ADK_COLDSTOP_B_STOP_AT";
-
-    #[cfg(unix)]
-    pub(in crate::services::discord) fn observe(observer: Option<Observer>) {
-        OBSERVER.with(|slot| *slot.borrow_mut() = observer);
-    }
-
-    /// Policy submissions `consume` made on this thread.
-    #[cfg(unix)]
-    pub(in crate::services::discord) fn submitted() -> usize {
-        SUBMITTED.with(Cell::get)
-    }
-
-    /// Counts one call to the finalizer's policy submit API, right before it is made.
-    pub(super) fn submitting() {
-        SUBMITTED.with(|count| count.set(count.get() + 1));
-    }
-
-    pub(super) fn boundary(step: &'static str, row: &InflightTurnState) {
-        if std::env::var(STOP_AT).ok().as_deref() == Some(step) {
-            println!(
-                "COLDSTOP_B_STOP {step} channel={} pid={}",
-                row.channel_id,
-                std::process::id()
-            );
-            std::process::exit(0);
-        }
-        OBSERVER.with(|slot| {
-            if let Some(observer) = slot.borrow_mut().as_mut() {
-                observer(step, row);
-            }
-        });
-    }
-}
+#[cfg(any(test, feature = "test-support"))]
+#[path = "before_start_stop_hook_tests.rs"]
+pub(in crate::services::discord) mod test_hooks;
