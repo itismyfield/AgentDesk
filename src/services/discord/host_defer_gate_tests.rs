@@ -123,6 +123,9 @@ impl ScriptedTmux {
              echo \"$*\" >> \"$d/calls\"\n\
              [ \"$1\" = list-sessions ] && {{ cat \"$d/listed\" 2>/dev/null; exit 0; }}\n\
              [ -f \"$d/fail\" ] && {{ echo 'error connecting to socket' >&2; exit 1; }}\n\
+             if [ -f \"$d/live\" ] && [ \"$3\" = \"=$(cat \"$d/live\"):\" ]; then\n\
+                 [ \"$1\" = list-panes ] && echo 0; exit 0\n\
+             fi\n\
              echo \"can't find session: $3\" >&2; exit 1"
         )
         .expect("scripted tmux body");
@@ -150,6 +153,10 @@ impl ScriptedTmux {
         } else {
             let _ = std::fs::remove_file(flag);
         }
+    }
+
+    pub(crate) fn live(&self, name: &str) {
+        std::fs::write(self.dir.path().join("live"), name).unwrap();
     }
 
     /// The logged calls, oldest first, and clears the log.

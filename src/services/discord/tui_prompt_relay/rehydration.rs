@@ -1424,8 +1424,7 @@ mod tests {
             }
         }
 
-        // A dead pane's relay mirror and restored owner are dropped only for a session the host
-        // guard admits, in the unlisted sweep and the listed-pane pass of both providers.
+        // Probe only tmux sessions, and evict only dead orphans or confirmed Herdr mirrors.
         #[test]
         fn a_dead_pane_mirror_is_evicted_only_for_what_the_host_guard_admits_pg() {
             let _root = crate::config::TestRuntimeRootGuard::new();
@@ -1455,7 +1454,39 @@ mod tests {
                                     provider,
                                     &name,
                                 );
-                            case.seed(&pool, &key, &name, channel).await;
+                            match case {
+                                Case::Stored(Stored::Missing) => {}
+                                Case::Stored(Stored::MissingHerdrMarker) => {
+                                    case.seed(&pool, &key, &name, channel).await;
+                                }
+                                _ => {
+                                    let mut row_owner = owner(&channel.to_string());
+                                    row_owner.provider = provider.as_str().to_string();
+                                    row_owner.discord_token_hash = shared.token_hash.clone();
+                                    let mut hosted = record(&row_owner, "fixture", HostedState::Bound);
+                                    hosted.expected.as_mut().unwrap().binding_provider =
+                                        row_owner.provider.clone();
+                                    let raw = match case {
+                                        Case::Stored(Stored::Hosted) => Some(wire(&hosted)),
+                                        Case::Stored(Stored::Future) => Some(future_schema(&row_owner)),
+                                        Case::Conflict => {
+                                            hosted.owner.channel_id = "1".to_string();
+                                            hosted.source_ref.channel = "1".to_string();
+                                            Some(wire(&hosted))
+                                        }
+                                        _ => None,
+                                    };
+                                    let seed = crate::services::discord::host_key_derivation::tests::seed_row;
+                                    seed(&pool, provider.as_str(), Some(&shared.token_hash), &key, channel, raw).await;
+                                    if case == Case::Stored(Stored::LegacyHerdrMarker) {
+                                        Case::Stored(Stored::MissingHerdrMarker)
+                                            .seed(&pool, &key, &name, channel).await;
+                                    }
+                                }
+                            }
+                            if listed && *kind == RuntimeHandoffKind::CodexTui {
+                                crate::services::tmux_common::write_tmux_runtime_kind_marker(&name, *kind);
+                            }
                             dedupe::register_tmux_runtime_binding(&name, binding(*kind));
                             dedupe::register_tmux_channel(&name, channel);
                             let owner = ChannelId::new(channel);
@@ -1490,7 +1521,7 @@ mod tests {
                     let tui = binding(RuntimeHandoffKind::ClaudeTui);
                     dedupe::register_tmux_runtime_binding(&name, tui);
                     dedupe::register_tmux_channel(&name, channel);
-                    second.push((name, stored == Stored::Legacy));
+                    second.push((name, matches!(stored, Stored::Legacy | Stored::Hosted)));
                 }
 
                 let unread = "AgentDesk-claude-p4c1-evict-unread";
@@ -1519,6 +1550,8 @@ mod tests {
                 };
                 let keys = || sessions.iter().map(|(_, key, ..)| key.clone()).collect();
                 let rows_before = rows(keys()).await;
+                let live = &sessions[0].0;
+                tmux.live(live);
                 tmux.list(&listed);
                 let pass = shared.clone();
                 tokio::task::spawn_blocking(move || {
@@ -1528,6 +1561,7 @@ mod tests {
                 .await
                 .expect("rehydrate pass");
                 assert_eq!(rows(keys()).await, rows_before, "eviction is memory only");
+                let calls = tmux.take_calls();
                 for (name, _, listed, case) in &sessions {
                     let mirrored = dedupe::runtime_binding_for_tmux_session(name).is_some();
                     let owned = shared
@@ -1535,8 +1569,16 @@ mod tests {
                         .owner_channel_for_tmux_session(name)
                         .is_some();
                     let label = format!("{name} listed={listed} {case:?}");
-                    assert_eq!(mirrored, !case.admitted(), "{label}: mirror");
-                    assert_eq!(owned, !case.admitted(), "{label}: restored owner");
+                    let herdr = matches!(case, Case::Stored(
+                        Stored::Hosted | Stored::MissingHerdrMarker | Stored::LegacyHerdrMarker
+                    ));
+                    let probes = calls.iter().any(|call| call.split_whitespace().any(|arg| {
+                        arg.strip_prefix('=').unwrap_or(arg).trim_end_matches(':') == name
+                    }));
+                    assert_eq!(probes, case.admitted(), "{label}: tmux probe");
+                    let evicted = herdr || (case.admitted() && name != live);
+                    assert_eq!(mirrored, !evicted, "{label}: mirror");
+                    assert_eq!(owned, !evicted, "{label}: restored owner");
                 }
                 for (name, admitted) in &second {
                     let mirrored = dedupe::runtime_binding_for_tmux_session(name).is_some();
@@ -1553,6 +1595,80 @@ mod tests {
                     .expect("rehydrate pass");
                 let kept = dedupe::runtime_binding_for_tmux_session(unread);
                 assert!(kept.is_some(), "a failed row read is not a legacy answer");
+                db.drop().await;
+            });
+        }
+
+        #[test]
+        fn mirror_host_timeout_keeps_and_retries_with_one_warning_until_success_pg() {
+            let _root = crate::config::TestRuntimeRootGuard::new();
+            let _dedupe = dedupe::TEST_LOCK
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                dedupe::reset_state_for_tests();
+                let tmux = ScriptedTmux::install();
+                let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+                let pool = db.connect_and_migrate_with_max_connections(1).await;
+                let shared =
+                    crate::services::discord::host_teardown_gate::test_support::shared_on(&pool)
+                        .await;
+                let name = "AgentDesk-claude-mirror-timeout-fixture";
+                let register = || {
+                    dedupe::register_tmux_runtime_binding(
+                        name,
+                        binding(RuntimeHandoffKind::ClaudeTui),
+                    )
+                };
+                let mirrored = || dedupe::runtime_binding_for_tmux_session(name).is_some();
+                let log = tempfile::NamedTempFile::new().unwrap();
+                let writer = log.reopen().unwrap();
+                crate::logging::test_capture::pin_callsite_interest();
+                let dispatch = tracing::Dispatch::new(
+                    tracing_subscriber::fmt()
+                        .with_ansi(false)
+                        .with_writer(move || writer.try_clone().unwrap())
+                        .finish(),
+                );
+                let tick = || {
+                    let shared = shared.clone();
+                    let dispatch = dispatch.clone();
+                    tokio::task::spawn_blocking(move || {
+                        tracing::dispatcher::with_default(&dispatch, || {
+                            evict_dead_orphaned_claude_tui_mirrors(&shared);
+                        });
+                    })
+                };
+                let warnings = || {
+                    std::fs::read_to_string(log.path())
+                        .unwrap()
+                        .lines()
+                        .filter(|line| {
+                            line.contains(name)
+                                && line.contains("host check timed out; mirror kept")
+                        })
+                        .count()
+                };
+                register();
+                let held = pool.acquire().await.unwrap();
+                for _ in 0..2 {
+                    tick().await.unwrap();
+                    assert!(mirrored());
+                }
+                let calls = tmux.take_calls();
+                assert_eq!((warnings(), calls.len()), (1, 0), "{calls:?}");
+                drop(held);
+                tick().await.unwrap();
+                assert!(!mirrored(), "the next tick must retry the host lookup");
+                assert!(!tmux.take_calls().is_empty());
+                register();
+                let held = pool.acquire().await.unwrap();
+                tick().await.unwrap();
+                assert!(mirrored());
+                assert!(tmux.take_calls().is_empty());
+                assert_eq!(warnings(), 2, "success must re-arm the warning");
+                drop(held);
+                pool.close().await;
                 db.drop().await;
             });
         }
