@@ -27,6 +27,7 @@ JUDGE_JOB = "required_contexts"
 SHARD_JOBS = {"scripts": "cargo", "scripts_guards": "guards",
               "scripts_census": "census", "scripts_contracts": "contracts"}
 CENSUS_CHECKS = {
+    "Dependency crate test-only cfg ratchet",
     "Destructive call-site per-file ratchet (#5071 T3-A4)",
     "Durable frontier writer per-file call-site allowlist (#5071)",
     "TUI O writer census: Legacy send sites and cutover gates",

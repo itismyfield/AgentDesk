@@ -267,11 +267,17 @@ fn row_item(
         let transcript = PathBuf::from(row.output_path.clone().unwrap_or_default());
         (transcript, row.turn_start_offset.unwrap_or(0))
     });
+    (
+        row_episode_key(provider, &row),
+        Item("row", source, bytes, segment, None),
+    )
+}
+
+pub(super) fn row_episode_key(provider: &ProviderKind, row: &InflightTurnState) -> Value {
     let started = || json!([row.started_at, row.turn_start_offset]);
-    let turn = row.turn_nonce.clone().filter(|nonce| !nonce.is_empty());
+    let turn = row.turn_nonce.as_deref().filter(|nonce| !nonce.is_empty());
     let anchorless = (row.user_msg_id == 0).then(|| turn.map_or_else(started, Value::from));
-    let key = episode_key(provider, [row.channel_id, row.user_msg_id], anchorless);
-    (key, Item("row", source, bytes, segment, None))
+    episode_key(provider, [row.channel_id, row.user_msg_id], anchorless)
 }
 
 /// Records of another provider are left to that provider's reaper pass.
