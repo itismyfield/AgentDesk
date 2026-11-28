@@ -60,6 +60,7 @@ pub(super) async fn forget_selector(shared: &SharedData, key: &str, report: &mut
 
 /// Ends a live Herdr execution's provider CLI through the terminate service, otherwise the managed
 /// process and tmux; the clear's transition guard is held until then (terminate takes its own).
+/// Unless the host is tmux, the stored Herdr row is ended first; a held host ends nothing else.
 pub(super) async fn end_session(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -72,13 +73,21 @@ pub(super) async fn end_session(
     #[cfg(unix)]
     forbid_idle_resume(shared, provider, channel_id, report);
     let host = crate::services::discord::admin_host_guard::host_decision_of;
-    let herdr = host(shared, provider, channel_id.get()).await.is_herdr();
+    let decision = host(shared, provider, channel_id.get()).await;
+    let herdr = decision.is_herdr();
     #[cfg(unix)]
-    if herdr {
+    if decision.tmux_refusal().is_some() {
         drop(transition.take());
         clear_epoch.wait_idle().await;
-        if end_herdr(shared, session_key, &mut transition, report).await {
-            return;
+        match end_herdr(shared, session_key, &mut transition, report).await {
+            // A channel's own Herdr endpoint with a legacy row ends its managed session as before.
+            HerdrEnd::NoExecution if herdr => {}
+            // Held: a legacy row or none does not confirm tmux either, so nothing is ended.
+            HerdrEnd::NoExecution => {
+                report.end_unconfirmed = true;
+                return;
+            }
+            HerdrEnd::Ended | HerdrEnd::Unconfirmed => return,
         }
     }
     #[cfg(not(unix))]
@@ -163,15 +172,27 @@ fn forbid_idle_resume(
     }
 }
 
-/// Terminates the channel's live Herdr execution; false when none is known to run, so the
-/// caller ends a managed session instead. An execution it cannot read also warns.
+/// What a clear's end found stored for a Herdr execution.
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+enum HerdrEnd {
+    /// The execution was ended or its retired selector handled (its result is reported).
+    Ended,
+    /// A legacy row or none: no Herdr execution is stored (it grants no tmux end by itself).
+    NoExecution,
+    /// The row could not be read; nothing is ended and the clear warns.
+    Unconfirmed,
+}
+
+/// Terminates the channel's stored Herdr execution; an execution it cannot read warns and ends
+/// nothing.
 #[cfg(unix)]
 async fn end_herdr(
     shared: &Arc<SharedData>,
     session_key: Option<&str>,
     transition: &mut Option<OwnedMutexGuard<()>>,
     report: &mut ClearReport,
-) -> bool {
+) -> HerdrEnd {
     use super::super::super::herdr_terminate::{
         OperatorTerminate, TerminationResult, terminate_explicit_herdr,
     };
@@ -182,7 +203,7 @@ async fn end_herdr(
     let (Some(pool), Some(key)) = (shared.pg_pool.as_ref(), session_key) else {
         tracing::warn!("herdr clear has no pool or session key to end its execution with");
         report.end_unconfirmed = true;
-        return false;
+        return HerdrEnd::Unconfirmed;
     };
     let lookup = load_hosted_execution_pg(pool, HostedLookupKey::SessionKey(key)).await;
     let nonce = match lookup {
@@ -197,12 +218,12 @@ async fn end_herdr(
                     note_retired_selector(cleared, report);
                 }
                 report.execution = Some(super::clear_report::ExecutionCleanup::Retired);
-                return true;
+                return HerdrEnd::Ended;
             }
-            (_, HostedRecord::Legacy) => return false,
+            (_, HostedRecord::Legacy) => return HerdrEnd::NoExecution,
             (_, HostedRecord::Unknown(_)) => None,
         },
-        HostedLookup::Missing => return false,
+        HostedLookup::Missing => return HerdrEnd::NoExecution,
         HostedLookup::Unknown(_) | HostedLookup::Conflict(_) => None,
     };
     let Some((session_id, execution_nonce)) = nonce else {
@@ -211,7 +232,7 @@ async fn end_herdr(
             "herdr clear cannot read the execution to end"
         );
         report.end_unconfirmed = true;
-        return false;
+        return HerdrEnd::Unconfirmed;
     };
     // The keyed selector clear skips hosted rows: the retired execution's own is forgotten here,
     // inside the terminate's exclusion, so no successor can start in between.
@@ -242,7 +263,7 @@ async fn end_herdr(
         tracing::warn!(session_key = key, outcome, %detail, "herdr clear could not end its execution");
         report.end_unconfirmed = true;
     }
-    true
+    HerdrEnd::Ended
 }
 
 /// Records a retired execution's selector the exact clear could not forget.

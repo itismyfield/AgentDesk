@@ -219,12 +219,12 @@ Restore ==
 
 \* The owner's /clear of a retired execution, on one of three paths (control.rs:584-585): alone
 \* (herdr_recovery.rs:117), over a launch's start scope (codex/herdr_turn.rs:147 registered; the
-\* clear takes clear_teardown.rs:195) or past a held transition (herdr_recovery.rs:167). First the
+\* clear takes clear_teardown.rs:216) or past a held transition (herdr_recovery.rs:167). First the
 \* idle record of that owner and nonce is cancelled (herdr_recovery.rs:339 -> idle_resume.rs:87):
 \* every path with BanEvery, only the lone one before. A cancel that fails ends the clear unclaimed.
-\* keyed: the clear resolved its session key (control.rs:150). Over a start, clear_teardown.rs:195
+\* keyed: the clear resolved its session key (control.rs:150). Over a start, clear_teardown.rs:216
 \* reads the execution by that key, so an unkeyed clear never cancels there yet still says it reset;
-\* ChannelBan cancels by the channel first (clear_teardown.rs:73 -> idle_resume.rs:99), key or not.
+\* ChannelBan cancels by the channel first (clear_teardown.rs:74 -> idle_resume.rs:99), key or not.
 \* "failed": a clear whose selector write did not land; the user was told it did not reset.
 ClearBan ==
     /\ srv = "up" /\ registered /\ rec = "retired" /\ ~cleared /\ clearing \in {"none", "failed"}

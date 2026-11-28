@@ -142,20 +142,38 @@ pub(in crate::services::discord) async fn herdr_now(
         .is_herdr()
 }
 
-/// A Herdr Codex TUI channel: `/effort` ends its exact execution and resumes the thread.
+/// A Herdr Codex TUI channel of its own boot entry: `/effort` ends its exact execution and
+/// resumes the thread. `herdr` is [`herdr_now`]'s answer.
 pub(in crate::services::discord) fn herdr_codex(
     provider: &ProviderKind,
     channel: serenity::ChannelId,
+    herdr: bool,
 ) -> bool {
     use crate::services::provider_hosting::{
         ProviderSessionDriver, resolve_provider_session_selection_with_channel,
     };
     matches!(provider, ProviderKind::Codex)
-        && crate::config::session_hosts::has_herdr_endpoint(channel.get())
+        && herdr
+        && herdr_codex_thread_refusal(provider, channel, herdr).is_none()
         && crate::services::turn_host::herdr_turn_switched_on_for(provider)
         && resolve_provider_session_selection_with_channel(provider, true, Some(channel.get()))
             .driver
             == ProviderSessionDriver::TuiHosting
+}
+
+const THREAD_CODEX_NOT_YET: &str = "Herdr 부모 채널 아래 스레드의 Codex 세션은 아직 /effort 변경을 적용할 수 없습니다. 지금 세션은 그대로 둡니다.";
+
+/// Why `/effort` is refused on a Codex thread whose Herdr pane runs on its parent's endpoint: an
+/// effort restart would end that pane while its next turn cannot resume it yet.
+pub(in crate::services::discord) fn herdr_codex_thread_refusal(
+    provider: &ProviderKind,
+    channel: serenity::ChannelId,
+    herdr: bool,
+) -> Option<&'static str> {
+    let thread = matches!(provider, ProviderKind::Codex)
+        && herdr
+        && !crate::config::session_hosts::has_herdr_endpoint(channel.get());
+    thread.then_some(THREAD_CODEX_NOT_YET)
 }
 
 fn not_local(provider: &ProviderKind) -> String {
@@ -182,6 +200,8 @@ async fn read_entry_capability<T: Send + 'static>(
     }
     let (model, cwd) = launch_model(shared, provider, channel).await;
     let herdr = herdr_now(shared, provider, channel).await;
+    let codex = herdr_codex(provider, channel, herdr);
+    let thread_codex = herdr_codex_thread_refusal(provider, channel, herdr);
     let provider = provider.clone();
     tokio::task::spawn_blocking(move || {
         let known = matches!(provider, ProviderKind::Claude | ProviderKind::Codex);
@@ -196,8 +216,10 @@ async fn read_entry_capability<T: Send + 'static>(
                 && driver == ProviderSessionDriver::TuiHosting
             {
                 herdr_claude()
-            } else if herdr_codex(&provider, channel) {
+            } else if codex {
                 for_model(&provider, model.as_deref(), channel, cwd.as_deref())
+            } else if let Some(reason) = thread_codex {
+                refused(reason.into())
             } else {
                 refused("Herdr /effort는 live Claude TUI pane에서만 지원합니다.".into())
             }
@@ -254,12 +276,12 @@ pub(in crate::services::discord) async fn update_channel_effort(
     level: &str,
 ) -> io::Result<bool> {
     shared.check_settings_owner(provider, channel).await?;
-    let local = local_tui(
-        provider,
-        channel,
-        herdr_now(shared, provider, channel).await,
-    );
-    if !local && !herdr_codex(provider, channel) {
+    let herdr = herdr_now(shared, provider, channel).await;
+    if let Some(reason) = herdr_codex_thread_refusal(provider, channel, herdr) {
+        return Err(io::Error::other(reason));
+    }
+    let local = local_tui(provider, channel, herdr);
+    if !local && !herdr_codex(provider, channel, herdr) {
         return Err(io::Error::other(not_local(provider)));
     }
     if !EFFORT_LEVELS.contains(&level) {
