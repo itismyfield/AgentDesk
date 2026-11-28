@@ -7,6 +7,15 @@ pub(super) struct Starts {
     pub(super) closing: Option<serde_json::Value>,
 }
 impl Owner {
+    #[cfg(all(test, unix))]
+    pub(crate) fn start_failures_for_test(&self, item: &PendingQueueItem) -> u8 {
+        self.starts
+            .failures
+            .get(&self.start_key(item))
+            .copied()
+            .unwrap_or(0)
+    }
+
     fn start_key(&self, item: &PendingQueueItem) -> String {
         let identity = sources::identity(item);
         let receipt = self
