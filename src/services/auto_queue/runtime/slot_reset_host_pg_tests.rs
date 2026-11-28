@@ -22,10 +22,6 @@ pub(crate) async fn runtime_clears_after_done(
 }
 
 #[cfg(unix)]
-#[path = "slot_reset_archive_fixture_tests.rs"]
-mod archive_fixture;
-
-#[cfg(unix)]
 pub(crate) mod host {
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -37,7 +33,10 @@ pub(crate) mod host {
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use crate::services::auto_queue::runtime::{
         clear_slot_threads_for_slot_pg, reset_slot_thread_bindings_excluding_pg,
-        test_support::{runtime_clear_completion_count, runtime_target_session_keys},
+        test_support::{
+            archive_fixture::ArchiveFixture, runtime_clear_completion_count,
+            runtime_target_session_keys,
+        },
     };
     use crate::services::discord::health::slot_row_host_refusal;
     use crate::services::discord::host_teardown_gate::test_support::{
@@ -401,7 +400,7 @@ pub(crate) mod host {
         let root = tempfile::TempDir::new().unwrap();
         let _root =
             TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
-        let archive = super::archive_fixture::ArchiveFixture::install(root.path()).await;
+        let archive = ArchiveFixture::install(root.path()).await;
         let base = format!("http://{}", archive.address());
         let _archive_base = TestEnvVarGuard::set_value_after_shared_test_env_lock(
             "AGENTDESK_DISCORD_API_BASE_URL",

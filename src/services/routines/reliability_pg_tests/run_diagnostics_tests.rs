@@ -197,6 +197,7 @@ async fn i8117_failed_paused_notices_are_safe_and_nonturn_pg() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn i8117_due_manual_and_poll_store_without_diagnostic_wire_pg() {
+    crate::services::discord::outbound::install_engine_ports();
     use std::sync::atomic::{AtomicUsize, Ordering};
     let root = tempfile::tempdir().unwrap();
     let _root = crate::config::set_agentdesk_root_for_test(root.path());
