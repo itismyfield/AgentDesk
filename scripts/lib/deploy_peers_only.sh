@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 
-_deploy_cluster_role() {
+_deploy_cluster_role() (
     local config_path
+    # Scope release environment overrides to role detection.
+    if [ -f "$REL_LAUNCHD_ENV_FILE" ]; then
+        _apply_launchd_env_file_to_shell "$REL_LAUNCHD_ENV_FILE" || return 1
+    fi
     config_path="$(_release_config_path)" && [ -n "$config_path" ] || return 1
     if [ ! -e "$config_path" ] && [ ! -L "$config_path" ]; then
+        [ -z "${AGENTDESK_CONFIG:-}" ] || return 1
         echo standalone
         return 0
     fi
@@ -38,7 +43,7 @@ except Exception:
     # Configuration can contain credentials. Emit only the derived role.
     sys.exit(1)
 PY
-}
+)
 
 _require_deploy_source_builder() {
     [ "${AGENTDESK_DEPLOY_PEER_BUILD_FALLBACK:-0}" != 1 ] || return 0
