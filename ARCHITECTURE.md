@@ -3850,6 +3850,7 @@ src/
 │   │   │   ├── orphan_sweep.rs
 │   │   │   ├── previous_v3_reader_tests.rs
 │   │   │   ├── queue_repair.rs
+│   │   │   ├── reaction_hook_test_support.rs
 │   │   │   ├── reaction_set.rs
 │   │   │   ├── resolution.rs
 │   │   │   ├── store.rs
@@ -3920,6 +3921,8 @@ src/
 │   │   ├── dispatch_policy.rs
 │   │   ├── dl_herdr_terminate_test_host.rs
 │   │   ├── dl_herdr_terminate_unix_test_host.rs
+│   │   ├── dl_misc_test_host.rs
+│   │   ├── dl_misc_unix_test_host.rs
 │   │   ├── dl_recovery_engine_test_host.rs
 │   │   ├── dl_recovery_engine_unix_test_host.rs
 │   │   ├── dl_tmux_watcher_test_host.rs
@@ -3946,6 +3949,7 @@ src/
 │   │   ├── herdr_terminate_route_tests.rs
 │   │   ├── herdr_terminate_tests.rs
 │   │   ├── host_defer_gate.rs
+│   │   ├── host_defer_gate_fixture_test_support.rs
 │   │   ├── host_defer_gate_tests.rs
 │   │   ├── host_key_derivation.rs
 │   │   ├── host_key_derivation_tests.rs
