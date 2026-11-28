@@ -28,6 +28,7 @@ pub(super) use response_delivery::stream_body_ownership_peek;
 pub(in crate::services::discord) use response_delivery::{
     STREAM_TEST_EVENTS, record_stream_test_event,
 };
+pub(in crate::services::discord) mod retry_prompt_store;
 mod retry_state;
 mod runtime_handoff_loop;
 mod single_message_footer;

@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::turn_orchestrator::retry_prompt_codec::Preludes;
 
 #[test]
 fn six_requeues_and_restarts_render_one_wip_with_exact_raw_bytes() {
@@ -15,7 +16,7 @@ fn six_requeues_and_restarts_render_one_wip_with_exact_raw_bytes() {
     let mut reply = None;
     for attempt in 0..7 {
         context.selected.wip = Some(warning.into());
-        reply = context.render();
+        reply = render(&context);
         if attempt < 6 {
             context = RetryPromptContext::restore(context.requeue());
         }
@@ -47,10 +48,10 @@ fn same_bytes_keep_raw_and_legacy_provenance_across_restart() {
         assert_eq!(context.raw.as_deref(), Some(bytes));
         if context.may_select() {
             context.selected.wip = Some("new warning".into());
-            assert_ne!(context.render().as_deref(), Some(bytes));
+            assert_ne!(render(&context).as_deref(), Some(bytes));
         } else {
             context.selected.wip = Some("must not decorate".into());
-            assert_eq!(context.render().as_deref(), Some(bytes));
+            assert_eq!(render(&context).as_deref(), Some(bytes));
         }
     }
 }
@@ -86,15 +87,14 @@ fn empty_raw_wire_keeps_plain_text_eligibility_but_actual_context_does_not() {
             "RECEIPT_METADATA_MUST_NOT_CHANGE_PAYLOAD_ELIGIBILITY"
         );
     }
+    let mut selected = RetryPromptContext::raw(None);
+    selected.selected = Preludes {
+        wip: Some("selected".into()),
+        ..Preludes::default()
+    };
     for context in [
         RetryPromptContext::raw(Some("actual reply".into())),
-        RetryPromptContext {
-            selected: Preludes {
-                wip: Some("selected".into()),
-                ..Preludes::default()
-            },
-            ..RetryPromptContext::raw(None)
-        },
+        selected,
         RetryPromptContext::restore(Some("legacy rendered".into())),
     ] {
         item.reply_context = context.encode();
@@ -116,12 +116,10 @@ fn fresh_user_wire_like_bytes_are_preserved_inside_raw_envelope() {
     let raw = RetryPromptContext::raw(Some(fake.clone()));
     let restored = RetryPromptContext::restore(raw.encode());
     assert_eq!(restored.raw.as_deref(), Some(fake.as_str()));
-    assert_eq!(restored.render().as_deref(), Some(fake.as_str()));
+    assert_eq!(render(&restored).as_deref(), Some(fake.as_str()));
     let unknown = "\u{1e}agentdesk.retry-prompt.v2\n{}";
     assert_eq!(
-        RetryPromptContext::restore(Some(unknown.into()))
-            .render()
-            .as_deref(),
+        render(&RetryPromptContext::restore(Some(unknown.into()))).as_deref(),
         Some(unknown)
     );
 }

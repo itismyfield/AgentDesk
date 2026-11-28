@@ -53,6 +53,7 @@ mod remint_fence;
 mod reply_results;
 #[cfg(unix)]
 mod retired_exclusion;
+pub(crate) mod retry_prompt_codec;
 mod source_generation;
 mod turn_finished_signal;
 pub(crate) mod witnessed_release;

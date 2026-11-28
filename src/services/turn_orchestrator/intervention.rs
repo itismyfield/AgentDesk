@@ -5,6 +5,7 @@ use poise::serenity_prelude::{MessageId, UserId};
 
 use crate::services::cluster::attachment_transfer::uploads::PendingUploads;
 
+use super::retry_prompt_codec::{Preludes, RetryPromptContext};
 use super::{QueuedRoute, SourceMessageQueuedGeneration};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,6 +52,12 @@ thread_local! {
 }
 
 impl Intervention {
+    pub(crate) fn retry_prompt_context_is_empty(&self) -> bool {
+        self.reply_context.is_none()
+            || RetryPromptContext::decode(self.reply_context.as_deref())
+                .is_some_and(|ctx| ctx.raw.is_none() && ctx.selected == Preludes::default())
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn source_clock_sample_hook_for_tests(hook: impl FnOnce() + 'static) {
         SOURCE_CLOCK_SAMPLE_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));

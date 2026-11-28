@@ -55,8 +55,7 @@ fn no_submit_notice_and_foreign_user_record_do_not_generate_next_wip() {
 #[test]
 fn native_receipt_requires_current_offset_complete_line_and_exact_folded_bytes() {
     let (_root, mut state) = fixture("[User: Alice (ID: 77)]\nbody\r\n");
-    let prompt = state
-        .retry_prompt_snapshot()
+    let prompt = RetryPromptContext::decode(state.followup_reply_context.as_deref())
         .unwrap()
         .expected_prompt
         .unwrap();

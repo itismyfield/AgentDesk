@@ -3665,6 +3665,7 @@ src/
 │   │   │   ├── replay_policy.rs
 │   │   │   ├── response_delivery.rs
 │   │   │   ├── resume_pin_tests.rs
+│   │   │   ├── retry_prompt_store.rs
 │   │   │   ├── retry_state.rs
 │   │   │   ├── runtime_handoff_loop.rs
 │   │   │   ├── session_row_writer.rs
@@ -5513,6 +5514,7 @@ src/
 │   │   ├── restart_operation.rs
 │   │   ├── restart_operation_tests.rs
 │   │   ├── retired_exclusion.rs
+│   │   ├── retry_prompt_codec.rs
 │   │   ├── source_generation.rs
 │   │   ├── source_generation_origin_tests.rs
 │   │   ├── test_support_tests.rs

@@ -597,8 +597,8 @@ main `984d802d9f`에서 아래 4개 시험 파일이 삭제됐다. 이 파일의
 | `src/services/discord/router/message_handler/intake_turn/stale_dispatch_guard.rs:66` | `abort_terminal_dispatch_at_turn_start` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:611` | `wake` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/router/message_handler/tui_followup.rs:701` | `defer_promoted_dispatch_if_hosted_tui_busy` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/router/turn_start.rs:637` | `release_mailbox_after_placeholder_post_failure` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/router/turn_start.rs:663` | `release_mailbox_after_hosted_tui_busy_pre_submit` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/router/turn_start.rs:629` | `release_mailbox_after_placeholder_post_failure` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/router/turn_start.rs:655` | `release_mailbox_after_hosted_tui_busy_pre_submit` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/runtime_bootstrap/recovery_flush.rs:95` | `run_bot_spawn_recovery_and_flush_restart_reports` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/runtime_bootstrap/recovery_flush.rs:136` | `run_bot_spawn_recovery_and_flush_restart_reports` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/session_transition.rs:153` | `wake_installed_owner` | Kick(wake/event/queue admission, 같은 head 재검증) |
