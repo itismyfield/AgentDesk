@@ -320,5 +320,8 @@ The isolated `LegacyLiveReplacement` entry retains A's pane in the total. The sh
 | `MutAttachEarlyDispositionReturn` | Returning early drops the settled answer and breaks `UnknownAttachAnsweredOnce`. |
 | `MutAttachOpaque` | The opaque attach refusal breaks `OwnerStartBudgetPreserved` and `FirstInputResolves`. |
 | `MutAttachMissingUnsent` | Dropping the requeued original's no-key proof breaks `FirstInputResolves`. |
+| `S2BootReservedResume` | A reboot releases the durable Reserved head with its nonce. Missing retirement can precede or follow queue restore. The same original takes the fresh successor. |
+| `S2NonceWaitResume` | A Pending nonce wait precedes SessionStart. The read after retirement releases Unplaced, Unstarted, Unproven, and OwnLaunchTimeout through the fresh successor. |
+| `MutBootForgetsUnsent`, `MutOnlyAttachWaitResumes` | Losing the restored proof or accepting only Attach waits leads to Pending handoff and breaks `KnownUnsentResumesFresh` and `FirstInputResolves`. |
 
 The physical Missing witness and CAS stay in the placed resolver. The owner holds the exact ticket, original and retired nonce.

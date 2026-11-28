@@ -77,9 +77,7 @@ impl Owner {
             return Err("NotSent(\"owner_disposition_unavailable\")".into());
         }
         let waited = self.snapshot.retry.wait.as_ref().is_some_and(|wait| {
-            !wait.armed
-                && holds(wait, front)
-                && matches!(&wait.cause, RetryCause::PendingAttach { nonce: retired } if retired == nonce)
+            !wait.armed && holds(wait, front) && wait.cause.nonce() == Some(nonce)
         });
         Ok(waited || self.snapshot.has_unsent_execution(front, nonce))
     }

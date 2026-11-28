@@ -103,14 +103,18 @@ pub(super) fn restore(raw: &str, namespace: &str) -> Result<SnapshotV2, String> 
             return Err("active original differs from queue head".into());
         }
         let head = snapshot.head_injection.take().ok_or("head disappeared")?;
+        snapshot.remember_unsent_execution(&head);
         ungroup(&mut snapshot, &head)?;
     }
     snapshot.namespace = Some(namespace.into());
     validate_source_bindings(&snapshot)?;
     // Released unarmed, every member still holds the queued bind its reserve kept.
-    snapshot
+    if let Some(head) = snapshot
         .head_injection
-        .take_if(|head| head.phase == HeadPhase::Reserved);
+        .take_if(|head| head.phase == HeadPhase::Reserved)
+    {
+        snapshot.remember_unsent_execution(&head);
+    }
     Ok(snapshot)
 }
 

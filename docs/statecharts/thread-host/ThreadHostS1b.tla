@@ -130,8 +130,11 @@ SyncOutcome == CASE cache = "Herdr" -> "HerdrPath"
 
 \* ---- S2 placement section: definitions used by Init ----
 ReplacedEntries == {"LegacyReplaced", "LegacyLiveReplacement", "UserDefaultReplaced"}
+NonceWaitEntries == {"LostWaitUnplaced", "LostWaitUnstarted", "LostWaitUnproven", "LostWaitOwnLaunchTimeout"}
+ResumeEntries == {"LostReservedAtBoot"} \union NonceWaitEntries
 AttachEntries == {"LostBeforeKey", "LostBeforeKeyRetiredFirst", "LostAfterReserve", "LostBeforeKeyUnread"}
-ReserveLoss == entry = "LostAfterReserve" /\ gen = 1
+                 \union ResumeEntries
+ReserveLoss == entry \in {"LostAfterReserve", "LostReservedAtBoot"} /\ gen = 1
 S2Entries == {"NewThread", "FreshAfterKill", "ResumeTmux", "TmuxParentThread",
               "LiveTmuxNoSel", "SelUnknown", "RetiredNative",
               "RetryNew", "DispatchNew", "StaleBound", "RestartVacant",
@@ -310,7 +313,8 @@ S2Like == Mode \in {"S2", "MutS2NoPermit", "MutS2NoBootResolve", "MutS2NoRelease
                     "MutW3NoPlacedResidue", "MutW3ResidueByAbsence", "MutW3NoPristine",
                     "MutW3ArchiveAfterRelease", "MutW4PendingEarlyReturn", "MutW4MissingNoCas",
                     "MutW4UnreadAsMissing", "MutW4MissingResubmits", "MutAttachOpaque",
-                    "MutAttachMissingUnsent", "MutAttachEarlyDispositionReturn"}
+                    "MutAttachMissingUnsent", "MutAttachEarlyDispositionReturn",
+                    "MutBootForgetsUnsent", "MutOnlyAttachWaitResumes"}
 Selector == entry = "ResumeTmux"
 HerdrExec == {"Pending", "Placed", "Bound"}
 FreshStart == {"None", "LegacyDead", "Retired", "Gone"}
@@ -349,7 +353,8 @@ Released == {"LegacyDead", "Retired", "Gone"}
 \* owner's WRITER_HELD hold (provider_dispatch/owner_input.rs:192-224) in every mode.
 Launch == /\ UNCHANGED vars /\ UNCHANGED w3vars /\ UNCHANGED w2vars /\ entry \in S2Entries /\ inq = "Queued"
           /\ (exec \in FreshStart \/ LiveTmuxSeenDead) /\ ~rst
-          /\ (entry \in AttachEntries /\ evidenced => attachWait = "Released")
+          /\ (entry \in AttachEntries /\ evidenced =>
+                attachWait = IF entry \in ResumeEntries THEN "ForceFresh" ELSE "Released")
           /\ ~(LaunchHost = "Herdr" /\ ~oready /\ ~late)
           /\ ~(LaunchHost = "Herdr" /\ ~oready /\ late /\ SuccessorWithoutPermit)
           /\ IF LaunchHost = "Tmux"
@@ -568,6 +573,7 @@ ResidueClose == /\ UNCHANGED vars /\ S2Like /\ Mode # "MutW3NoPlacedResidue"
 RecordAttachEvidence ==
     /\ entry \in AttachEntries \union {"LostAfterKey"}
     /\ exec = "Placed" /\ ran /\ ~gone /\ ~evidenced
+    /\ (entry \in NonceWaitEntries => attachWait = "NonceWaiting")
     /\ evidenced' = TRUE
     /\ UNCHANGED <<vars, s2vars, w2vars, w3vars, gone, gen, goneGen, lostSucc, attachWait, settledAnswers>>
 \* The recorded pane goes away by itself, once: before any key (LostCommand) or after the first key
@@ -582,9 +588,27 @@ PaneVanishes == /\ UNCHANGED vars /\ UNCHANGED w2vars /\ UNCHANGED w3vars
                 /\ UNCHANGED <<exec, made, tmuxs, inq, submits, oready, late, epoch, restarts2, idle,
                                slot, judged, unsent, receipt, gen, lostSucc, evidenced, attachWait, settledAnswers>>
 EvidencedPaneVanishes == entry \in AttachEntries /\ PaneVanishes
+\* The Pending refusal precedes a late SessionStart. The owner reads that wait after Missing.
+RecordNonceWait ==
+    /\ entry \in NonceWaitEntries /\ exec = "Placed" /\ gen = 1
+    /\ inq = "Queued" /\ ~reserved /\ ~hkey /\ ~evidenced /\ attachWait = "None"
+    /\ attachWait' = "NonceWaiting"
+    /\ UNCHANGED <<vars, s2vars, w2vars, w3vars, gone, gen, goneGen, lostSucc, evidenced, settledAnswers>>
+RestartReservedAtBoot ==
+    /\ entry = "LostReservedAtBoot" /\ gen = 1 /\ gone /\ reserved /\ ~hkey
+    /\ Restart2
+\* Re-adopting the queue releases the Reserved attempt and remembers its nonce before any key.
+RestoreReservedAtBoot ==
+    /\ entry = "LostReservedAtBoot" /\ epoch # restarts2 /\ gen = 1
+    /\ exec \in {"Placed", "Retired"} /\ gone /\ evidenced
+    /\ reserved /\ ~hkey /\ inq = "Queued" /\ attachWait = "None"
+    /\ reserved' = FALSE
+    /\ attachWait' = IF Mode = "MutBootForgetsUnsent" THEN "UnsentWithoutProof" ELSE "ProvenUnsent"
+    /\ UNCHANGED <<vars, s2vars, w3vars, hkey, boot, other, v2, rst,
+                   gone, gen, goneGen, lostSucc, evidenced, settledAnswers>>
 \* An attach refusal records the unattempted claim, even when recovery retired it first.
 WaitForAttach ==
-    /\ entry \in AttachEntries /\ entry # "LostAfterReserve"
+    /\ entry \in AttachEntries \ ({"LostAfterReserve"} \union ResumeEntries)
     /\ exec \in {"Placed", "Retired"} /\ evidenced /\ gone /\ attachWait = "None"
     /\ (entry \in {"LostBeforeKeyRetiredFirst", "LostBeforeKeyUnread"} => exec = "Retired")
     /\ inq = "Queued" /\ ~reserved /\ ~hkey
@@ -594,7 +618,7 @@ WaitForAttach ==
     /\ UNCHANGED <<vars, s2vars, w2vars, w3vars, gone, gen, goneGen, lostSucc, evidenced>>
 \* Only a no-key settlement of the reserved original enters KnownNotSent.
 SettleAttachUnsent ==
-    /\ ReserveLoss /\ exec \in {"Placed", "Retired"} /\ gone /\ evidenced
+    /\ entry = "LostAfterReserve" /\ ReserveLoss /\ exec \in {"Placed", "Retired"} /\ gone /\ evidenced
     /\ reserved /\ ~hkey /\ inq = "Queued" /\ attachWait = "None"
     /\ reserved' = FALSE /\ inq' = "Retained" /\ attachWait' = "KnownNotSent"
     /\ UNCHANGED <<vars, w3vars, hkey, boot, other, v2, rst,
@@ -627,8 +651,14 @@ PlacedMissingRetire ==
     /\ UNCHANGED <<boot, other, v2, rst, closed, succ, archived, hitLive,
                    gone, gen, goneGen, evidenced, attachWait, settledAnswers>>
 ReleaseAttachWait ==
-    /\ exec = "Retired" /\ evidenced /\ attachWait \in {"Waiting", "ProvenUnsent"} /\ goneGen = gen
-    /\ attachWait' = IF Mode = "MutAttachOpaque" /\ attachWait = "Waiting" THEN "Spent" ELSE "Released"
+    /\ exec = "Retired" /\ evidenced /\ goneGen = gen
+    /\ attachWait \in {"Waiting", "ProvenUnsent", "NonceWaiting", "UnsentWithoutProof"}
+    /\ attachWait' = CASE attachWait = "UnsentWithoutProof"
+                         \/ (attachWait = "NonceWaiting" /\ Mode = "MutOnlyAttachWaitResumes")
+                         -> "PendingHandoffFailure"
+                      [] entry \in ResumeEntries -> "ForceFresh"
+                      [] Mode = "MutAttachOpaque" /\ attachWait = "Waiting" -> "Spent"
+                      [] OTHER -> "Released"
     /\ UNCHANGED <<vars, s2vars, w2vars, w3vars, gone, gen, goneGen, lostSucc, evidenced, settledAnswers>>
 \* w3 (P1-2): after the slot map moved on, the same thread ID still takes work: a dispatch that
 \* reuses the card's active_thread_id (intake_turn/adk_thread.rs:154-205, unarchived by
@@ -649,11 +679,13 @@ ArchiveThread == /\ UNCHANGED vars /\ UNCHANGED w2vars /\ entry = "SlotSuccessor
 
 NextS2 == Launch \/ OrdinaryReady \/ GateRefused \/ ReadRecovers \/ ReadRefused \/ Create
           \/ Resolve \/ Bind \/ Rejudge \/ Reserve \/ SubmitHerdr \/ SubmitTmux \/ Settle
-          \/ Restart2 \/ Idle \/ ReleaseIdle \/ Gc \/ SlotReset \/ DispatchReset \/ BootNoGate
+          \/ (entry # "LostReservedAtBoot" /\ Restart2) \/ RestartReservedAtBoot
+          \/ Idle \/ ReleaseIdle \/ Gc \/ SlotReset \/ DispatchReset \/ BootNoGate
           \/ BootRetireDead \/ RelayRetire \/ OtherServe \/ CmdRestartVacant
           \/ ResidueClose \/ PaneVanishes \/ PlacedMissingRetire \/ Successor \/ ArchiveThread
           \/ RecordAttachEvidence \/ WaitForAttach \/ ReleaseAttachWait
           \/ SettleAttachUnsent \/ RequeueAttachUnsent
+          \/ RecordNonceWait \/ RestoreReservedAtBoot
 SpecS2 == Init /\ [][NextS2]_allvars
           /\ WF_allvars(Launch) /\ WF_allvars(OrdinaryReady) /\ WF_allvars(ReadRecovers)
           /\ WF_allvars(Create) /\ WF_allvars(Resolve) /\ WF_allvars(Bind)
@@ -666,6 +698,7 @@ SpecS2 == Init /\ [][NextS2]_allvars
           /\ WF_allvars(RecordAttachEvidence) /\ WF_allvars(EvidencedPaneVanishes)
           /\ WF_allvars(WaitForAttach) /\ WF_allvars(ReleaseAttachWait)
           /\ WF_allvars(SettleAttachUnsent) /\ WF_allvars(RequeueAttachUnsent)
+          /\ WF_allvars(RecordNonceWait) /\ WF_allvars(RestartReservedAtBoot) /\ WF_allvars(RestoreReservedAtBoot)
 
 \* A new execution under a Herdr parent is Herdr: no tmux session, after restart, thread_gc and
 \* slot reset included (every relaunch goes through Launch).
@@ -709,4 +742,5 @@ UnknownAttachHeld == entry = "LostBeforeKeyUnread" => gen <= 1 /\ submits = 0
 UnknownAttachAnsweredOnce == entry = "LostBeforeKeyUnread" =>
     settledAnswers = (IF attachWait = "Held" THEN 1 ELSE 0)
 UnknownAttachRetires == <>(exec = "Retired" /\ attachWait = "Held")
+KnownUnsentResumesFresh == entry \in ResumeEntries => attachWait # "PendingHandoffFailure"
 =============================================================================
