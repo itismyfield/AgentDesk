@@ -130,7 +130,7 @@ async fn registered_runtime(
     let registry = Arc::new(HealthRegistry::new());
     Arc::get_mut(&mut shared)
         .expect("an unshared runtime")
-        .health_registry = Arc::downgrade(&registry);
+        .health_registry = (&registry).into();
     let name = provider.as_str().to_string();
     registry.register(name, shared.clone()).await;
     (shared, registry)

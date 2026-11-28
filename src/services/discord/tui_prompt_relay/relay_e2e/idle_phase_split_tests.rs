@@ -69,7 +69,7 @@ fn late_claude_source_posts_with_body_disabled_while_legacy_still_relays() {
     run_with_pending(
         async |mut f| {
             let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
-            Arc::get_mut(&mut f.pane.shared).unwrap().health_registry = Arc::downgrade(&registry);
+            Arc::get_mut(&mut f.pane.shared).unwrap().health_registry = (&registry).into();
             assert!(!f.pane.path.exists());
             let _confirmed = TestConfirmation::new(f.pane.channel.get());
             let _selected = crate::services::tui_o::cutover::test_override::force_candidates(&[(

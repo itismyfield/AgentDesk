@@ -344,7 +344,7 @@ pub(in crate::services::discord) async fn handle_event(
             crate::logging::intake_stage::mark(new_message.id.get(), "intake", None);
 
             let (announce_resolution, notify_resolution) =
-                if let Some(registry) = data.shared.health_registry() {
+                if let Some(registry) = health::registry_for(&data.shared) {
                     (
                         registry
                             .utility_bot_user_id_resolution(

@@ -41,7 +41,7 @@ impl InstallFixture {
         let channel = ChannelId::new(channel);
         let registry = Arc::new(HealthRegistry::new());
         let mut shared = crate::services::discord::make_shared_data_for_tests();
-        Arc::get_mut(&mut shared).unwrap().health_registry = Arc::downgrade(&registry);
+        Arc::get_mut(&mut shared).unwrap().health_registry = (&registry).into();
         Arc::get_mut(&mut shared).unwrap().provider = provider.clone();
         Arc::get_mut(&mut shared).unwrap().pg_pool = pool;
         {

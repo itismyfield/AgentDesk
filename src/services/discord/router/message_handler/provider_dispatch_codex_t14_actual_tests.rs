@@ -137,7 +137,7 @@ async fn scenario(server: &mut RealServer, home: &Path) {
     fresh.provider = ProviderKind::Codex;
     fresh.token_hash = TOKEN.into();
     fresh.api_port = 9;
-    fresh.health_registry = Arc::downgrade(&health);
+    fresh.health_registry = (&health).into();
     let sample = discord_mock::user_message(1, "owner identity");
     {
         let mut settings = shared.settings.write().await;

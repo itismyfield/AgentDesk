@@ -7,9 +7,9 @@ use poise::serenity_prelude::ChannelId;
 use sqlx::PgPool;
 
 use super::SharedData;
-use super::health::HealthRegistry;
 use super::host_key_derivation::{derive_hosted_lookup, merge_lookups};
 use super::inflight::{KeyedTeardown, keyed_teardown, teardown_for_lookup};
+use super::shared_state::health_ports::ChannelRuntimeLookup;
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedLookup, HostedLookupKey, load_hosted_execution_pg,
 };
@@ -19,7 +19,7 @@ use crate::services::session_host::HostLiveness;
 
 /// The gate for `tmux_name` under `provider`'s runtime on `channel_id`, read as stored.
 pub(crate) async fn channel_teardown(
-    registry: &HealthRegistry,
+    registry: &(impl ChannelRuntimeLookup + ?Sized),
     provider: &ProviderKind,
     channel_id: ChannelId,
     tmux_name: &str,
@@ -121,7 +121,7 @@ pub(crate) async fn runtime_target_holds(
 /// The force-kill gate on `channel_id`'s runtime, with the runtime it admits: that runtime holds
 /// only `tmux_name`, and the caller's row, its key and the channel's row all read legacy.
 pub(crate) async fn runtime_teardown(
-    registry: &HealthRegistry,
+    registry: &(impl ChannelRuntimeLookup + ?Sized),
     provider: &ProviderKind,
     channel_id: ChannelId,
     tmux_name: &str,
@@ -253,7 +253,7 @@ pub(crate) async fn row_host_refusal(
 /// The runtime the nameless gate admits for a teardown holding no tmux name; `None` keeps it,
 /// as does a runtime that holds a session name after all.
 pub(crate) async fn nameless_runtime_teardown(
-    registry: &HealthRegistry,
+    registry: &(impl ChannelRuntimeLookup + ?Sized),
     provider: &ProviderKind,
     channel_id: ChannelId,
     caller: &str,
@@ -276,7 +276,7 @@ pub(crate) async fn nameless_runtime_teardown(
 /// A nameless force-kill target's tmux name found as the cancel lookup finds it, minus its
 /// inflight backfill write (the flag); an unreadable inflight row errs so the caller keeps.
 pub(crate) async fn guard_tmux_name(
-    registry: &HealthRegistry,
+    registry: &(impl ChannelRuntimeLookup + ?Sized),
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> Result<(Option<String>, bool), String> {

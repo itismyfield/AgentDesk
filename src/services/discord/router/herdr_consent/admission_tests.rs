@@ -1104,7 +1104,7 @@ async fn actual_worker_policy_flip_after_preaccept_keeps_exact_before_effects_ro
     f.shared =
         crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
     let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
-    Arc::get_mut(&mut f.shared).unwrap().health_registry = Arc::downgrade(&registry);
+    Arc::get_mut(&mut f.shared).unwrap().health_registry = (&registry).into();
     f.shared
         .http
         .cached_bot_token
@@ -1511,7 +1511,7 @@ async fn actual_worker_assessment_failure_rearms_same_row_then_holds_once_pg() {
     f.shared =
         crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
     let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
-    Arc::get_mut(&mut f.shared).unwrap().health_registry = Arc::downgrade(&registry);
+    Arc::get_mut(&mut f.shared).unwrap().health_registry = (&registry).into();
     f.shared
         .http
         .cached_bot_token
@@ -1652,7 +1652,7 @@ async fn actual_worker_persistent_consent_error_rearms_once_then_preserves_spawn
     f.shared =
         crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
     let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
-    Arc::get_mut(&mut f.shared).unwrap().health_registry = Arc::downgrade(&registry);
+    Arc::get_mut(&mut f.shared).unwrap().health_registry = (&registry).into();
     f.shared
         .http
         .cached_bot_token

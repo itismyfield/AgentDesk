@@ -304,7 +304,7 @@ impl Fixture {
             let caller = Arc::get_mut(&mut rig.shared).unwrap();
             caller.provider = provider.clone();
             caller.token_hash = "discord_a6d1408a5a1d12ca".into();
-            caller.health_registry = Arc::downgrade(&registry);
+            caller.health_registry = (&registry).into();
         }
         let workspace = root.join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
@@ -377,7 +377,7 @@ impl Fixture {
             let mutable = Arc::get_mut(&mut runtime).unwrap();
             mutable.provider = ProviderKind::Codex;
             mutable.token_hash = token.into();
-            mutable.health_registry = Arc::downgrade(&registry);
+            mutable.health_registry = (&registry).into();
             runtime.settings.write().await.provider = ProviderKind::Codex;
             registry.register("codex".into(), runtime.clone()).await;
             foreign.push(runtime);
@@ -569,7 +569,7 @@ async fn a2_actual_reading_rejects_owner_aba_and_new_runtime_pg() {
     let mutable = Arc::get_mut(&mut replacement).unwrap();
     mutable.provider = ProviderKind::Codex;
     mutable.token_hash = fixture.foreign[1].token_hash.clone();
-    mutable.health_registry = Arc::downgrade(&fixture.registry);
+    mutable.health_registry = (&fixture.registry).into();
     assert_eq!(
         crate::services::discord::tui_prompt_relay::run_codex_rehydrate_pass_for_tests(
             &replacement,

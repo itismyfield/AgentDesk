@@ -76,7 +76,7 @@ pub(super) async fn terminate(
     {
         return refused(StatusCode::BAD_REQUEST, "bad_request", "empty field");
     }
-    let (Some(registry), Some(pool)) = (state.health_registry.as_ref(), state.pg_pool.clone())
+    let (Some(registry), Some(pool)) = (state.health_registry.as_deref(), state.pg_pool.clone())
     else {
         return refused(
             StatusCode::SERVICE_UNAVAILABLE,

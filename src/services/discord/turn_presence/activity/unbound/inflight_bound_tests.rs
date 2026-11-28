@@ -69,7 +69,7 @@ impl Relaunched {
             None
         } else {
             let registry = Arc::new(HealthRegistry::new());
-            Arc::get_mut(&mut rig.shared).unwrap().health_registry = Arc::downgrade(&registry);
+            Arc::get_mut(&mut rig.shared).unwrap().health_registry = (&registry).into();
             registry.register("claude".into(), rig.shared.clone()).await;
             let mut runtimes = Vec::new();
             for owner in claims {
@@ -79,7 +79,7 @@ impl Relaunched {
                 let mutable = Arc::get_mut(&mut runtime).unwrap();
                 mutable.provider = provider.clone();
                 mutable.token_hash = format!("discord_{owner:016x}");
-                mutable.health_registry = Arc::downgrade(&registry);
+                mutable.health_registry = (&registry).into();
                 registry.register("claude".into(), runtime.clone()).await;
                 runtime
                     .tmux_watchers

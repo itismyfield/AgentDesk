@@ -1,12 +1,13 @@
 //! The Discord bot's shared runtime state and its test fixtures.
 
+use super::shared_state::health_ports::{RuntimeHealth, WeakRuntimeHealth};
 use super::{
     Arc, CHANNEL_ROSTER_MAX_USERS, CatchUpRetryState, ChannelId, ChannelMailboxHandle,
     DiscordBotSettings, DispatchRoutingState, EngineRuntime, Ordering, PlaceholderState,
     QueuedPlaceholderState, RestartLifecycle, RuntimeHttpCache, SessionOverrideState,
     TmuxRelayCoord, TmuxWatcherRegistry, UserId, UserRecord, answer_flush_barrier,
-    delivery_lease_cell, health, inflight, readopted_mailbox_ledger, shared_state,
-    turn_completion_events, turn_finalizer, turn_view_reconciler,
+    delivery_lease_cell, inflight, readopted_mailbox_ledger, shared_state, turn_completion_events,
+    turn_finalizer, turn_view_reconciler,
 };
 #[cfg(test)]
 use super::{
@@ -109,7 +110,7 @@ pub(crate) struct SharedData {
     pub(in crate::services) token_hash: String,
     /// Weak reference to the process-wide health registry so turn handlers can
     /// reach dedicated Discord bot HTTP clients without creating an Arc cycle.
-    pub(in crate::services) health_registry: std::sync::Weak<health::HealthRegistry>,
+    pub(in crate::services) health_registry: WeakRuntimeHealth,
     /// Set of registered slash command names (populated at framework setup).
     /// Used by the router to distinguish known slash commands from arbitrary
     /// `/`-prefixed user text that should fall through to the AI provider.
@@ -176,7 +177,7 @@ impl SharedData {
         self.mailboxes.handle(channel_id)
     }
 
-    pub(super) fn health_registry(&self) -> Option<Arc<health::HealthRegistry>> {
+    pub(super) fn health_registry(&self) -> Option<Arc<dyn RuntimeHealth>> {
         self.health_registry.upgrade()
     }
 
@@ -201,15 +202,6 @@ impl SharedData {
                 )
             })
             .collect()
-    }
-
-    /// #1031: borrow the same `health_registry()` Arc the rest of the discord
-    /// runtime uses. Exposed under a distinct name so the idle detector does
-    /// not depend on the un-public method.
-    pub(in crate::services) fn health_registry_for_idle_detector(
-        &self,
-    ) -> Option<Arc<health::HealthRegistry>> {
-        self.health_registry()
     }
 
     /// Fetch the per-channel relay coordination state, creating a fresh one
@@ -462,7 +454,7 @@ pub(in crate::services) fn make_shared_data_for_tests_with_barrier(
             cached_bot_token: tokio::sync::OnceCell::new(),
         },
         token_hash: "test-token-hash".to_string(),
-        health_registry: std::sync::Weak::new(),
+        health_registry: WeakRuntimeHealth::default(),
         known_slash_commands: tokio::sync::OnceCell::new(),
         inflight_signals: tokio::sync::broadcast::channel(256).0,
         turn_completion_events: turn_completion_events::turn_completion_event_bus(),

@@ -126,7 +126,7 @@ fn child(phase: &str) {
             let mut hold = rig.hold_next_write();
             let (registry, pool, request) = (registry.clone(), pool.clone(), request());
             tokio::spawn(async move {
-                terminate_registered_herdr(&registry, pool, request, "operator test".into()).await
+                terminate_registered_herdr(registry.as_ref(), pool, request, "operator test".into()).await
             });
             tokio::time::timeout(Duration::from_secs(10), &mut hold.reached)
                 .await
@@ -148,7 +148,7 @@ fn child(phase: &str) {
         live.runtime.herdr_terminate_enabled = Some(true);
         crate::config_live_reload::install(live);
         let _gone = rig.hide_panes();
-        let result = terminate_registered_herdr(&registry, pool.clone(), request(), "rerun".into());
+        let result = terminate_registered_herdr(registry.as_ref(), pool.clone(), request(), "rerun".into());
         assert_eq!(result.await, TerminationResult::Retired);
         assert_eq!(rig.writes(), Vec::new(), "an ended pane is never closed again");
         println!("R11_OBSERVED inflight={:?}", test_turn::inflight(channel));

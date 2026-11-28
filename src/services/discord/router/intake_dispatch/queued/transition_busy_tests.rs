@@ -269,7 +269,7 @@ async fn t1_a_busy_restores_original_uploads_and_new_lease() {
     registry
         .set_utility_bot_user_id_for_tests(discord::bot_role::UtilityBotRole::Announce, 1)
         .await;
-    Arc::get_mut(&mut f.shared).unwrap().health_registry = Arc::downgrade(&registry);
+    Arc::get_mut(&mut f.shared).unwrap().health_registry = (&registry).into();
     let mut original = item(8_001_002);
     original.author_is_bot = true;
     original

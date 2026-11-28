@@ -412,7 +412,7 @@ async fn terminate(
         None => {
             let pool_for_postlude = pool.clone();
             let (result, applied) = http_force::terminate_for_http(
-                &registry,
+                registry.as_ref(),
                 pool,
                 (request(), expected),
                 "restart",

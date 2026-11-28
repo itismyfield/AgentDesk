@@ -72,7 +72,7 @@ pub(crate) async fn with_second_bot(
     let mut shared = shared_on(pool).await;
     let registry = Arc::new(HealthRegistry::new());
     let own = Arc::get_mut(&mut shared).expect("an unshared runtime");
-    own.health_registry = Arc::downgrade(&registry);
+    own.health_registry = (&registry).into();
     let mut second = crate::services::discord::make_shared_data_for_tests();
     Arc::get_mut(&mut second)
         .expect("an unshared runtime")

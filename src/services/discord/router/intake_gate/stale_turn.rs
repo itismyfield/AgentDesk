@@ -117,7 +117,7 @@ async fn classify_channel_stale_active_turn_proof(
     let observed_before = std::time::Instant::now();
     let inflight =
         crate::services::discord::inflight::load_inflight_state(provider, channel_id.get())?;
-    let registry = shared.health_registry.upgrade()?;
+    let registry = crate::services::discord::health::registry_for(shared)?;
     let snapshot = registry
         .snapshot_watcher_state_for_provider(provider, channel_id.get())
         .await?;
@@ -666,7 +666,7 @@ mod thread_guard_stale_pure_tests {
         let mut shared = crate::services::discord::make_shared_data_for_tests();
         Arc::get_mut(&mut shared)
             .expect("fresh shared data should be uniquely owned before registry install")
-            .health_registry = Arc::downgrade(&registry);
+            .health_registry = (&registry).into();
         registry
             .register(provider.as_str().to_string(), shared.clone())
             .await;

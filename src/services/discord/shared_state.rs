@@ -6,6 +6,7 @@
 mod g7_host;
 #[path = "gateway_lease_diagnostics.rs"]
 pub(in crate::services::discord) mod gateway_lease_diagnostics;
+pub(super) mod health_ports;
 #[path = "router_ports.rs"]
 mod router_ports;
 pub(in crate::services::discord) use router_ports::{

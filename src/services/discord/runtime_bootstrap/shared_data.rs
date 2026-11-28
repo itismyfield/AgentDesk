@@ -253,7 +253,7 @@ pub(super) fn run_bot_build_shared_data(
             cached_bot_token: tokio::sync::OnceCell::new(),
         },
         token_hash,
-        health_registry: Arc::downgrade(&health_registry),
+        health_registry: (&health_registry).into(),
         known_slash_commands: tokio::sync::OnceCell::new(),
         // #2448: capacity 256 gives ~hundreds of in-flight turns headroom
         // before a slow listener triggers `RecvError::Lagged`. The standby
@@ -355,9 +355,7 @@ mod tests {
         let published = crate::services::discord::health::runtime_registry::runtime_registry()
             .expect("runtime registry must be published without a policy engine");
         assert!(Arc::ptr_eq(&published, &registry));
-        let shared_registry = shared
-            .health_registry
-            .upgrade()
+        let shared_registry = health::registry_for(&shared)
             .expect("caller retains its registry while the runtime lives");
         assert!(Arc::ptr_eq(&shared_registry, &registry));
         use crate::services::engine_runtime::health_port::{

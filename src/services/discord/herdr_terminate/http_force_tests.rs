@@ -101,7 +101,7 @@ impl Node {
         let mut shared =
             super::super::super::host_teardown_gate::test_support::shared_on(&pool).await;
         let registry = Arc::new(HealthRegistry::new());
-        Arc::get_mut(&mut shared).unwrap().health_registry = Arc::downgrade(&registry);
+        Arc::get_mut(&mut shared).unwrap().health_registry = (&registry).into();
         registry.register("claude".into(), shared.clone()).await;
         let key = format!(
             "claude/{}/{}:AgentDesk-claude-e07",
@@ -799,7 +799,7 @@ fn force_terminal_failure_matrix_pg() {
         let request = OperatorTerminate { session_key: node.key.clone(), execution_nonce: herdr::EXECUTION.into() };
         let calls = Arc::new(AtomicUsize::new(0));
         let postlude_calls = calls.clone();
-        let (result, applied) = terminate_for_http(&node.registry, node.pool.clone(), (request, e08::identity::unbound(&rig, &node)), "test", move |_| {
+        let (result, applied) = terminate_for_http(node.registry.as_ref(), node.pool.clone(), (request, e08::identity::unbound(&rig, &node)), "test", move |_| {
             postlude_calls.fetch_add(1, Ordering::SeqCst);
             async { NoopPostlude }.boxed()
         }).await;

@@ -341,7 +341,7 @@ impl RelayE2eHarness {
             let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
             Arc::get_mut(&mut shared)
                 .expect("fresh shared")
-                .health_registry = Arc::downgrade(&registry);
+                .health_registry = (&registry).into();
             registry
         });
         {

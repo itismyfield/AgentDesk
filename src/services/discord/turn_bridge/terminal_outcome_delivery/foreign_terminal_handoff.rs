@@ -1,6 +1,7 @@
 //! Durable custody for a detached episode; retries only POST new messages.
 
 use super::*;
+use crate::services::discord::shared_state::health_ports::ChannelRuntimeLookup;
 use crate::services::discord::{
     inflight::{CodexRange, InflightTurnIdentity, RelayOwnerKind, load_inflight_state_read_only},
     outbound::{self, delivery_record as dr},
@@ -394,7 +395,7 @@ pub(in crate::services::discord) mod custody_test_adapter {
 }
 
 pub(in crate::services::discord) async fn resume(
-    registry: &crate::services::discord::health::HealthRegistry,
+    registry: &impl ChannelRuntimeLookup,
     payload: &mut serde_json::Value,
     checkpoint: &crate::services::discord::terminal_delivery_custody::CustodyCheckpoint,
 ) -> Result<bool, String> {

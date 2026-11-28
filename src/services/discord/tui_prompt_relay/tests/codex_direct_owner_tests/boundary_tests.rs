@@ -126,7 +126,7 @@ impl Fixture {
         let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
         Arc::get_mut(&mut shared)
             .expect("fresh shared")
-            .health_registry = Arc::downgrade(&registry);
+            .health_registry = (&registry).into();
         let codex = if resume {
             resumed_channel(&shared, root, channel, tmux)
         } else {

@@ -22,6 +22,7 @@ use crate::services::provider::ProviderKind;
 //     send-to-agent/outbound dispatch, re-exported here for compatibility
 pub(in crate::services::discord) mod boot_hold;
 mod consumer_ports;
+pub(super) use consumer_ports::registry_for;
 pub(crate) use consumer_ports::resume_ports;
 mod headless_turn;
 pub(in crate::services::discord) mod liveness_authority;
@@ -94,7 +95,7 @@ pub(crate) use thread_turn::ThreadTurnRuntime;
 pub(in crate::services) mod turn_deliver;
 mod unbound_owners;
 mod unpaired_active_token;
-pub(in crate::services::discord) use unbound_owners::UnboundRuntimeSnapshot;
+pub(in crate::services::discord) use super::shared_state::health_ports::UnboundRuntimeSnapshot;
 pub(in crate::services::discord) mod watcher_respawn;
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) use watcher_respawn::lock_watcher_absence_for_test;

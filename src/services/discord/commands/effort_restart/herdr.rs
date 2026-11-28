@@ -220,7 +220,7 @@ async fn restart(
     let pool = target.pool.clone();
     let ended = (request, expected);
     let (result, saved) = terminate_for_http(
-        &registry,
+        registry.as_ref(),
         target.pool,
         ended,
         "effort_restart",

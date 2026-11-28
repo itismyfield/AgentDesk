@@ -491,9 +491,7 @@ pub(super) async fn attempt_clean_standby_promotion(
         return false;
     }
 
-    let runtimes = shared
-        .health_registry
-        .upgrade()
+    let runtimes = crate::services::discord::health::registry_for(shared)
         .map(|registry| async move { registry.provider_runtimes().await })
         .expect("registered standby keeps the process health registry alive")
         .await;

@@ -169,7 +169,7 @@ sys.exit(result.returncode)
             inner.settings.get_mut().provider = provider.clone();
             inner.api_port = port;
             inner.token_hash = crate::utils::discord::discord_token_hash("test-token");
-            inner.health_registry = Arc::downgrade(&registry);
+            inner.health_registry = (&registry).into();
         }
         shared
             .http
@@ -644,7 +644,7 @@ fn p4_reopened_store_new_state_consumes_held_reservation_pg() {
             let inner = Arc::get_mut(&mut new_shared).unwrap();
             inner.api_port = host.shared.api_port;
             inner.token_hash = host.shared.token_hash.clone();
-            inner.health_registry = Arc::downgrade(&registry);
+            inner.health_registry = (&registry).into();
         }
         new_shared.http.cached_serenity_ctx.set(host.shared.http.cached_serenity_ctx.get().unwrap().clone())
             .unwrap_or_else(|_| panic!("context already set"));

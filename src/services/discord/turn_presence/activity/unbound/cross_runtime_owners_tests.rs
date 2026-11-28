@@ -221,7 +221,7 @@ async fn registered_runtime_receipt_evidence_uses_foreign_token_pg() {
     let mut caller = make_shared_data_for_tests_with_storage(Some(pool.clone()));
     let caller_mut = Arc::get_mut(&mut caller).unwrap();
     caller_mut.token_hash = "receipt-caller".into();
-    caller_mut.health_registry = Arc::downgrade(&registry);
+    caller_mut.health_registry = (&registry).into();
     let mut foreign = make_shared_data_for_tests_with_storage(Some(pool.clone()));
     let foreign_mut = Arc::get_mut(&mut foreign).unwrap();
     foreign_mut.provider = ProviderKind::Codex;

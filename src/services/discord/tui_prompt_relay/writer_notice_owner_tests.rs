@@ -47,7 +47,7 @@ async fn a_confirmed_claude_terminal_input_leaves_its_notice_to_the_writer_once_
     let api = Recorder::start().await;
     let registry = Arc::new(super::super::health::HealthRegistry::new());
     let mut shared = super::super::make_shared_data_for_tests_with_storage(None);
-    Arc::get_mut(&mut shared).unwrap().health_registry = Arc::downgrade(&registry);
+    Arc::get_mut(&mut shared).unwrap().health_registry = (&registry).into();
     let channel = ChannelId::new(74_190_290);
     shared.settings.write().await.allowed_channel_ids = vec![channel.get()];
     registry.register("claude".into(), shared.clone()).await;
@@ -145,7 +145,7 @@ async fn a_scheduled_fire_is_announced_by_the_hook_path_only_until_the_writer_ta
     let api = Recorder::start().await;
     let registry = Arc::new(super::super::health::HealthRegistry::new());
     let mut shared = super::super::make_shared_data_for_tests_with_storage(None);
-    Arc::get_mut(&mut shared).unwrap().health_registry = Arc::downgrade(&registry);
+    Arc::get_mut(&mut shared).unwrap().health_registry = (&registry).into();
     let channel = ChannelId::new(74_190_291);
     shared.settings.write().await.allowed_channel_ids = vec![channel.get()];
     registry.register("claude".into(), shared.clone()).await;

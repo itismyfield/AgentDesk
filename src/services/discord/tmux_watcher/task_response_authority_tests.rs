@@ -20,7 +20,7 @@ async fn persisted_notify_recovery_keeps_the_known_provider_client_for_replaceme
         )
         .await;
     let mut shared = crate::services::discord::make_shared_data_for_tests();
-    Arc::get_mut(&mut shared).unwrap().health_registry = Arc::downgrade(&registry);
+    Arc::get_mut(&mut shared).unwrap().health_registry = (&registry).into();
     let clients = watcher_card_clients(
         &provider_http,
         &shared,

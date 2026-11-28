@@ -35,7 +35,7 @@ pub(super) async fn message_outbox_loop(
     loop {
         tokio::time::sleep(poll_interval).await;
 
-        crate::services::discord::terminal_delivery_custody::drain(&health_registry).await;
+        crate::services::discord::terminal_delivery_custody::drain(health_registry.as_ref()).await;
 
         // #3651: the message outbox drain delivers headless terminal responses
         // — foreground turns enqueue here and synchronously block on the row

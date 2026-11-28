@@ -56,7 +56,7 @@ pub(in crate::services::discord) async fn cmd_resume(
         ctx.say("Error: postgres pool unavailable.").await?;
         return Ok(());
     };
-    let registry = shared.health_registry();
+    let registry = crate::services::discord::health::registry_for(shared);
 
     let opts = crate::services::session_resume::ResumePreviousOptions {
         session_id: session_id.and_then(|s| {

@@ -235,7 +235,7 @@ pub(super) async fn post_steer_echo(
     prompt: &ObservedTuiPrompt,
     channel_id: ChannelId,
 ) {
-    let Some(registry) = shared.health_registry() else {
+    let Some(registry) = crate::services::discord::health::registry_for(shared) else {
         return;
     };
     let provider = ProviderKind::from_str_or_unsupported(&prompt.provider);

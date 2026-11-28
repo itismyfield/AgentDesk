@@ -5,6 +5,7 @@ use std::sync::Arc;
 use poise::serenity_prelude::ChannelId;
 
 use crate::services::discord::SharedData;
+use crate::services::discord::shared_state::health_ports::ChannelRuntimeLookup;
 use crate::services::provider::ProviderKind;
 
 /// Whether the channel's queue has an installed owner, which only this notice may resume.
@@ -35,7 +36,7 @@ pub(in crate::services::discord) fn closed(
 
 /// An operator repair removed the channel's row: its waiting input is resumed once.
 pub(crate) async fn repair_cleared_row(
-    registry: Option<&crate::services::discord::health::HealthRegistry>,
+    registry: Option<&impl ChannelRuntimeLookup>,
     provider: &ProviderKind,
     channel_id: u64,
 ) {

@@ -12,7 +12,7 @@ pub(in crate::services::discord) use never_started::{
     NeverStartedTerminate, terminate_never_started,
 };
 
-use super::health::HealthRegistry;
+use super::shared_state::health_ports::ChannelRuntimeLookup;
 use super::turn_finalizer::cleanup::SyntheticClaimSnapshot;
 use super::turn_finalizer::{FinalizeContext, FinalizeOutcome, TerminalEvent, TurnKey};
 use super::{ChannelId, SharedData};
@@ -690,7 +690,7 @@ async fn load(pool: &PgPool, key: &str) -> Result<HostedObservation, Termination
 /// The operator route's entry. The switch is read before any IO; the service then runs on a
 /// detached task so a dropped request cannot stop it between its close and its settlement.
 pub(crate) async fn terminate_registered_herdr(
-    registry: &HealthRegistry,
+    registry: &(impl ChannelRuntimeLookup + ?Sized),
     pool: PgPool,
     request: impl Into<ExplicitTerminate>,
     reason: String,
@@ -729,7 +729,7 @@ pub(crate) async fn terminate_registered_herdr(
 
 /// The runtime owning the row's channel; a refusal here took and wrote nothing.
 async fn runtime_of(
-    registry: &HealthRegistry,
+    registry: &(impl ChannelRuntimeLookup + ?Sized),
     pool: &PgPool,
     session_key: &str,
 ) -> Result<Arc<SharedData>, TerminationResult> {

@@ -725,7 +725,7 @@ async fn worker_case(fixture: &CanaryFixture, case: WorkerCase) {
     {
         let shared = Arc::get_mut(&mut worker).unwrap();
         shared.provider = ProviderKind::Codex;
-        shared.health_registry = Arc::downgrade(&registry);
+        shared.health_registry = (&registry).into();
     }
     {
         let mut settings = worker.settings.write().await;

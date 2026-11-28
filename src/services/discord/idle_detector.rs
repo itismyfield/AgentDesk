@@ -302,7 +302,7 @@ async fn run_pass(shared: &SharedData, provider: &ProviderKind) {
     }
 
     let now = Utc::now();
-    let health_registry = shared.health_registry_for_idle_detector();
+    let health_registry = super::health::registry_for(shared);
     for (channel_id, has_active_turn, in_recovery, turn_started_at) in snapshots {
         let last_heartbeat = if has_active_turn {
             fetch_last_heartbeat(shared, provider, channel_id).await

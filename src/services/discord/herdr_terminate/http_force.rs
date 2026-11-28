@@ -7,7 +7,7 @@ use futures::future::BoxFuture;
 use sqlx::PgPool;
 
 use super::{
-    HealthRegistry, HostedObservation, Logged, OperatorTerminate, RetiredExclusion,
+    ChannelRuntimeLookup, HostedObservation, Logged, OperatorTerminate, RetiredExclusion,
     TerminationResult, runtime_of, terminate_scoped,
 };
 use crate::db::dispatched_sessions::hosted_execution::http_force::active_dispatch_pg;
@@ -17,7 +17,7 @@ pub(crate) use crate::services::turn_orchestrator::{Expected, Released};
 /// Runs the scoped terminate bound to `expected`, on a retire `postlude` under the held exclusion
 /// and then its released step before the result is logged.
 pub(in crate::services) async fn terminate_for_http<T, P>(
-    registry: &HealthRegistry,
+    registry: &(impl ChannelRuntimeLookup + ?Sized),
     pool: PgPool,
     (request, expected): (OperatorTerminate, Expected),
     reason: &str,
@@ -88,30 +88,6 @@ pub(super) async fn dispatch_holds(
         return true;
     };
     active_dispatch_pg(pool, row.session_id()).await.as_ref() == Ok(&expected.dispatch)
-}
-
-impl crate::services::turn_orchestrator::HttpTerminate for HealthRegistry {
-    fn terminate_for_http<T, P>(
-        &self,
-        pool: PgPool,
-        (session_key, execution_nonce, expected): (String, String, Expected),
-        reason: &str,
-        postlude: P,
-    ) -> impl Future<Output = ((&'static str, String), Option<T>)> + Send
-    where
-        T: Released,
-        P: for<'a> FnOnce(&'a RetiredExclusion) -> BoxFuture<'a, T> + Send + 'static,
-    {
-        let request = OperatorTerminate {
-            session_key,
-            execution_nonce,
-        };
-        async move {
-            let bound = (request, expected);
-            let (result, applied) = terminate_for_http(self, pool, bound, reason, postlude).await;
-            (result.outcome(), applied)
-        }
-    }
 }
 
 #[cfg(test)]

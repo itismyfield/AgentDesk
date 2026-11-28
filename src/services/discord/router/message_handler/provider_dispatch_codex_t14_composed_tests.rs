@@ -214,7 +214,7 @@ async fn direct_phase(fx: &Fixture, path: &Path, original: &hosted_source::Hoste
     let fresh = Arc::get_mut(&mut shared).unwrap();
     fresh.provider = ProviderKind::Codex;
     fresh.token_hash = TOKEN.to_string();
-    fresh.health_registry = Arc::downgrade(&health);
+    fresh.health_registry = (&health).into();
     let channel = ChannelId::new(CHANNEL);
     assert!(
         shared

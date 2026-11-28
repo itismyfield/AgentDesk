@@ -1640,7 +1640,7 @@ async fn restored_provider_same_transcript_human_prompt_is_not_relayed_or_synthe
     let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
     Arc::get_mut(&mut fixture.shared)
         .expect("fresh shared")
-        .health_registry = Arc::downgrade(&registry);
+        .health_registry = (&registry).into();
     let source_before = fixture.source.clone();
     let hosted_before = fixture.hosted_json().await;
     assert!(

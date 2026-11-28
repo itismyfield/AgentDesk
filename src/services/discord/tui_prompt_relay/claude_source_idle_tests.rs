@@ -278,7 +278,7 @@ fn legacy_inflight_discovery_preserves_the_first_prompt_until_finalize() {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let http = Arc::new(http);
         let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
-        Arc::get_mut(&mut pane.shared).unwrap().health_registry = Arc::downgrade(&registry);
+        Arc::get_mut(&mut pane.shared).unwrap().health_registry = (&registry).into();
         registry.set_utility_bot_http_for_tests(crate::services::discord::bot_role::UtilityBotRole::Notify, http.clone()).await;
         let _http = test_rest::install(http);
         registry.register(ProviderKind::Claude.as_str().to_string(), pane.shared.clone()).await;

@@ -77,7 +77,7 @@ impl LogSink {
 async fn registered_rig(id: u64) -> (Rig, Arc<HealthRegistry>) {
     let mut rig = Rig::new(id, false, false).await;
     let registry = Arc::new(HealthRegistry::new());
-    Arc::get_mut(&mut rig.shared).unwrap().health_registry = Arc::downgrade(&registry);
+    Arc::get_mut(&mut rig.shared).unwrap().health_registry = (&registry).into();
     registry.register("claude".into(), rig.shared.clone()).await;
     (rig, registry)
 }
@@ -204,7 +204,7 @@ async fn a2_s2_existing_superseded_counters_cover_saved_reading_rejections_pg() 
     let mutable = Arc::get_mut(&mut added).unwrap();
     mutable.provider = ProviderKind::Codex;
     mutable.token_hash = "a2-counter-added-runtime".into();
-    mutable.health_registry = Arc::downgrade(&registry);
+    mutable.health_registry = (&registry).into();
     registry.register("codex".into(), added).await;
     rejected_without_callback(&reading).await;
     fresh_idle(&rig).await;

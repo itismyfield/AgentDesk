@@ -4,13 +4,22 @@
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
-use poise::serenity_prelude::ChannelId;
+use poise::serenity_prelude::{ChannelId, Http};
 use sqlx::PgPool;
 
 use super::{HeadlessAgentTurnReservation, HealthRegistry};
+use crate::domain::bot_role::UtilityBotRole;
 use crate::services::discord::SharedData;
+#[cfg(unix)]
+use crate::services::discord::herdr_terminate::{
+    OperatorTerminate, RetiredExclusion,
+    http_force::{Expected, Released, terminate_for_http},
+};
 use crate::services::discord::host_defer_gate;
 use crate::services::discord::relay_recovery;
+use crate::services::discord::shared_state::health_ports::{
+    ChannelRuntimeLookup, RuntimeHealth, UnboundRuntimeSnapshot,
+};
 use crate::services::discord::zombie_foreground_release;
 use crate::services::engine_runtime::health_port::{
     AppHealth, AppHealthBinding, AxisBSite, FinishCancelledMailboxResult, HeadlessDmTurnStart,
@@ -290,5 +299,78 @@ pub(crate) fn resume_ports(registry: Option<&HealthRegistry>) -> ResumePorts<'_,
                 pool, provider, channel, key, tmux,
             ))
         },
+    }
+}
+
+pub(in crate::services::discord) fn registry_for(
+    shared: &SharedData,
+) -> Option<Arc<HealthRegistry>> {
+    let registry: Arc<dyn std::any::Any + Send + Sync> = shared.health_registry()?;
+    Arc::downcast(registry).ok()
+}
+
+impl ChannelRuntimeLookup for HealthRegistry {
+    fn shared_for_provider_on_channel<'a>(
+        &'a self,
+        provider: &'a ProviderKind,
+        channel: ChannelId,
+    ) -> BoxFuture<'a, Option<Arc<SharedData>>> {
+        Box::pin(HealthRegistry::shared_for_provider_on_channel(
+            self, provider, channel,
+        ))
+    }
+}
+
+impl RuntimeHealth for HealthRegistry {
+    fn registered_token_hashes<'a>(
+        &'a self,
+        provider: &'a ProviderKind,
+    ) -> BoxFuture<'a, Vec<String>> {
+        Box::pin(HealthRegistry::registered_token_hashes(self, provider))
+    }
+
+    fn utility_bot_http_clone(&self, role: UtilityBotRole) -> BoxFuture<'_, Option<Arc<Http>>> {
+        Box::pin(HealthRegistry::utility_bot_http_clone(self, role))
+    }
+
+    fn utility_bot_user_id(&self, role: UtilityBotRole) -> BoxFuture<'_, Option<u64>> {
+        Box::pin(HealthRegistry::utility_bot_user_id(self, role))
+    }
+
+    fn unbound_runtime_snapshot(&self) -> BoxFuture<'_, UnboundRuntimeSnapshot> {
+        Box::pin(HealthRegistry::unbound_runtime_snapshot(self))
+    }
+
+    fn with_unbound_membership(
+        &self,
+        expected_generation: u64,
+        publish: &mut dyn FnMut(),
+    ) -> Result<(), &'static str> {
+        HealthRegistry::with_unbound_membership(self, expected_generation, publish)
+    }
+}
+
+#[cfg(unix)]
+impl crate::services::turn_orchestrator::HttpTerminate for HealthRegistry {
+    fn terminate_for_http<T, P>(
+        &self,
+        pool: PgPool,
+        (session_key, execution_nonce, expected): (String, String, Expected),
+        reason: &str,
+        postlude: P,
+    ) -> impl Future<Output = ((&'static str, String), Option<T>)> + Send
+    where
+        T: Released,
+        P: for<'a> FnOnce(&'a RetiredExclusion) -> BoxFuture<'a, T> + Send + 'static,
+    {
+        let request = OperatorTerminate {
+            session_key,
+            execution_nonce,
+        };
+        async move {
+            let bound = (request, expected);
+            let (result, applied) = terminate_for_http(self, pool, bound, reason, postlude).await;
+            (result.outcome(), applied)
+        }
     }
 }

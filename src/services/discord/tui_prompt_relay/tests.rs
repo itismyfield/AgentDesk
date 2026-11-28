@@ -7010,7 +7010,7 @@ async fn observed_prompt_note_on_wire(active_loop: bool) -> serde_json::Value {
     };
     let registry = Arc::new(super::super::health::HealthRegistry::new());
     let mut shared = super::super::make_shared_data_for_tests_with_storage(None);
-    Arc::get_mut(&mut shared).unwrap().health_registry = Arc::downgrade(&registry);
+    Arc::get_mut(&mut shared).unwrap().health_registry = (&registry).into();
     let channel = ChannelId::new(if active_loop { 74_190_202 } else { 74_190_201 });
     shared.settings.write().await.allowed_channel_ids = vec![channel.get()];
     registry.register("claude".into(), shared.clone()).await;
@@ -7090,7 +7090,7 @@ async fn synthetic_prompt_note_on_wire(route: u8, secretary: bool) -> serde_json
     let api = Recorder::start().await;
     let registry = Arc::new(super::super::health::HealthRegistry::new());
     let mut shared = super::super::make_shared_data_for_tests_with_storage(None);
-    Arc::get_mut(&mut shared).unwrap().health_registry = Arc::downgrade(&registry);
+    Arc::get_mut(&mut shared).unwrap().health_registry = (&registry).into();
     let channel = ChannelId::new(74_190_210 + u64::from(route));
     if secretary {
         let mut config = crate::config::Config::default();

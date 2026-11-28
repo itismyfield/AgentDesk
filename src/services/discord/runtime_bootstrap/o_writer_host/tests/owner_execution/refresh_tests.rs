@@ -38,7 +38,7 @@ async fn unregistered_gateway(
         crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
     let data = Arc::get_mut(&mut shared).unwrap();
     data.provider = ProviderKind::Claude;
-    data.health_registry = Arc::downgrade(registry);
+    data.health_registry = registry.into();
     shared.settings.write().await.allowed_channel_ids = vec![channel];
     shared
         .http

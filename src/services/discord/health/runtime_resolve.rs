@@ -11,6 +11,7 @@ use super::HealthRegistry;
 use crate::services::cluster::intake_worker::IntakeWorkerRuntime;
 use crate::services::discord::SharedData;
 use crate::services::discord::bot_role::UtilityBotRole;
+use crate::services::discord::shared_state::health_ports::RuntimeHealth;
 use crate::services::provider::ProviderKind;
 
 /// Resolve the bot HTTP client by alias.
@@ -37,7 +38,7 @@ pub async fn resolve_bot_http(
 }
 
 pub(crate) async fn resolve_utility_bot_http(
-    registry: &HealthRegistry,
+    registry: &(impl RuntimeHealth + ?Sized),
     role: UtilityBotRole,
 ) -> Result<Arc<serenity::Http>, (&'static str, String)> {
     match registry.utility_bot_http_clone(role).await {
@@ -275,9 +276,7 @@ pub(crate) async fn resolve_intake_worker_runtime(
     claimant: &SharedData,
     channel_id: ChannelId,
 ) -> Result<IntakeWorkerRuntime<SharedData>, String> {
-    let registry = claimant
-        .health_registry
-        .upgrade()
+    let registry = super::registry_for(claimant)
         .ok_or_else(|| "runner runtime registry unavailable".to_string())?;
     let (http, shared) =
         resolve_direct_channel_runtime(&registry, channel_id, &claimant.provider).await?;
@@ -442,7 +441,7 @@ mod direct_channel_candidate_tests {
         use std::sync::Arc;
         let registry = Arc::new(HealthRegistry::new());
         let mut claimant = make_shared_data_for_tests();
-        Arc::get_mut(&mut claimant).unwrap().health_registry = Arc::downgrade(&registry);
+        Arc::get_mut(&mut claimant).unwrap().health_registry = (&registry).into();
         let owner = make_shared_data_for_tests();
         claimant.settings.write().await.allowed_channel_ids = vec![41];
         owner.settings.write().await.allowed_channel_ids = vec![42];
@@ -478,7 +477,7 @@ mod direct_channel_candidate_tests {
         use std::sync::Arc;
         let registry = Arc::new(HealthRegistry::new());
         let mut claimant = make_shared_data_for_tests();
-        Arc::get_mut(&mut claimant).unwrap().health_registry = Arc::downgrade(&registry);
+        Arc::get_mut(&mut claimant).unwrap().health_registry = (&registry).into();
         let owner = make_shared_data_for_tests();
         claimant.settings.write().await.allowed_channel_ids = vec![41];
         owner.settings.write().await.allowed_channel_ids = vec![42];
@@ -516,7 +515,7 @@ pub(crate) mod owner_runtime_for_tests {
     pub(crate) async fn registered(provider: &str) -> (Arc<HealthRegistry>, Arc<SharedData>) {
         let registry = Arc::new(HealthRegistry::new());
         let mut shared = make_shared_data_for_tests();
-        Arc::get_mut(&mut shared).unwrap().health_registry = Arc::downgrade(&registry);
+        Arc::get_mut(&mut shared).unwrap().health_registry = (&registry).into();
         shared
             .http
             .cached_bot_token

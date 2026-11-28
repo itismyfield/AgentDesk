@@ -457,7 +457,7 @@ impl Fixture {
         let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
         let own = Arc::get_mut(&mut first).unwrap();
         (own.token_hash, own.health_registry) =
-            ("discord_1111111111111111".into(), Arc::downgrade(&registry));
+            ("discord_1111111111111111".into(), (&registry).into());
         let first_key = format!("claude/{}/lane-node:{}", first.token_hash, self.tmux);
         sqlx::query(
             "INSERT INTO sessions (session_key, provider, status, identity_kind,

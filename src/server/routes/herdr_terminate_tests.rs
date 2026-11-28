@@ -88,7 +88,8 @@ fn act_route_switch_off_refuses_before_any_read() {
             session_key: "k".into(),
             execution_nonce: "n".into(),
         };
-        let direct = terminate_registered_herdr(&empty, closed_pool().await, request, "r".into());
+        let direct =
+            terminate_registered_herdr(empty.as_ref(), closed_pool().await, request, "r".into());
         assert_eq!(direct.await, TerminationResult::Disabled);
         assert!(
             results.take().is_empty(),

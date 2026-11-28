@@ -53,7 +53,7 @@ async fn install(fixture: &mut CanaryFixture, evidence: Evidence) -> OwnerScope 
     let registry = Arc::new(HealthRegistry::new());
     Arc::get_mut(&mut fixture.shared)
         .expect("install membership before publishing the caller Arc")
-        .health_registry = Arc::downgrade(&registry);
+        .health_registry = (&registry).into();
     registry
         .register("codex".into(), fixture.shared.clone())
         .await;
@@ -68,7 +68,7 @@ async fn install(fixture: &mut CanaryFixture, evidence: Evidence) -> OwnerScope 
         let mutable = Arc::get_mut(&mut runtime).unwrap();
         mutable.provider = provider.clone();
         mutable.token_hash = token.into();
-        mutable.health_registry = Arc::downgrade(&registry);
+        mutable.health_registry = (&registry).into();
         runtime.settings.write().await.provider = provider.clone();
         registry
             .register(provider.as_str().into(), runtime.clone())

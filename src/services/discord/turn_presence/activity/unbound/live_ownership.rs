@@ -1,14 +1,14 @@
 //! Runtime membership and exact owner evidence pinned across asynchronous observations.
 use super::super::cross_runtime_owners::{OwnerEvidence, WatcherEvidence};
 use super::*;
-use crate::services::discord::health::{HealthRegistry, UnboundRuntimeSnapshot};
+use crate::services::discord::shared_state::health_ports::{RuntimeHealth, UnboundRuntimeSnapshot};
 use crate::services::discord::tmux_watcher_registry::{
     owner_observation_epoch, with_owner_publication,
 };
 
 #[derive(Clone)]
 pub(super) struct Membership {
-    registry: Option<Arc<HealthRegistry>>,
+    registry: Option<Arc<dyn RuntimeHealth>>,
     snapshot: UnboundRuntimeSnapshot,
 }
 
@@ -63,7 +63,14 @@ impl Membership {
 
     fn with_current<R>(&self, publish: impl FnOnce() -> R) -> Result<R, &'static str> {
         match &self.registry {
-            Some(registry) => registry.with_unbound_membership(self.snapshot.generation, publish),
+            Some(registry) => {
+                let mut publish = Some(publish);
+                let mut result = None;
+                registry.with_unbound_membership(self.snapshot.generation, &mut || {
+                    result = publish.take().map(|publish| publish());
+                })?;
+                result.ok_or("membership")
+            }
             None => Ok(publish()),
         }
     }

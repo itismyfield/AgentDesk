@@ -2,6 +2,7 @@
 //! The sibling directory is outside old inflight/receipt writers and reapers.
 //! Payload interpretation, receipt checks and publication remain in turn_bridge.
 
+use super::shared_state::health_ports::ChannelRuntimeLookup;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -367,7 +368,7 @@ async fn persist_at(root: &Path, key: &str, payload: &Value) -> Result<(), Strin
 
 /// Called by message_outbox_loop, including after restart. A failed resume
 /// keeps custody; only the terminal adapter can attest that it is settled.
-pub(crate) async fn drain(registry: &super::health::HealthRegistry) {
+pub(crate) async fn drain(registry: &impl ChannelRuntimeLookup) {
     let result = match root() {
         Ok(root) => {
             drain_with(&root, |mut payload, checkpoint| async move {

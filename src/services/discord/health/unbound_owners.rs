@@ -1,14 +1,8 @@
 //! Complete runtime membership evidence for read-only Unbound judgments.
 use std::sync::Arc;
 
-use super::HealthRegistry;
+use super::{HealthRegistry, UnboundRuntimeSnapshot};
 use crate::services::discord::SharedData;
-
-#[derive(Clone)]
-pub(in crate::services::discord) struct UnboundRuntimeSnapshot {
-    pub generation: u64,
-    pub entries: Vec<(String, Arc<SharedData>)>,
-}
 
 impl HealthRegistry {
     /// Every registered runtime, including multiple instances of the same provider.

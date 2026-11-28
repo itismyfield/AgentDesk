@@ -40,7 +40,7 @@ No chart is generated: the `statechart` skill is not installed on the WSL lane.
 | PPrepare → PWaiting | `runtime_bootstrap.rs:353` → `gateway_lease.rs:488-499` → `acquire_as_preferred_gateway` `gateway_lease.rs:229-319`; waiter publish at `:243-261` |
 | PAcquire | `gateway_lease.rs:265-293` (5 s loop, `GATEWAY_PREFERENCE_POLL_INTERVAL`) |
 | NStart / NYieldEnd | `gateway_lease.rs:500-529`, `yield_to_preferred_gateway` `:154-225` |
-| NStandbyTake | `gateway_lease_recovery.rs:602-667` |
+| NStandbyTake | `gateway_lease_recovery.rs` `spawn_standby_gateway_retry` |
 | NKeepaliveYield | `gateway_lease.rs:787-822` (the `preferred_gateway_is_waiting` `:118` → `should_yield_to_preferred` `:98` → `node_awaits_gateway` `cluster/intake_worker_capabilities.rs:131`) |
 | Arrive/Deliver on N | O-home refusal "O channel … is served only on O home …" (Foreign queue) |
 

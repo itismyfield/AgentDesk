@@ -201,7 +201,7 @@ async fn legacy_notify_gate(
     channel_id: ChannelId,
     lease: &ExternalInputRelayLease,
 ) -> Option<TaskPromptGate> {
-    let Some(registry) = shared.health_registry() else {
+    let Some(registry) = crate::services::discord::health::registry_for(shared) else {
         tracing::warn!(
             provider = %prompt.provider,
             channel_id = channel_id.get(),

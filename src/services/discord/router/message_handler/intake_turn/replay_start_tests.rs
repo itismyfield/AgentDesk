@@ -1186,7 +1186,7 @@ mod worker_entry_tests {
     ) -> (Host, Arc<crate::services::discord::health::HealthRegistry>) {
         let (registry, _) = owner_runtime_for_tests::registered("claude").await;
         let mut host = host(channels).await;
-        Arc::get_mut(&mut host.shared).unwrap().health_registry = Arc::downgrade(&registry);
+        Arc::get_mut(&mut host.shared).unwrap().health_registry = (&registry).into();
         host.shared
             .http
             .cached_bot_token

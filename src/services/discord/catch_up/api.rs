@@ -117,7 +117,7 @@ pub(super) trait CatchUpDiscordApi: Sync {
         health::UtilityBotUserIdResolution,
         health::UtilityBotUserIdResolution,
     ) {
-        let Some(registry) = shared.health_registry() else {
+        let Some(registry) = health::registry_for(shared) else {
             return (
                 health::UtilityBotUserIdResolution::Unconfigured,
                 health::UtilityBotUserIdResolution::Unconfigured,

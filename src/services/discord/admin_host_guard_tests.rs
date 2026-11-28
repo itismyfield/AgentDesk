@@ -892,7 +892,7 @@ async fn a_worker_refusal_without_a_session_fails_its_row_with_its_attachments_p
     let _rest = crate::services::discord::shared_state::test_rest::install(api.http.clone());
     let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
     let mut owner = shared_on(&pool).await;
-    Arc::get_mut(&mut owner).unwrap().health_registry = Arc::downgrade(&registry);
+    Arc::get_mut(&mut owner).unwrap().health_registry = (&registry).into();
     owner
         .http
         .cached_bot_token

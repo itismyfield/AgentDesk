@@ -83,7 +83,7 @@ impl PromotionFixture {
             let runtime_mut = std::sync::Arc::get_mut(&mut runtime)
                 .expect("fresh runtime is uniquely owned before registry install");
             runtime_mut.provider = provider.clone();
-            runtime_mut.health_registry = std::sync::Arc::downgrade(&registry);
+            runtime_mut.health_registry = (&registry).into();
             registry
                 .register(provider.as_str().to_string(), runtime.clone())
                 .await;

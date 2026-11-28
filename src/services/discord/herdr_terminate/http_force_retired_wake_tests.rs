@@ -47,7 +47,7 @@ async fn wakes(rig: &herdr::P11TerminationRig, clear: bool) -> (usize, usize) {
     let expected = super::e08::identity::unbound(rig, &node);
     let mailbox = handle.clone();
     let bound = (request, expected);
-    let registry = &node.registry;
+    let registry = node.registry.as_ref();
     let (result, _) = terminate_for_http(registry, node.pool.clone(), bound, "test", move |_| {
         async move {
             if clear {
