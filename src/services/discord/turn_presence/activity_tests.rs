@@ -16,6 +16,7 @@ use crate::services::provider::session_probe::SessionLiveness;
 use crate::services::tui_o::shadow::ShadowProvider;
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
 use crate::services::tui_o::writer::binding::{BindingRecord, BindingTarget, ChannelBindingLog};
+use adk_runtime::services::tui_o::writer::binding::BindingEvents;
 use poise::serenity_prelude::ChannelId;
 use serde_json::json;
 use std::io::Write;
