@@ -1,0 +1,77 @@
+---
+title: "재시작 뒤 원본 ticket 정산과 채널 문"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: open
+    lg1: progress
+    lg2: waiting
+    lg3: Breaks NoLostAnswer
+    lg4: Path to the EligibleEventuallySettles or NoLostAnswer bug
+    lg5: Repeats forever, so EligibleEventuallySettles breaks
+  }
+  class lg0 teal
+  class lg1 blue
+  class lg2 yellow
+  class lg3 breaks
+  class lg4 bugPath
+  class lg5 repeats
+  s0: N1 종료됨, 종료 기록 전 (장치 바뀜, 개행 없는 closer)
+  s1: N1 종료됨, 종료 기록 전 (개행 없는 closer)
+  s2: 결과 저장됨, 본문 읽기 대기
+  s3: N1 종료 기록됨, 원본 범위 확인 중 (장치 바뀜, 개행 없는 closer)
+  s4: N1 종료 기록됨, 원본 범위 확인 중 (개행 없는 closer)
+  s5: 본문 처리 끝, 정리 대기
+  s6: N1 종료 기록됨, 원본 범위 확정 (장치 바뀜, 개행 없는 closer)
+  s7: N1 종료 기록됨, 원본 범위 확정 (개행 없는 closer)
+  s8: N1 종료 기록됨, 원본 범위 확인 중 (장치 바뀜, 개행 없는 closer, N2 입력 있음)
+  s9: N1 종료 기록됨, 원본 범위 확인 중 (개행 없는 closer, N2 입력 있음)
+  s10: 채널 열림: 결과와 완료 기록 뒤 정리
+  s11: 채널 열림: N1 종료 기록으로 결과 없이 정리
+  s12: N1 종료 기록됨, 원본 범위 확정 (장치 바뀜, 개행 없는 closer, N2 입력 있음)
+  s13: N1 종료 기록됨, 원본 범위 확정 (개행 없는 closer, N2 입력 있음)
+  [*] --> s0
+  [*] --> s1
+  s0 --> s3: host가 N1 종료를 확인해 기록함 or 후속 N2가 뜸
+  s1 --> s2: 현재 N1의 개행 없는 closer로 결과를 기록함
+  s1 --> s4: host가 N1 종료를 확인해 기록함 or 후속 N2가 뜸
+  s2 --> s5: 봉인된 본문을 읽어 완료를 기록함
+  s3 --> s6: writer가 N1 범위를 읽음
+  s4 --> s2: 현재 N1의 개행 없는 closer로 결과를 기록함
+  s4 --> s7: writer가 N1 범위를 읽음
+  s3 --> s8: N2에 입력이 들어와 파일 승인이 생김
+  s4 --> s9: N2에 입력이 들어와 파일 승인이 생김
+  s5 --> s10: 원본 행을 정리함
+  s6 --> s11: N1 종료 기록으로 결과 없이 정산함
+  s7 --> s2: 현재 N1의 개행 없는 closer로 결과를 기록함
+  s7 --> s11: N1 종료 기록으로 결과 없이 정산함
+  s6 --> s12: N2에 입력이 들어와 파일 승인이 생김
+  s7 --> s13: N2에 입력이 들어와 파일 승인이 생김
+  s8 --> s12: writer가 N1 범위를 읽음
+  s9 --> s13: writer가 N1 범위를 읽음
+  s12 --> s11: N1 종료 기록으로 결과 없이 정산함
+  s13 --> s11: N1 종료 기록으로 결과 없이 정산함
+  s11 --> s11: N2가 idle이 됨
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 yellow
+  class s1 yellow
+  class s1 bugPath
+  class s2 blue
+  class s3 blue
+  class s4 blue
+  class s4 bugPath
+  class s5 blue
+  class s6 blue
+  class s7 blue
+  class s7 bugPath
+  class s8 blue
+  class s9 blue
+  class s9 bugPath
+  class s10 teal
+  class s11 teal
+  class s11 breaks
+  class s11 bugPath
+  class s11 repeats
+  class s12 blue
+  class s13 blue
+  class s13 bugPath

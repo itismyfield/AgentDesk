@@ -16,17 +16,21 @@ stateDiagram-v2
   class lg4 repeats
   s0: barrier 보관, N1 종료됨, 종료 기록 전
   s1: barrier 보관, 후속 N2가 뜸, N1 종료 기록 없음
-  s2: 채널 열림: 후속 N2의 idle로 정리
+  s2: barrier 보관, 후속 N2가 뜸, N1 종료 기록 없음 (N2 입력 있음)
+  s3: 채널 열림: 후속 N2의 idle로 정리
   [*] --> s0
   s0 --> s1: 후속 N2가 뜸
   s1 --> s1: N2가 idle이 됨
-  s1 --> s2: N2의 idle로 정리함
+  s1 --> s2: N2에 입력이 들어와 파일 승인이 생김
+  s1 --> s3: N2의 idle로 정리함
+  s2 --> s3: N2의 idle로 정리함
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   class s0 yellow
   class s0 bugPath
   class s0 repeats
   class s1 yellow
   class s1 bugPath
-  class s2 teal
-  class s2 breaks
-  class s2 bugPath
+  class s2 yellow
+  class s3 teal
+  class s3 breaks
+  class s3 bugPath

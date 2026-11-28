@@ -1,5 +1,24 @@
 export const title = "재시작 뒤 원본 ticket 정산과 채널 문";
 
+function waiting(v) {
+  const held = v.barrier ? "barrier 보관, " : "";
+  const notes = [];
+  if (v.dev !== "same") notes.push("장치 바뀜");
+  if (v.file !== "ok") notes.push({ late: "파일 잠시 없음", gone: "파일 없음", changed: "파일 바뀜" }[v.file]);
+  if (v.fileCloser) notes.push(v.scen === "rawCloser" ? "개행 없는 closer" : "N1 closer 있음");
+  if (v.suffixPrompt) notes.push("N2 입력 있음");
+  if (v.switched) notes.push("앞 source의 ticket");
+  if (!v.approved) notes.push("파일 승인 없음");
+  if (v.writer !== "alive") notes.push("writer 멈춤");
+  const note = notes.length ? ` (${notes.join(", ")})` : "";
+  if (v.endRec) {
+    const end = v.cutKnown ? "N1 종료 기록됨" : "N1 종료 기록됨(길이 모름)";
+    return held + end + (v.witFinal ? ", 원본 범위 확정" : ", 원본 범위 확인 중") + note;
+  }
+  if (v.n2 !== "absent") return held + "후속 N2가 뜸, N1 종료 기록 없음" + note;
+  return held + (v.n1 === "alive" ? "N1 실행 중" : "N1 종료됨, 종료 기록 전") + note;
+}
+
 export function state(v) {
   if (v.boot !== "ready") return "부팅 거절됨";
   if (v.cleared) {
@@ -15,10 +34,7 @@ export function state(v) {
   if (v.outcome === "Executed") {
     return v.completion === "pending" ? "결과 저장됨, 본문 읽기 대기" : "본문 처리 끝, 정리 대기";
   }
-  const held = v.barrier ? "barrier 보관, " : "";
-  if (v.endRec) return held + (v.witFinal ? "N1 종료 기록됨, 원본 범위 확정" : "N1 종료 기록됨, 원본 범위 확인 중");
-  if (v.n2 !== "absent") return held + "후속 N2가 뜸, N1 종료 기록 없음";
-  return held + (v.n1 === "alive" ? "N1 실행 중" : "N1 종료됨, 종료 기록 전");
+  return waiting(v);
 }
 
 const labels = {
@@ -26,11 +42,16 @@ const labels = {
   N1Dies: "N1이 죽음",
   FileAppears: "transcript가 다시 보임",
   N2Launch: "후속 N2가 뜸",
-  N2Prompt: "N2에 입력이 들어옴",
+  N2Prompt: "N2에 입력이 들어와 파일 승인이 생김",
   N2TakesRow: "N2 턴이 채널 행을 차지함",
   N2Idle: "N2가 idle이 됨",
   WriterCapture: "writer가 N1 범위를 읽음",
-  ProveEndLive: "host가 N1 종료를 확인해 기록함",
+  ProveEnd: "host가 N1 종료를 확인해 기록함",
+  ProveSuperseded: "후속 실행의 시작이 N1 종료를 증명함",
+  EndRefresh: "종료 기록과 저장 prefix로 파일을 승인함",
+  WriterHalt: "source가 바뀌어 writer가 멈춤",
+  RawEOFLive: "현재 N1의 개행 없는 closer로 결과를 기록함",
+  HistRawEOF: "종료 길이 안의 개행 없는 closer로 결과를 기록함",
   Settle: "N1 결과를 원본 ticket에 기록함",
   FormBarrier: "N2 입력으로 barrier를 저장함",
   OwnIdleAbstain: "N1 자신의 idle로 정리함",
