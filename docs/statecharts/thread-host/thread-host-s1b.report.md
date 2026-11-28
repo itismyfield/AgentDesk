@@ -308,4 +308,16 @@ LegacyDedicated reads Missing on one fresh E7-Off witness. UserDefault requires 
 
 The isolated `LegacyLiveReplacement` entry retains A's pane in the total. The shortest `NoDuplicatePane` counterexample is `PlacedMissingRetire → Launch → Create` on B. `SingleSubmit`, `RetireOwnGeneration`, and `FirstInputResolves` hold. TLC reached 954 states.
 
+### Owner wait after an evidenced attach fails
+
+`evidenced` models the provider evidence stored in `record.expected`. `hkey` tracks the owner's first input key. The attach cases begin with a placed provider. After evidence and pane loss, the same unattempted or KnownNotSent original waits through the exact Missing retire. Only that wait releases it to a successor. Unknown disposition stays held. The existing after-key case also records provider evidence and checks single submission.
+
+| Config | Expected contract |
+| --- | --- |
+| `S2AttachWait` | `FirstInputResolves` with the start-failure budget untouched |
+| `S2AttachUnread` | `UnknownAttachHeld`, zero submissions |
+| `MutAttachOpaque` | `OwnerStartBudgetPreserved` and `FirstInputResolves` break |
+
+The physical Missing rules and exact retirement CAS stay in the placed resolver. The typed wait lives in the owner and is keyed by the queue ticket, original and retired nonce.
+
 Removing the UserDefault witness guard in an isolated run produced `UserDefaultReplacementHeld` RED at `PlacedMissingRetire` (954 states). This models the startup-proof exception in `session_host/herdr/policy/permit.rs:176–189`. Listing failure and a witness change during the read still produce no confirmed Missing. PG tests cover the real snapshot, the expected field, stale CAS, and Retired after the first key.

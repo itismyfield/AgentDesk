@@ -142,10 +142,10 @@ S2Init == /\ exec = CASE entry \in {"FreshAfterKill", "ResumeTmux"} -> "LegacyDe
                       [] entry = "SelUnknown" -> "Unread"
                       [] entry = "RetiredNative" -> "Retired"
                       [] entry = "StaleBound" -> "Bound"
-                      [] entry \in ReplacedEntries -> "Placed"
+                      [] entry \in ReplacedEntries \union AttachEntries -> "Placed"
                       [] OTHER -> "None"
-          /\ made = (entry \in ReplacedEntries)
-          /\ tabs = IF entry = "LegacyLiveReplacement" THEN 1 ELSE 0
+          /\ made = (entry \in ReplacedEntries \union AttachEntries)
+          /\ tabs = IF entry = "LegacyLiveReplacement" \/ entry \in AttachEntries THEN 1 ELSE 0
           /\ tmuxs = 0
           /\ inq = IF entry \in S2Entries \ {"StaleBound", "RestartVacant"} THEN "Queued" ELSE "None"
           /\ submits = 0
@@ -173,8 +173,9 @@ S2Init == /\ exec = CASE entry \in {"FreshAfterKill", "ResumeTmux"} -> "LegacyDe
           \* Replacement entries start just after B answers Missing. Only the live-A
           \* entry still has a pane (outside B), and its input has never been tried.
           /\ gone = (entry \in ReplacedEntries)
-          /\ gen = IF gone THEN 1 ELSE 0
-          /\ goneGen = gen /\ lostSucc = FALSE
+          /\ gen = IF gone \/ entry \in AttachEntries THEN 1 ELSE 0
+          /\ goneGen = IF gone THEN gen ELSE 0
+          /\ lostSucc = FALSE
           /\ evidenced = FALSE /\ attachWait = "None"
 
 Init == /\ entry \in Entries
@@ -346,7 +347,7 @@ Released == {"LegacyDead", "Retired", "Gone"}
 \* owner's WRITER_HELD hold (provider_dispatch/owner_input.rs:192-224) in every mode.
 Launch == /\ UNCHANGED vars /\ UNCHANGED w3vars /\ UNCHANGED w2vars /\ entry \in S2Entries /\ inq = "Queued"
           /\ (exec \in FreshStart \/ LiveTmuxSeenDead) /\ ~rst
-          /\ (entry \in AttachEntries /\ gen > 0 => attachWait = "Released")
+          /\ (entry \in AttachEntries /\ evidenced => attachWait = "Released")
           /\ ~(LaunchHost = "Herdr" /\ ~oready /\ ~late)
           /\ ~(LaunchHost = "Herdr" /\ ~oready /\ late /\ SuccessorWithoutPermit)
           /\ IF LaunchHost = "Tmux"
