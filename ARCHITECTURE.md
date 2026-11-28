@@ -2384,6 +2384,7 @@ src/
 │   │   │   │   ├── admission.rs
 │   │   │   │   ├── admission_tests.rs
 │   │   │   │   ├── claude_handoff.rs
+│   │   │   │   ├── claude_handoff_hook_test_support.rs
 │   │   │   │   ├── closed.rs
 │   │   │   │   ├── closed_tests.rs
 │   │   │   │   ├── cold.rs
@@ -2396,6 +2397,7 @@ src/
 │   │   │   │   ├── effort_continue_tests.rs
 │   │   │   │   ├── held_watch.rs
 │   │   │   │   ├── ingress.rs
+│   │   │   │   ├── ingress_hook_test_support.rs
 │   │   │   │   ├── ingress_tests.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── native_intent_tests.rs
@@ -2420,17 +2422,20 @@ src/
 │   │   │   │   └── tests.rs
 │   │   │   ├── auto_queue_eligibility.rs
 │   │   │   ├── backstop.rs
+│   │   │   ├── backstop_hook_test_support.rs
 │   │   │   ├── cancel_backstop_tests.rs
 │   │   │   ├── cancel_reclaim_support_test.rs
 │   │   │   ├── decision_drain.rs
 │   │   │   ├── decision_drain_tests.rs
 │   │   │   ├── held_sources.rs
 │   │   │   ├── human_input.rs
+│   │   │   ├── idle_queue_kick_hook_test_support.rs
 │   │   │   ├── idle_queue_tests.rs
 │   │   │   ├── ledger_settlement_tests.rs
 │   │   │   ├── owned_backstop_tests.rs
 │   │   │   ├── queued_head_auto_tests.rs
 │   │   │   ├── queued_head_inject.rs
+│   │   │   ├── queued_head_inject_hook_test_support.rs
 │   │   │   ├── queued_head_inject_tests.rs
 │   │   │   ├── queued_head_mend_tests.rs
 │   │   │   ├── queued_head_owner_entry_tests.rs
@@ -3714,6 +3719,7 @@ src/
 │   │   │   ├── native_binding.rs
 │   │   │   ├── native_binding_tests.rs
 │   │   │   ├── native_completion.rs
+│   │   │   ├── native_completion_hook_test_support.rs
 │   │   │   ├── native_completion_tests.rs
 │   │   │   ├── native_completion_work_tests.rs
 │   │   │   ├── native_input_tests.rs
@@ -3721,6 +3727,7 @@ src/
 │   │   │   ├── native_memo_port_tests.rs
 │   │   │   ├── native_policy.rs
 │   │   │   ├── native_prepare.rs
+│   │   │   ├── native_read_hook_test_support.rs
 │   │   │   ├── native_receipt_tests.rs
 │   │   │   ├── native_restore.rs
 │   │   │   ├── native_restore_gc_tests.rs
@@ -3906,6 +3913,8 @@ src/
 │   │   ├── dl_herdr_terminate_unix_test_host.rs
 │   │   ├── dl_turn_bridge_test_host.rs
 │   │   ├── dl_turn_bridge_unix_test_host.rs
+│   │   ├── dl_turn_finalizer_test_host.rs
+│   │   ├── dl_turn_finalizer_unix_test_host.rs
 │   │   ├── dl_turn_presence_test_host.rs
 │   │   ├── dl_turn_presence_unix_test_host.rs
 │   │   ├── e2e_control.rs
