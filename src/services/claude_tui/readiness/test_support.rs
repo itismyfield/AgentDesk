@@ -142,8 +142,8 @@ pub fn after_next_reserve(callback: impl FnOnce() + 'static) {
     AFTER_RESERVE.with(|slot| *slot.borrow_mut() = Some(Box::new(callback)));
 }
 
-#[cfg(test)]
-pub(crate) fn revisions_for_session(session: &str) -> Vec<u64> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn revisions_for_session(session: &str) -> Vec<u64> {
     let mut revisions: Vec<_> = super::ledger()
         .entries
         .iter()

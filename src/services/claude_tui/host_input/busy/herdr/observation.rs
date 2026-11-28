@@ -24,8 +24,8 @@ impl Context {
         .unwrap_or_else(Reading::held)
     }
 
-    #[cfg(test)]
-    pub(crate) fn read_host(&self, output_ready: bool) -> Reading {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn read_host(&self, output_ready: bool) -> Reading {
         if !output_ready || !self.target.execution_alive() {
             return Reading::held();
         }
