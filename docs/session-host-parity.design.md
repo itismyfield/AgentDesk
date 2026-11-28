@@ -509,9 +509,9 @@ src/services/discord/tui_prompt_relay/writer_notice_owner_tests.rs:44:    use cr
 src/services/discord/turn_bridge/before_start_stop_tests.rs:1315:        crate::services::discord::admin_host_guard::tests::Recorder::start_with(Arc::new(answer))
 src/services/discord/turn_bridge/runtime_handoff_loop/codex_replacement_tests.rs:2:use crate::services::discord::admin_host_guard::tests::Recorder;
 src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/recovery_retry_guard_tests/replay_turn_tests.rs:697:    use crate::services::discord::admin_host_guard::tests::{Recorder, api_child};
-src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs:924:    let alive = crate::services::discord::admin_host_guard::tests::process(&name, pid);
-src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs:948:    use crate::services::discord::admin_host_guard::ManagedReset;
-src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs:1058:            let alive = crate::services::discord::admin_host_guard::tests::process(&name, 66_000);
+src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs:574:    let alive = crate::services::discord::admin_host_guard::tests::process(&name, pid);
+src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs:    use crate::services::discord::admin_host_guard::ManagedReset; (removed)
+src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs:732:            let alive = crate::services::discord::admin_host_guard::tests::process(&name, 66_000);
 src/services/discord/turn_presence/activity/unbound.rs:305:    if let Some(endpoint) = crate::config::session_hosts::herdr_endpoint(reads.channel) {
 src/services/discord/turn_presence/activity/unbound.rs:525:        && crate::config::session_hosts::herdr_endpoint(channel).is_none()
 src/services/discord/turn_presence/activity/unbound/completed_scheduled.rs:162:                    || crate::config::session_hosts::herdr_endpoint(channel).is_some()
