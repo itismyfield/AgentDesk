@@ -37,7 +37,7 @@ fn should_fallback_to_notify(
 
 fn delivery_content(content: &str, source: &str, reason_code: Option<&str>) -> String {
     if crate::services::message_outbox::is_non_turn_operational_alert(source, reason_code) {
-        crate::services::discord::dispatch_policy::prepend_operational_alert_origin(content)
+        crate::domain::outbound::alert_origin::prepend_operational_alert_origin(content)
     } else {
         content.to_string()
     }

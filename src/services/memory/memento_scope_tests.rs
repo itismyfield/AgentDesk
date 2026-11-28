@@ -1,6 +1,7 @@
+use crate::domain::memory::MemoryBackendKind;
 use crate::domain::memory::ResolvedMemorySettings;
 use crate::runtime_layout;
-use crate::services::discord::settings::{MemoryBackendKind, resolve_role_binding};
+use crate::services::discord::settings::resolve_role_binding;
 use crate::services::memory::*;
 use axum::{Json, Router, extract::State, routing::post};
 use poise::serenity_prelude::ChannelId;

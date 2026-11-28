@@ -176,7 +176,7 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "outbound/o_writer_io.rs": {".send_message": 1},
     "outbound/o_writer_io/attachment.rs": {".send_message": 1},
     "outbound/serenity_reference.rs": {".send_message": 2},
-    "outbound/transport.rs": {".send_message": 1},
+    "outbound/transport.rs": {".send_message": 1, ".edit_message": 1},
     "outbound/turn_output_controller.rs": {"deliver_turn_output*": 3},
     "outbound/turn_output_controller/fresh_send.rs": {".send_message": 1},
     "outbound/turn_output_controller/transport.rs": {

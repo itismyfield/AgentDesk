@@ -4,6 +4,7 @@
 use crate::services::claude_tui::input::submission::tests::{ScriptedTmux, view, wait};
 use crate::services::claude_tui::readiness::tests::compact_tests::{compact_records, pane};
 use crate::services::claude_tui::readiness::tests::{Rig, after_first_look, daemon_restart};
+use crate::services::discord::health::turn_deliver::inject::first_input::pg_tests::v2_cold_fixture;
 use serde_json::json;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -38,7 +39,13 @@ fn an_owner_input_whose_idle_transcript_moved_once_ends_refused_without_a_key() 
             "expected_transcript":null,"binding_watermark":null}});
     let queue = crate::config::runtime_root().unwrap();
     let queue = queue.join("runtime/moved-once.json");
-    let fixture = mailbox.v2_cold_fixture(queue.clone(), attempt, "one original".into(), channel);
+    let fixture = v2_cold_fixture(
+        &mailbox,
+        queue.clone(),
+        attempt,
+        "one original".into(),
+        channel,
+    );
     runtime.block_on(fixture).unwrap();
     let (path, native) = (r.path.clone(), r.ctx.expected_native_session_id.clone());
     let moved = after_first_look(&r.session, move || {

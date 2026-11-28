@@ -3,8 +3,9 @@ use crate::services::agent_recovery::{
     self, ChannelRecoveryStatus, DetectorSignal, ObserveInput, OperationPlan, PendingOperation,
 };
 use crate::services::discord::health::{self, HealthRegistry};
-use crate::services::discord::host_teardown_gate::{ChannelTeardown, channel_teardown};
+use crate::services::discord::host_teardown_gate::channel_teardown;
 use crate::services::provider::ProviderKind;
+use crate::services::session_host::ChannelTeardown;
 use crate::services::session_host::legacy_collapse::dead_only_if_dead_or_absent;
 use crate::services::session_host::{HostKind, HostSessionRef, host_for};
 use poise::serenity_prelude::ChannelId;

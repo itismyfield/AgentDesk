@@ -4,6 +4,7 @@ use crate::services::codex_tui::input::{
     draft_notice_event_for_test as draft_notice_event,
     enqueue_draft_notice_for_test as enqueue_draft_notice,
 };
+use crate::services::discord::queue_io::retained_notice;
 
 #[tokio::test]
 async fn codex_draft_notice_is_one_non_turn_outbox_event_pg() {
@@ -92,7 +93,7 @@ async fn codex_draft_notice_is_one_non_turn_outbox_event_pg() {
         .unwrap();
     assert!(text.contains("초안의 보존 여부는 확인하지 못했습니다"));
     assert!(crate::services::discord::dispatch_policy::has_non_turn_provenance(&text));
-    assert!(crate::services::turn_orchestrator::ChannelMailboxHandle::v2_notice_is_non_turn(&text));
+    assert!(retained_notice::is_non_turn(&text));
     pool.close().await;
     let test = format!(
         "{}::codex_draft_notice_is_one_non_turn_outbox_event_pg",

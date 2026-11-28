@@ -1,5 +1,8 @@
 use super::*;
 use crate::services::auto_queue::transactions;
+use crate::services::engine_runtime::health_port::{
+    SlotRowGuard, SlotRuntimeHealth, slot_runtime_health,
+};
 
 pub(super) fn attempt_restore_dispatch(
     deps: &AutoQueueActivateDeps,
@@ -441,7 +444,8 @@ pub(crate) struct AutoQueueActivateDeps {
     pub(super) pg_pool: Option<sqlx::PgPool>,
     pub(super) engine: crate::engine::PolicyEngine,
     pub(super) config: Arc<crate::config::Config>,
-    pub(super) health_registry: Option<crate::services::auto_queue::runtime::SlotRuntimeHealth>,
+    pub(super) health_registry: Option<SlotRuntimeHealth>,
+    pub(super) slot_row_guard: SlotRowGuard,
     pub(super) guild_id: Option<String>,
 }
 
@@ -451,9 +455,8 @@ impl AutoQueueActivateDeps {
             pg_pool: state.pg_pool.clone(),
             engine: state.engine.clone(),
             config: state.config.clone(),
-            health_registry: crate::services::auto_queue::runtime::slot_runtime_health(
-                state.health_registry.clone(),
-            ),
+            health_registry: slot_runtime_health(state.health_registry.clone()),
+            slot_row_guard: state.engine.slot_row_guard(),
             guild_id: state
                 .config
                 .onboarding
@@ -646,6 +649,7 @@ pub(super) fn create_activate_dispatch_for_entry_prefer_pg(
 
 pub(crate) async fn activate_with_bridge_pg(
     engine: crate::engine::PolicyEngine,
+    slot_row_guard: SlotRowGuard,
     body: ActivateBody,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pg_pool) = engine.pg_pool().cloned() else {
@@ -658,6 +662,7 @@ pub(crate) async fn activate_with_bridge_pg(
         engine,
         config: Arc::new(crate::config::Config::default()),
         health_registry: None,
+        slot_row_guard,
         guild_id: None,
     };
     activate_with_deps_pg(&deps, body).await
@@ -781,10 +786,15 @@ mod tests {
 
     fn restore_deps(pool: &PgPool) -> AutoQueueActivateDeps {
         let config = crate::config::Config::default();
-        let engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone()))
-            .expect("create FSM gate policy engine");
+        let engine = crate::engine::PolicyEngine::new_with_pg(
+            &config,
+            Some(pool.clone()),
+            crate::services::discord::health::slot_row_host_refusal,
+        )
+        .expect("create FSM gate policy engine");
         AutoQueueActivateDeps {
             pg_pool: Some(pool.clone()),
+            slot_row_guard: engine.slot_row_guard(),
             engine,
             config: Arc::new(config),
             health_registry: None,

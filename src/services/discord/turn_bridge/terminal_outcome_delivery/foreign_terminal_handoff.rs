@@ -700,7 +700,7 @@ pub(super) async fn resume_with_gateway(
 pub(super) fn cancelled_terminal_response(
     full_response: &str,
     response_sent_offset: usize,
-    restart_mode: Option<crate::services::discord::restart_mode::InflightRestartMode>,
+    restart_mode: Option<crate::domain::lifecycle::InflightRestartMode>,
     banner: &crate::services::discord::session_banner::DiscordTurnSessionBanner<'_>,
 ) -> String {
     let remaining_response = response_portion_after_offset(full_response, response_sent_offset);

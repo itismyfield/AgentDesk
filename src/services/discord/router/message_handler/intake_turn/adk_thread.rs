@@ -42,40 +42,38 @@ pub(super) struct RedirectDispatch<'a> {
 /// succeeds, so a turn that has not claimed cannot be taken for the channel's owner.
 pub(super) type Route = crate::services::turn_orchestrator::QueuedRoute;
 
-impl Route {
-    /// The thread edge that points at `target` as read at resolve time.
-    fn parent_of(shared: &SharedData, target: ChannelId) -> Option<ChannelId> {
-        (shared.dispatch.thread_parents.iter())
-            .filter(|edge| *edge.value() == target)
-            .map(|edge| *edge.key())
-            .min()
-    }
+/// The thread edge that points at `target` as read at resolve time.
+fn parent_of(shared: &SharedData, target: ChannelId) -> Option<ChannelId> {
+    (shared.dispatch.thread_parents.iter())
+        .filter(|edge| *edge.value() == target)
+        .map(|edge| *edge.key())
+        .min()
+}
 
-    /// No routing decision: the channel's override as read at resolve time.
-    fn inherited_role(shared: &SharedData, target: ChannelId) -> Option<ChannelId> {
-        shared.dispatch.role_overrides.get(&target).map(|v| *v)
-    }
+/// No routing decision: the channel's override as read at resolve time.
+fn inherited_role(shared: &SharedData, target: ChannelId) -> Option<ChannelId> {
+    shared.dispatch.role_overrides.get(&target).map(|v| *v)
+}
 
-    /// Runs right after the claim: this turn's parent edge and override replace the channel's.
-    /// A replaced parent loses its thread guard, so its queue is kicked like any edge release.
-    pub(super) fn publish(&self, shared: &Arc<SharedData>, provider: &ProviderKind) {
-        let mut replaced = Vec::new();
-        shared.dispatch.thread_parents.retain(|parent, thread| {
-            let remove = *thread == self.target && Some(*parent) != self.parent;
-            if remove {
-                replaced.push(*parent);
-            }
-            !remove
-        });
-        if let Some(parent) = self.parent {
-            shared.dispatch.thread_parents.insert(parent, self.target);
+/// Runs right after the claim: this turn's parent edge and override replace the channel's.
+/// A replaced parent loses its thread guard, so its queue is kicked like any edge release.
+pub(super) fn publish(route: &Route, shared: &Arc<SharedData>, provider: &ProviderKind) {
+    let mut replaced = Vec::new();
+    shared.dispatch.thread_parents.retain(|parent, thread| {
+        let remove = *thread == route.target && Some(*parent) != route.parent;
+        if remove {
+            replaced.push(*parent);
         }
-        use crate::services::discord::turn_finalizer::cleanup;
-        cleanup::kickoff_thread_parents_after_finalize(shared, provider, replaced);
-        match self.role {
-            Some(role) => _ = shared.dispatch.role_overrides.insert(self.target, role),
-            None => _ = shared.dispatch.role_overrides.remove(&self.target),
-        }
+        !remove
+    });
+    if let Some(parent) = route.parent {
+        shared.dispatch.thread_parents.insert(parent, route.target);
+    }
+    use crate::services::discord::turn_finalizer::cleanup;
+    cleanup::kickoff_thread_parents_after_finalize(shared, provider, replaced);
+    match route.role {
+        Some(role) => _ = shared.dispatch.role_overrides.insert(route.target, role),
+        None => _ = shared.dispatch.role_overrides.remove(&route.target),
     }
 }
 
@@ -108,15 +106,13 @@ pub(super) async fn redirect_dispatch(
             tracing::info!(
                 "  [{ts}] 📢 Dispatch {did} uses primary-channel routing, skipping thread creation"
             );
-            role = Route::inherited_role(shared, channel_id);
+            role = inherited_role(shared, channel_id);
             channel_id
         } else {
             // Use cached dispatch metadata for thread reuse and cross-channel role override
             let dispatch_info = dispatch_info_cached;
             let is_counter_model_dispatch =
-                crate::services::dispatches::outbox_route::use_counter_model_channel(
-                    dispatch_type_str,
-                );
+                crate::domain::dispatch_route::use_counter_model_channel(dispatch_type_str);
             let alt_channel_id = dispatch_info
                 .as_ref()
                 .and_then(|i| i.discord_channel_alt.as_deref())
@@ -272,7 +268,7 @@ pub(super) async fn redirect_dispatch(
                         Err(e) => {
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             tracing::warn!("  [{ts}] ⚠ Failed to create dispatch thread: {e}");
-                            role = Route::inherited_role(shared, channel_id);
+                            role = inherited_role(shared, channel_id);
                             channel_id // fallback to main channel
                         }
                     }
@@ -280,7 +276,7 @@ pub(super) async fn redirect_dispatch(
             }
         }
     } else {
-        role = Route::inherited_role(shared, channel_id);
+        role = inherited_role(shared, channel_id);
         channel_id
     };
     // A replayed item keeps the route it resolved before it lost its claim.
@@ -288,7 +284,7 @@ pub(super) async fn redirect_dispatch(
         Some(queued) if queued.target == channel_id => queued,
         _ => Route {
             target: channel_id,
-            parent: parent.or_else(|| Route::parent_of(shared, channel_id)),
+            parent: parent.or_else(|| parent_of(shared, channel_id)),
             role,
         },
     };

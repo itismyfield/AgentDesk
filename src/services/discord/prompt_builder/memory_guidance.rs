@@ -5,7 +5,8 @@
 use poise::serenity_prelude::ChannelId;
 
 use super::DispatchProfile;
-use crate::services::discord::settings::{MemoryBackendKind, ResolvedMemorySettings, RoleBinding};
+use crate::domain::memory::{MemoryBackendKind, ResolvedMemorySettings};
+use crate::services::discord::settings::RoleBinding;
 use crate::services::memory::{
     UNBOUND_MEMORY_ROLE_ID, resolve_memento_agent_id, resolve_memento_workspace,
     sanitize_memento_workspace_segment,
@@ -61,8 +62,8 @@ pub(super) fn proactive_memory_guidance_with(
     if settings.backend == MemoryBackendKind::File && settings.memento_fallback {
         return Some(String::from(
             "\n\n[Proactive Memory Guidance — Fallback Mode]\n\
-             memento is configured but unreachable; memory has degraded to the local file store. \
-             Use `memory-read` skill for explicit past-context/error/config lookups. \
+             memento is configured but unreachable; memory has degraded to the local fallback. \
+             Use `/api/memory/recall` for explicit past-context/error/config lookups. \
              HOLD permanent writes: do NOT commit confirmed decisions, root causes, or config \
              changes to the degraded store — record them with `remember` once memento recovers.",
         ));
@@ -71,8 +72,8 @@ pub(super) fn proactive_memory_guidance_with(
     let (backend_name, read_tool, write_tool, extra_note) = match settings.backend {
         MemoryBackendKind::File => (
             "local",
-            "`memory-read` skill",
-            "`memory-write` skill",
+            "`/api/memory/recall`",
+            "`/api/memory/remember`",
             String::new(),
         ),
         MemoryBackendKind::Memento if !memento_mcp_available => return None,
@@ -223,8 +224,10 @@ mod tests {
 
         assert!(guidance.contains("[Proactive Memory Guidance]"));
         assert!(guidance.contains("`local` memory is available"));
-        assert!(guidance.contains("`memory-read` skill"));
-        assert!(guidance.contains("`memory-write` skill"));
+        assert!(guidance.contains("`/api/memory/recall`"));
+        assert!(guidance.contains("`/api/memory/remember`"));
+        assert!(!guidance.contains("memory-read"));
+        assert!(!guidance.contains("memory-write"));
         assert!(
             !guidance.contains("Fallback Mode"),
             "configured file backend must not show fallback wording, got: {guidance}"
@@ -251,6 +254,8 @@ mod tests {
 
         assert!(guidance.contains("[Proactive Memory Guidance — Fallback Mode]"));
         assert!(guidance.contains("memento is configured but unreachable"));
+        assert!(guidance.contains("`/api/memory/recall`"));
+        assert!(!guidance.contains("memory-read"));
         // Core semantics: hold permanent writes; record after memento recovers.
         assert!(
             guidance.contains("HOLD permanent writes"),

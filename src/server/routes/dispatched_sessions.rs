@@ -254,11 +254,21 @@ pub async fn resume_previous_session(
     Path(session_key): Path<String>,
     Json(body): Json<crate::services::session_resume::ResumePreviousOptions>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    crate::services::session_resume::resume_previous_session(
-        State(state),
-        headers,
-        Path(session_key),
-        Json(body),
+    let Some(pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "postgres pool unavailable"})),
+        );
+    };
+    let forward_context = crate::services::session_forwarding::ForwardCallerContext::from(&state);
+    let ports = crate::services::discord::health::resume_ports(state.health_registry.as_deref());
+    crate::services::session_resume::dispatch_resume_previous(
+        pool,
+        ports,
+        &forward_context,
+        Some(&headers),
+        &session_key,
+        &body,
     )
     .await
 }

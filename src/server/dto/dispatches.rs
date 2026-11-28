@@ -8,12 +8,6 @@
 //!
 //! When new request/response shapes are added for dispatch routes, prefer
 //! defining them here directly to keep the route surface declarative.
-//!
-//! Note: the non-presentation delivery transport types
-//! (`DispatchMessagePostError`, `DispatchNotifyDeliveryResult`,
-//! `DispatchMessagePostOutcome`, `ReviewFollowupKind`) were relocated to
-//! `crate::services::dispatches::discord_delivery::transport` (#3037 bucket 4);
-//! they now live beside the delivery logic that owns them.
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub(crate) struct DispatchListItem {
     pub(crate) id: String,

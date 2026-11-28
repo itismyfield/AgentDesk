@@ -1,8 +1,6 @@
-pub(crate) use crate::domain::lifecycle::InflightRestartMode;
-
 #[cfg(test)]
 mod tests {
-    use super::InflightRestartMode;
+    use crate::domain::lifecycle::InflightRestartMode;
     use crate::services::provider::CancelToken;
     use std::sync::atomic::Ordering;
 

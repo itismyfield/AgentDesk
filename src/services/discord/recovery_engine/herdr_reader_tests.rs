@@ -5,6 +5,7 @@ use super::*;
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedLocation, HostedOwner, ProcessStamp, SourceRef,
 };
+use crate::services::session_host::SocketHerdrReader;
 use crate::services::session_host::herdr_socket_rig_tests::{
     HerdrRig, KEY, NODE, PANE, PROVIDER, SESSION, SHELL,
 };

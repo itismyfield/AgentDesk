@@ -5,7 +5,6 @@ use super::intake_queue_transaction::{
     IntakeQueueCommitSource, IntakeQueuePendingReactionPolicy, SoftInterventionCommitRequest,
     SoftInterventionSpec, commit_soft_intervention_transaction,
 };
-pub(crate) use crate::services::cluster::intake_router_hook::owner_record::input_start;
 
 mod busy_duplicate_notice;
 pub(super) mod busy_inject;
@@ -507,7 +506,7 @@ pub(in crate::services::discord) async fn handle_event(
 
             let raw_text = new_message.content.trim();
             let (without_operational_alert_origin, _has_operational_alert_origin) =
-                super::super::dispatch_policy::strip_operational_alert_origin(raw_text);
+                crate::domain::outbound::alert_origin::strip_operational_alert_origin(raw_text);
             let (sanitized_text, has_monitor_auto_turn_origin) =
                 super::super::strip_monitor_auto_turn_origin(
                     without_operational_alert_origin.as_ref(),

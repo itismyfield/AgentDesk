@@ -14,10 +14,11 @@ mod thread_binding;
 mod transition_wake;
 mod turn_start;
 
-pub(crate) use authorization::TurnKind;
+pub(crate) use crate::services::cluster::intake_turn::IntakeExecution;
+pub(crate) use crate::services::cluster::intake_turn::TurnKind;
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) use intake_dispatch::IntakeAdmission;
-pub(crate) use intake_dispatch::replay_admission::{IntakeExecution, deferred_execution};
+pub(crate) use intake_dispatch::replay_admission::deferred_execution;
 pub(in crate::services::discord) use ports::ROUTER_PORTS;
 pub(in crate::services::discord) use transition_wake::SessionTransitionCompletion;
 #[cfg(unix)]

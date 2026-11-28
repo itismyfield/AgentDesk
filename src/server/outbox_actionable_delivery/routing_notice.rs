@@ -44,7 +44,7 @@ pub(super) async fn deliver(
     };
     let nonce = event.nonce.clone();
     let content =
-        crate::services::discord::dispatch_policy::prepend_operational_alert_origin(&event.content);
+        crate::domain::outbound::alert_origin::prepend_operational_alert_origin(&event.content);
     let message_id = match crate::services::discord::outbound::send_gate::post_routing_notice(
         registry, channel, &content, &event.bot, &nonce,
     )

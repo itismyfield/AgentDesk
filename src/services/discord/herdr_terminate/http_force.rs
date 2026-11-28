@@ -8,9 +8,10 @@ use sqlx::PgPool;
 
 use super::{
     HealthRegistry, HostedObservation, Logged, OperatorTerminate, RetiredExclusion,
-    TerminationResult, runtime_of, terminate_enabled, terminate_scoped,
+    TerminationResult, runtime_of, terminate_scoped,
 };
 use crate::db::dispatched_sessions::hosted_execution::http_force::active_dispatch_pg;
+use crate::services::session_host::operation_policy::terminate_enabled;
 pub(crate) use crate::services::turn_orchestrator::{Expected, Released};
 
 /// Runs the scoped terminate bound to `expected`, on a retire `postlude` under the held exclusion

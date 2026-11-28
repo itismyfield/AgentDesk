@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(unix)]
+use crate::services::discord::queue_io::input_owner::cold::v2_cold_observed;
 use crate::services::turn_orchestrator::{ChannelMailboxHandle, ChannelMailboxRegistry};
 
 async fn accepted_fixture() -> (
@@ -339,9 +341,7 @@ async fn bootstrap_held_by_modal<T>(
             crate::services::claude_tui::owner_input::vetoed("Modal");
             Ok::<(), String>(())
         };
-        owner
-            .v2_cold_observed(0, std::sync::Arc::new(|| 0), effect)
-            .await
+        v2_cold_observed(&owner, 0, std::sync::Arc::new(|| 0), effect).await
     });
     if in_window.await.is_err() {
         panic!("cold: {:?}", cold.await.unwrap().map(|r| r.0));

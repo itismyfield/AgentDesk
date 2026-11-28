@@ -149,7 +149,9 @@ impl DiscordPort for GatewayPort {
         async move {
             let message = super::notification_policy::scoped_message(channel)
                 .content(content)
-                .allowed_mentions(super::super::http::relay_allowed_mentions());
+                .allowed_mentions(
+                    crate::services::message_outbox::mentions::relay_allowed_mentions(),
+                );
             // A deleted anchor still posts, without the reference.
             let message = match reply_to {
                 Some(id) => message.reference_message(

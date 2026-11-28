@@ -1,6 +1,7 @@
 //! Completes only a positively ended predecessor, without sending any terminal mutation.
 use super::http_force::Expected;
 use super::*;
+use crate::services::session_host::operation_policy::terminate_enabled;
 
 pub(in crate::services::discord) async fn expected_for_restart(
     shared: &Arc<SharedData>,

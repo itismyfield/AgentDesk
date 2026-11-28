@@ -134,7 +134,7 @@ fn background_bash_task_slots_enabled() -> bool {
     slots_enabled_by_footer_flag()
 }
 
-pub(super) use crate::domain::tool_summary::tool_input_value;
+use crate::domain::tool_summary::tool_input_value;
 
 pub(in crate::services::discord) fn status_events_from_tool_result(
     tool_name: Option<&str>,
@@ -618,7 +618,8 @@ fn user_status_events(value: &Value) -> Vec<StatusEvent> {
     // block); the record-level fallback is disabled when any block carries one.
     let any_block_aggregate = blocks.iter().any(|block| {
         block.get("type").and_then(Value::as_str) == Some("tool_result")
-            && super::subagent_rollout::summary_from_tool_use_result(block).is_some()
+            && crate::services::claude_tui::activity::events::summary_from_tool_use_result(block)
+                .is_some()
     });
 
     // Legacy single-subagent fallback: the record-level aggregate, owned by the

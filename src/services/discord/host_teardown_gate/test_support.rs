@@ -23,6 +23,47 @@ pub(crate) fn session_transition_lock(
     shared.session_transition_locks.lock(channel)
 }
 
+#[cfg(all(test, unix))]
+type OwnerWakeHook = Arc<dyn Fn() + Send + Sync>;
+
+#[cfg(all(test, unix))]
+pub(crate) struct ResumeOwnerWakeProbe(ChannelId, Option<OwnerWakeHook>);
+
+#[cfg(all(test, unix))]
+impl ResumeOwnerWakeProbe {
+    pub(crate) fn install(
+        shared: &Arc<SharedData>,
+        channel: ChannelId,
+        owner: &crate::services::turn_orchestrator::ChannelMailboxHandle,
+    ) -> (Self, tokio::sync::mpsc::UnboundedReceiver<(bool, bool)>) {
+        use crate::services::discord::queue_io::cancel_backstop_test_support::set_owner_wake_for_tests;
+        let (send, receive) = tokio::sync::mpsc::unbounded_channel();
+        let (shared, owner) = (shared.clone(), owner.clone());
+        let lock = session_transition_lock(&shared, channel);
+        let previous = set_owner_wake_for_tests(
+            channel,
+            Some(Arc::new(move || {
+                let lock_released = lock.try_lock().is_ok();
+                let same_owner = shared
+                    .mailbox_peek(channel)
+                    .is_some_and(|current| current.same_actor(&owner));
+                let _ = send.send((lock_released, same_owner));
+            })),
+        );
+        (Self(channel, previous), receive)
+    }
+}
+
+#[cfg(all(test, unix))]
+impl Drop for ResumeOwnerWakeProbe {
+    fn drop(&mut self) {
+        crate::services::discord::queue_io::cancel_backstop_test_support::set_owner_wake_for_tests(
+            self.0,
+            self.1.take(),
+        );
+    }
+}
+
 /// What the stored rows say about one tmux session before a teardown reads them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Stored {
@@ -171,6 +212,12 @@ pub(crate) async fn turn_kept(
 #[cfg(unix)]
 pub(crate) fn stop_recorded(channel_id: ChannelId) -> bool {
     crate::services::discord::tmux::recent_turn_stop_for_channel(channel_id).is_some()
+}
+
+#[cfg(unix)]
+pub(crate) fn stop_generation(channel_id: ChannelId) -> Option<i64> {
+    crate::services::discord::tmux::recent_turn_stop_for_channel(channel_id)?
+        .stop_generation_mtime_ns
 }
 
 /// A busy mailbox turn on `channel_id` whose token holds no tmux binding and which stores no

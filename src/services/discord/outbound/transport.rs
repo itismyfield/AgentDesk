@@ -18,7 +18,7 @@ use crate::domain::outbound::port::{
 };
 use crate::domain::outbound::result::DeliveryResult;
 use crate::services::discord::SharedData;
-use crate::services::dispatches::http_outbound::HttpOutbound;
+use crate::services::dispatches::http_outbound::{Edit, HttpOutbound};
 
 pub(crate) async fn post_serenity_message_with_nonce(
     http: &Arc<serenity::Http>,
@@ -33,7 +33,7 @@ pub(crate) async fn post_serenity_message_with_nonce(
         .content(content)
         .nonce(serenity::model::channel::Nonce::String(nonce.to_string()))
         .enforce_nonce(enforce_nonce)
-        .allowed_mentions(crate::services::discord::http::relay_allowed_mentions());
+        .allowed_mentions(crate::services::message_outbox::mentions::relay_allowed_mentions());
     if let Some((reference_channel, reference_message)) = reference {
         message = message.reference_message(
             serenity::MessageReference::from((reference_channel, reference_message))
@@ -300,6 +300,14 @@ pub(super) fn engine_http_deliver(
             .await
     })
 }
+
+pub(super) const ENGINE_HTTP_EDIT: Edit = |conn, channel_id, message_id, content| {
+    Box::pin(async move {
+        HttpOutboundClient::new(conn.client, conn.token, conn.discord_api_base)
+            .edit_message(channel_id, message_id, content)
+            .await
+    })
+};
 
 impl DiscordOutboundClient for HttpOutboundClient {
     async fn post_message(

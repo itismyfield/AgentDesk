@@ -41,7 +41,7 @@ pub(super) async fn register_restored_core(
                 crate::services::discord::DiscordSession {
                     session_id: persisted_session_id.clone(),
                     memento_context_loaded:
-                        crate::services::discord::session_runtime::restored_memento_context_loaded(
+                        crate::services::engine_runtime::session::EngineSession::restored_memento_context_loaded(
                             false,
                             None,
                             persisted_session_id.as_deref(),

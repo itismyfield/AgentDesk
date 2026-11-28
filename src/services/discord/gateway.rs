@@ -12,7 +12,6 @@ use super::outbound::message::{
     DiscordOutboundMessage, OutboundOperation, OutboundReferenceContext, OutboundTarget,
 };
 use super::outbound::policy::DiscordOutboundPolicy;
-use super::outbound::result::DeliveryResult;
 use super::outbound::{
     DiscordOutboundClient, post_serenity_message_with_nonce, shared_outbound_deduper,
 };
@@ -22,6 +21,8 @@ use super::{
     Intervention, QueuedCardDisposition, QueuedCardTeardown, SharedData, formatting, queue_marker,
     queued_card_gate, rate_limit_wait, resolve_discord_bot_provider, validate_live_channel_routing,
 };
+use crate::domain::outbound::port::{DispatchMessagePostError, DispatchMessagePostErrorKind};
+use crate::domain::outbound::result::DeliveryResult;
 use crate::services::cluster::intake_turn::IntakeExecution;
 use crate::services::provider::ProviderKind;
 use formatting::ReplaceLongMessageOutcome;
@@ -326,8 +327,7 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
         &self,
         target_channel: &str,
         content: &str,
-    ) -> Result<String, crate::services::dispatches::discord_delivery::DispatchMessagePostError>
-    {
+    ) -> Result<String, DispatchMessagePostError> {
         let channel_id = parse_channel_id(target_channel)?;
         rate_limit_wait(&self.shared, channel_id).await;
         super::outbound::raw_output::request(
@@ -337,7 +337,9 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
                 &self.http,
                 serenity::CreateMessage::new()
                     .content(content)
-                    .allowed_mentions(super::http::relay_allowed_mentions()),
+                    .allowed_mentions(
+                        crate::services::message_outbox::mentions::relay_allowed_mentions(),
+                    ),
             ),
         )
         .await
@@ -351,15 +353,11 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
         content: &str,
         reference_channel: &str,
         reference_message: &str,
-    ) -> Result<String, crate::services::dispatches::discord_delivery::DispatchMessagePostError>
-    {
+    ) -> Result<String, DispatchMessagePostError> {
         let channel_id = parse_channel_id(target_channel)?;
         let reference_channel_id = parse_channel_id(reference_channel)?;
         let reference_message_id = parse_message_id(reference_message).map_err(|error| {
-            crate::services::dispatches::discord_delivery::DispatchMessagePostError::new(
-                crate::services::dispatches::discord_delivery::DispatchMessagePostErrorKind::Other,
-                error,
-            )
+            DispatchMessagePostError::new(DispatchMessagePostErrorKind::Other, error)
         })?;
         rate_limit_wait(&self.shared, channel_id).await;
         // Degrade to a normal (non-reply) send when the referenced message no
@@ -379,7 +377,9 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
                         .fail_if_not_exists(false),
                     )
                     .content(content)
-                    .allowed_mentions(super::http::relay_allowed_mentions()),
+                    .allowed_mentions(
+                        crate::services::message_outbox::mentions::relay_allowed_mentions(),
+                    ),
             ),
         )
         .await
@@ -393,8 +393,7 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
         content: &str,
         nonce: &str,
         enforce_nonce: bool,
-    ) -> Result<String, crate::services::dispatches::discord_delivery::DispatchMessagePostError>
-    {
+    ) -> Result<String, DispatchMessagePostError> {
         let channel_id = parse_channel_id(target_channel)?;
         post_serenity_message_with_nonce(
             &self.http,
@@ -417,15 +416,11 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
         reference_message: &str,
         nonce: &str,
         enforce_nonce: bool,
-    ) -> Result<String, crate::services::dispatches::discord_delivery::DispatchMessagePostError>
-    {
+    ) -> Result<String, DispatchMessagePostError> {
         let channel_id = parse_channel_id(target_channel)?;
         let reference_channel_id = parse_channel_id(reference_channel)?;
         let reference_message_id = parse_message_id(reference_message).map_err(|error| {
-            crate::services::dispatches::discord_delivery::DispatchMessagePostError::new(
-                crate::services::dispatches::discord_delivery::DispatchMessagePostErrorKind::Other,
-                error,
-            )
+            DispatchMessagePostError::new(DispatchMessagePostErrorKind::Other, error)
         })?;
         post_serenity_message_with_nonce(
             &self.http,
@@ -445,14 +440,10 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
         target_channel: &str,
         message_id: &str,
         content: &str,
-    ) -> Result<String, crate::services::dispatches::discord_delivery::DispatchMessagePostError>
-    {
+    ) -> Result<String, DispatchMessagePostError> {
         let channel_id = parse_channel_id(target_channel)?;
         let message_id = parse_message_id(message_id).map_err(|error| {
-            crate::services::dispatches::discord_delivery::DispatchMessagePostError::new(
-                crate::services::dispatches::discord_delivery::DispatchMessagePostErrorKind::Other,
-                error,
-            )
+            DispatchMessagePostError::new(DispatchMessagePostErrorKind::Other, error)
         })?;
         rate_limit_wait(&self.shared, channel_id).await;
         super::outbound::raw_output::request(
@@ -463,7 +454,9 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
                 message_id,
                 serenity::EditMessage::new()
                     .content(content)
-                    .allowed_mentions(super::http::relay_allowed_mentions()),
+                    .allowed_mentions(
+                        crate::services::message_outbox::mentions::relay_allowed_mentions(),
+                    ),
             ),
         )
         .await
@@ -472,41 +465,37 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
     }
 }
 
-fn parse_channel_id(
-    raw: &str,
-) -> Result<ChannelId, crate::services::dispatches::discord_delivery::DispatchMessagePostError> {
+fn parse_channel_id(raw: &str) -> Result<ChannelId, DispatchMessagePostError> {
     raw.parse::<u64>().map(ChannelId::new).map_err(|error| {
-        crate::services::dispatches::discord_delivery::DispatchMessagePostError::new(
-            crate::services::dispatches::discord_delivery::DispatchMessagePostErrorKind::Other,
+        DispatchMessagePostError::new(
+            DispatchMessagePostErrorKind::Other,
             format!("invalid Discord channel id {raw}: {error}"),
         )
     })
 }
 
-fn dispatch_post_error(
-    error: serenity::Error,
-) -> crate::services::dispatches::discord_delivery::DispatchMessagePostError {
+fn dispatch_post_error(error: serenity::Error) -> DispatchMessagePostError {
     let detail = crate::utils::redact::redact_known_secrets(&error.to_string());
     let lowered = detail.to_ascii_lowercase();
     let kind = if detail.contains("BASE_TYPE_MAX_LENGTH")
         || lowered.contains("2000 or fewer in length")
         || lowered.contains("length")
     {
-        crate::services::dispatches::discord_delivery::DispatchMessagePostErrorKind::MessageTooLong
+        DispatchMessagePostErrorKind::MessageTooLong
     } else {
-        crate::services::dispatches::discord_delivery::DispatchMessagePostErrorKind::Other
+        DispatchMessagePostErrorKind::Other
     };
     if let serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(response)) = &error
         && let Ok(status) = reqwest::StatusCode::from_u16(response.status_code.as_u16())
     {
-        return crate::services::dispatches::discord_delivery::DispatchMessagePostError::http(
+        return DispatchMessagePostError::http(
             kind,
             status,
             i64::try_from(response.error.code).ok(),
             detail,
         );
     }
-    crate::services::dispatches::discord_delivery::DispatchMessagePostError::new(kind, detail)
+    DispatchMessagePostError::new(kind, detail)
 }
 
 /// Drain non-head merged-source mappings, preserving the head and cards with surviving owners.

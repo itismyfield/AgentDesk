@@ -55,7 +55,7 @@ fn catch_up_intervention_text(text: &str, author_is_bot: bool) -> String {
         return text.to_string();
     }
     let (without_operational_alert_origin, _) =
-        super::dispatch_policy::strip_operational_alert_origin(text);
+        crate::domain::outbound::alert_origin::strip_operational_alert_origin(text);
     without_operational_alert_origin.trim().to_string()
 }
 

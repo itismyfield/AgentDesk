@@ -1,6 +1,7 @@
 use super::*;
 use crate::config::TestRuntimeRootGuard;
 use crate::services::cluster::attachment_transfer::{self as assets, uploads::Upload};
+use crate::services::discord::health::turn_deliver::inject::queued_owner::v2_effect;
 
 #[tokio::test]
 async fn admission_failure_keeps_consumed_assets_and_ack_custody_pg() {
@@ -158,14 +159,13 @@ async fn admission_failure_keeps_consumed_assets_and_ack_custody_pg() {
     let effects = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let count = effects.clone();
     assert!(
-        mixed
-            .v2_effect(2000, move |frame| {
-                assert_eq!(frame, "fresh B\n_ literal");
-                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(true)
-            })
-            .await
-            .unwrap()
+        v2_effect(&mixed, 2000, move |frame| {
+            assert_eq!(frame, "fresh B\n_ literal");
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(true)
+        })
+        .await
+        .unwrap()
     );
     assert_eq!(
         effects.load(std::sync::atomic::Ordering::SeqCst),

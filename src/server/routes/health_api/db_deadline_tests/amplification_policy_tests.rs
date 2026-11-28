@@ -120,10 +120,18 @@ pub(super) fn engines(
     let mut config = crate::config::Config::default();
     config.policies.dir = dir;
     config.policies.hot_reload = true;
-    let main = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone()))
-        .expect("main policy engine with PostgreSQL");
-    let tick = crate::engine::PolicyEngine::new_for_tick(&config, Some(pool.clone()))
-        .expect("tick policy engine with PostgreSQL");
+    let main = crate::engine::PolicyEngine::new_with_pg(
+        &config,
+        Some(pool.clone()),
+        crate::services::discord::health::slot_row_host_refusal,
+    )
+    .expect("main policy engine with PostgreSQL");
+    let tick = crate::engine::PolicyEngine::new_for_tick(
+        &config,
+        Some(pool.clone()),
+        crate::services::discord::health::slot_row_host_refusal,
+    )
+    .expect("tick policy engine with PostgreSQL");
     (main, tick)
 }
 

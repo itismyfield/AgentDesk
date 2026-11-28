@@ -536,7 +536,7 @@ fn reason_aggregation_and_human_checks_preserve_safety_restrictions() {
 /// the busy mailbox it would otherwise repair is unmeasured, and nothing is posted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn doctor_session_lookup_timeout_never_posts_repair() {
-    use crate::services::health_diagnostics::pg_wire_proxy::PgWireProxy;
+    use crate::db::pg_wire_proxy::PgWireProxy;
     use tower::ServiceExt;
     let _root = crate::config::TestRuntimeRootGuard::new();
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
@@ -816,7 +816,7 @@ fn session_lookup_not_started_is_a_warning_without_repair() {
 /// channel that answered is a warning rather than a failure, and doctor posts no repair.
 #[test]
 fn doctor_stalled_actor_leaves_answered_rows_a_warning_without_repair() {
-    use crate::services::health_diagnostics::pg_wire_proxy::PgWireProxy;
+    use crate::db::pg_wire_proxy::PgWireProxy;
     use poise::serenity_prelude::ChannelId;
     use tower::ServiceExt;
     let _root = crate::config::TestRuntimeRootGuard::new();

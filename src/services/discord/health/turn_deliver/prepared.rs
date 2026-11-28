@@ -1,10 +1,10 @@
 //! Effect-free human delivery preparation with execution deferred until admission.
 
 use super::{
-    DeliveryPorts, HealthRegistry, HumanInputDelivery, HumanInputError, HumanInputRequest,
-    InjectMode, LivePorts, authorize_on_shared, deliver_with_ports, inject,
-    resolve_direct_channel_shared,
+    DeliveryPorts, HealthRegistry, HumanInputRequest, InjectMode, LivePorts, authorize_on_shared,
+    deliver_with_ports, inject, resolve_direct_channel_shared,
 };
+use crate::domain::human_input::{HumanInputDelivery, HumanInputError};
 
 use super::super::ThreadTurnRuntime;
 
