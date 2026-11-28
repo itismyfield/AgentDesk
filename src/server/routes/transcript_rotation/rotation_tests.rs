@@ -88,6 +88,7 @@ async fn rotation_handoff_api_stages_without_effect_pg() {
         .v2_adopt(path.clone(), namespace.clone())
         .await
         .unwrap();
+    let initial = std::fs::read(&path).unwrap();
     let handoff = Handoff {
         op_id: Uuid::new_v4(),
         native_session_id: Uuid::new_v4(),
@@ -123,7 +124,7 @@ async fn rotation_handoff_api_stages_without_effect_pg() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(pending["rotation"]["state"], "requested");
     assert!(pending["rotation"].get("ticket").is_none());
-    assert!(!path.exists());
+    assert_eq!(std::fs::read(&path).unwrap(), initial);
 
     let post_body = || Body::from(serde_json::to_vec(&handoff).unwrap());
     let (first, second) = tokio::join!(

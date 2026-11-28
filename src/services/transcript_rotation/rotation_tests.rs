@@ -1,11 +1,14 @@
-use std::{io::Cursor, path::Path};
+use std::{
+    io::Cursor,
+    path::{Path, PathBuf},
+};
 
 use chrono::{DateTime, TimeDelta, Utc};
 use uuid::Uuid;
 
 use super::{eligibility::*, schedules::pending_schedule};
 use crate::{
-    config::RuntimeSettingsConfig,
+    config::{RuntimeSettingsConfig, TestRuntimeRootGuard},
     db::{auto_queue::test_support::TestPostgresDb, transcript_rotation_requests},
     services::{
         tui_o::{channel_policy::Adoption, writer::actor::Undelivered},
@@ -42,6 +45,20 @@ fn eligibility(debt: &Undelivered) -> Eligibility<'_> {
     }
 }
 
+struct QueueFixture(TestRuntimeRootGuard);
+
+impl QueueFixture {
+    fn new() -> Self {
+        let root = TestRuntimeRootGuard::new();
+        std::fs::create_dir(root.path().join("runtime")).unwrap();
+        Self(root)
+    }
+
+    fn path(&self, name: impl AsRef<Path>) -> PathBuf {
+        self.0.path().join("runtime/rotation-tests").join(name)
+    }
+}
+
 fn owner(path: &Path) -> Owner {
     Owner::adopt(path.to_path_buf(), "claude/rotation-tests".into()).unwrap()
 }
@@ -74,9 +91,10 @@ fn request(native_session_id: Uuid) -> (RotationIntent, Handoff) {
 async fn rotation_latch_insert_before_owner_commit_pg() {
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
-    let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("queue.json");
+    let fixture = QueueFixture::new();
+    let path = fixture.path("queue.json");
     let mut owner = owner(&path);
+    let initial = std::fs::read(&path).unwrap();
     let native = Uuid::new_v4();
     let (intent, _) = request(native);
     let op = intent.op_id;
@@ -94,7 +112,7 @@ async fn rotation_latch_insert_before_owner_commit_pg() {
             .is_err()
     );
     assert!(owner.snapshot.rotation.is_none());
-    assert!(!path.exists());
+    assert_eq!(std::fs::read(&path).unwrap(), initial);
     let saved = transcript_rotation_requests::get(&pool, "claude", native)
         .await
         .unwrap()
@@ -115,18 +133,18 @@ async fn rotation_latch_insert_before_owner_commit_pg() {
             .await
             .unwrap()
     );
-    assert!(!path.exists());
+    assert_eq!(std::fs::read(&path).unwrap(), initial);
 }
 
 #[tokio::test]
 async fn rotation_latch_survives_reselect_pg() {
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
-    let tmp = tempfile::tempdir().unwrap();
+    let fixture = QueueFixture::new();
     let a = Uuid::new_v4();
     let b = Uuid::new_v4();
     for (index, (native, expected)) in [(a, true), (b, true), (a, false)].into_iter().enumerate() {
-        let mut relocated = owner(&tmp.path().join(format!("{index}.json")));
+        let mut relocated = owner(&fixture.path(format!("{index}.json")));
         assert_eq!(
             relocated
                 .reserve_rotation(
@@ -174,9 +192,10 @@ async fn rotation_latch_survives_reselect_pg() {
 
 #[tokio::test]
 async fn rotation_ineligible_never_touches_latch() {
-    let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("queue.json");
+    let fixture = QueueFixture::new();
+    let path = fixture.path("queue.json");
     let mut owner = owner(&path);
+    let initial = std::fs::read(&path).unwrap();
     let zero = Undelivered::default();
     let debt = Undelivered {
         posting: 1,
@@ -241,7 +260,7 @@ async fn rotation_ineligible_never_touches_latch() {
                 .unwrap()
         );
     }
-    assert!(!path.exists());
+    assert_eq!(std::fs::read(&path).unwrap(), initial);
 }
 
 #[tokio::test]
@@ -261,10 +280,12 @@ async fn rotation_pending_schedule_blocks() {
     let recurring = rows.replace(r#""recurring":false"#, r#""recurring":true"#);
     assert!(pending_schedule(Cursor::new(recurring), native));
 
-    let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("queue.json");
+    let fixture = QueueFixture::new();
+    let path = fixture.path("queue.json");
+    let mut owner = owner(&path);
+    let initial = std::fs::read(&path).unwrap();
     assert!(
-        !owner(&path)
+        !owner
             .reserve_rotation(
                 Some(42),
                 &eligibility(&Undelivered::default()),
@@ -275,14 +296,15 @@ async fn rotation_pending_schedule_blocks() {
             .await
             .unwrap()
     );
-    assert!(!path.exists());
+    assert_eq!(std::fs::read(&path).unwrap(), initial);
 }
 
 #[tokio::test]
 async fn rotation_seed_turn_never_triggers() {
-    let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("queue.json");
+    let fixture = QueueFixture::new();
+    let path = fixture.path("queue.json");
     let mut owner = owner(&path);
+    let initial = std::fs::read(&path).unwrap();
     let zero = Undelivered::default();
     for origin in [InputOrigin::RotationSeed, InputOrigin::RotationRequest] {
         assert!(
@@ -301,7 +323,7 @@ async fn rotation_seed_turn_never_triggers() {
                 .unwrap()
         );
     }
-    assert!(!path.exists());
+    assert_eq!(std::fs::read(&path).unwrap(), initial);
 }
 
 #[tokio::test]
@@ -314,10 +336,12 @@ async fn rotation_disabled_by_default_spends_nothing() {
             .get("transcript_rotation_soft_bytes")
             .is_none()
     );
-    let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("queue.json");
+    let fixture = QueueFixture::new();
+    let path = fixture.path("queue.json");
+    let mut owner = owner(&path);
+    let initial = std::fs::read(&path).unwrap();
     assert!(
-        !owner(&path)
+        !owner
             .reserve_rotation(
                 config.transcript_rotation_soft_bytes,
                 &eligibility(&Undelivered::default()),
@@ -328,13 +352,13 @@ async fn rotation_disabled_by_default_spends_nothing() {
             .await
             .unwrap()
     );
-    assert!(!path.exists());
+    assert_eq!(std::fs::read(&path).unwrap(), initial);
 }
 
 #[test]
 fn rotation_receipt_replay_precedes_gone() {
-    let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("queue.json");
+    let fixture = QueueFixture::new();
+    let path = fixture.path("queue.json");
     let (intent, mut submitted) = request(Uuid::new_v4());
     let now = intent.ticket.expires_at - TimeDelta::nanoseconds(1);
     let due = intent.ticket.expires_at;
@@ -372,10 +396,11 @@ fn copy(handoff: &Handoff) -> Handoff {
 
 #[test]
 fn rotation_ticket_single_use_and_bound() {
-    let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("queue.json");
+    let fixture = QueueFixture::new();
+    let path = fixture.path("queue.json");
     let (intent, good) = request(Uuid::new_v4());
     let mut owner = owner(&path);
+    let initial = std::fs::read(&path).unwrap();
     owner.snapshot.rotation = Some(intent);
     for (row, bad) in [
         (2, copy(&good)),
@@ -405,7 +430,7 @@ fn rotation_ticket_single_use_and_bound() {
             owner.stage_rotation(row, bad, clock()),
             Err(HandoffError::Conflict)
         );
-        assert!(!path.exists());
+        assert_eq!(std::fs::read(&path).unwrap(), initial);
     }
     let first = owner.stage_rotation(1, copy(&good), clock()).unwrap();
     let original = std::fs::read(&path).unwrap();
@@ -431,8 +456,8 @@ fn rotation_ticket_single_use_and_bound() {
 
 #[test]
 fn rotation_previous_owner_reader_discards_optional_field() {
-    let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("queue.json");
+    let fixture = QueueFixture::new();
+    let path = fixture.path("queue.json");
     let mut pending = owner(&path);
     let (intent, handoff) = request(Uuid::new_v4());
     assert!(pending.json().unwrap().get("rotation").is_none());
