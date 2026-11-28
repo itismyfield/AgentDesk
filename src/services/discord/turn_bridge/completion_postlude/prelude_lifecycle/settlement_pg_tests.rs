@@ -15,7 +15,7 @@ async fn production_started_at_receipt_settles_borrowed_wip_pg() {
     let provider = ProviderKind::Claude;
     recovery_text::store_turn_end_wip_warning(Some(&pool), &provider, state.channel_id, "borrowed")
         .unwrap();
-    let mut context = state.retry_prompt_snapshot().unwrap();
+    let mut context = RetryPromptContext::decode(state.followup_reply_context.as_deref()).unwrap();
     context.selected.wip = Some("borrowed".into());
     state.followup_reply_context = context.encode();
     let record = serde_json::json!({"type":"user", "timestamp":chrono::Utc::now().to_rfc3339(), "message":{"content":"exact provider prompt"}});
@@ -33,6 +33,14 @@ async fn production_started_at_receipt_settles_borrowed_wip_pg() {
         peek(&pool, &provider, state.channel_id).await,
         None,
         "PRODUCTION_STARTED_AT_RECEIPT"
+    );
+    recovery_text::store_turn_end_wip_warning(Some(&pool), &provider, state.channel_id, "newer")
+        .unwrap();
+    assert!(settle(Some(&pool), &provider, &state, "confirmed-turn").await);
+    assert_eq!(
+        peek(&pool, &provider, state.channel_id).await.as_deref(),
+        Some("newer"),
+        "COMPARE_DELETE_PRESERVES_NEWER_STASH"
     );
     pool.close().await;
     db.drop().await;
@@ -68,7 +76,8 @@ async fn indeterminate_settlement_consumes_but_negative_receipt_retains_wip_pg()
             "borrowed",
         )
         .unwrap();
-        let mut context = changed.retry_prompt_snapshot().unwrap();
+        let mut context =
+            RetryPromptContext::decode(changed.followup_reply_context.as_deref()).unwrap();
         context.selected.wip = Some("borrowed".into());
         changed.followup_reply_context = context.encode();
         assert!(
@@ -84,7 +93,8 @@ async fn indeterminate_settlement_consumes_but_negative_receipt_retains_wip_pg()
     let mut negative = state.clone();
     recovery_text::store_turn_end_wip_warning(Some(&pool), &provider, state.channel_id, "borrowed")
         .unwrap();
-    let mut context = negative.retry_prompt_snapshot().unwrap();
+    let mut context =
+        RetryPromptContext::decode(negative.followup_reply_context.as_deref()).unwrap();
     context.selected.wip = Some("borrowed".into());
     negative.followup_reply_context = context.encode();
     let wrong = serde_json::json!({"type":"user", "timestamp":chrono::Utc::now().to_rfc3339(), "message":{"content":"different input"}});

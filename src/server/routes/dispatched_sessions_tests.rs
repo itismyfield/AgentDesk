@@ -1419,8 +1419,9 @@ fn resume_refuses_a_session_whose_teardown_the_runtime_keeps_pg() {
 /// stays as it was. Once a runtime takes the channel the same row is disconnected.
 #[tokio::test(flavor = "current_thread")]
 async fn routine_teardown_kept_by_the_host_guard_disconnects_nothing_pg() {
+    use crate::services::discord::health::routine_ports::build_routine_session_controller;
     use crate::services::discord::host_teardown_gate::test_support as host;
-    use crate::services::routines::{RoutineSessionCommand::Kill, RoutineSessionController};
+    use crate::services::routines::RoutineSessionCommand::Kill;
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let runtime_root = tempfile::TempDir::new().expect("runtime root");
     let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
@@ -1431,7 +1432,7 @@ async fn routine_teardown_kept_by_the_host_guard_disconnects_nothing_pg() {
                VALUES ('r-agent', 'routine guard', 'claude', '6551000')";
     exec(&pool, sql, &[]).await;
     let (shared, registry) = host::runtime(&pool).await;
-    let controller = RoutineSessionController::new(Arc::new(pool.clone()), Some(registry));
+    let controller = build_routine_session_controller(Arc::new(pool.clone()), Some(registry));
     let host_name = crate::services::platform::hostname_short();
     for (round, condition) in [LiveServer, MissingBinary, NoServerSocket]
         .into_iter()
@@ -1736,7 +1737,8 @@ fn resume_refuses_a_session_whose_runtime_runs_another_session_pg() {
 /// disconnects nothing and touches neither session.
 #[tokio::test(flavor = "current_thread")]
 async fn routine_teardown_of_a_thread_running_another_session_disconnects_nothing_pg() {
-    use crate::services::routines::{RoutineSessionCommand::Kill, RoutineSessionController};
+    use crate::services::discord::health::routine_ports::build_routine_session_controller;
+    use crate::services::routines::RoutineSessionCommand::Kill;
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let runtime_root = tempfile::TempDir::new().expect("runtime root");
     let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
@@ -1748,7 +1750,7 @@ async fn routine_teardown_of_a_thread_running_another_session_disconnects_nothin
     exec(&pool, sql, &[]).await;
     let host = crate::services::discord::host_teardown_gate::test_support::runtime(&pool);
     let (shared, registry) = host.await;
-    let controller = RoutineSessionController::new(Arc::new(pool.clone()), Some(registry));
+    let controller = build_routine_session_controller(Arc::new(pool.clone()), Some(registry));
     let host_name = crate::services::platform::hostname_short();
     for (round, condition) in [LiveServer, MissingBinary, NoServerSocket]
         .into_iter()

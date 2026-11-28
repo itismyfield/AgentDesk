@@ -1,270 +1,302 @@
 //! A caller keeps its owner address, original and ticket together until an exact observer binds.
 use super::admission::{self, Admission, AdmissionState, AdmissionTicket, TurnBind};
 use super::origin::Execution;
-use crate::services::discord::health::HealthRegistry;
+use crate::services::engine_runtime::health_port::owner_input::{OwnerInput, OwnerInputActor};
 use crate::services::provider::ProviderKind;
-use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem};
-use poise::serenity_prelude::ChannelId;
-use serde::{Deserialize, Serialize};
+use crate::services::turn_orchestrator::queued_head::v2::source_admission::ExactTurn;
+use crate::services::turn_orchestrator::{
+    ChannelMailboxHandle, PendingQueueItem, RoutineInputSettlement,
+};
+use futures::future::BoxFuture;
 use serde_json::{Value, json};
 
-#[derive(Clone, Serialize, Deserialize)]
-pub(crate) struct OwnerInput {
-    pub(crate) ticket: String,
-    pub(crate) provider: String,
-    pub(crate) namespace: String,
-    pub(crate) channel: u64,
-    pub(crate) original: Value,
-    pub(crate) context: Value,
-    #[serde(default)]
-    pub(crate) bind: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) admission_committed: Option<bool>,
+pub(crate) static ACTOR: RoutineInputActor = RoutineInputActor;
+
+pub(crate) struct RoutineInputActor;
+
+impl OwnerInputActor for RoutineInputActor {
+    fn owned_start<'a>(
+        &self,
+        handle: &'a ChannelMailboxHandle,
+        provider: &'a str,
+        process: bool,
+        start: (&'a str, u64, &'a str),
+    ) -> BoxFuture<'a, Result<Option<(PendingQueueItem, String)>, String>> {
+        Box::pin(owned_start(handle, provider, process, start))
+    }
+
+    fn confirm_admission<'a>(
+        &self,
+        input: &'a OwnerInput,
+        handle: &'a ChannelMailboxHandle,
+    ) -> BoxFuture<'a, Result<bool, String>> {
+        Box::pin(confirm_admission(input, handle))
+    }
+
+    fn start_rejection<'a>(
+        &self,
+        input: &'a OwnerInput,
+        handle: &'a ChannelMailboxHandle,
+    ) -> BoxFuture<'a, Result<Option<String>, String>> {
+        Box::pin(start_rejection(input, handle))
+    }
+
+    fn may_observe<'a>(
+        &self,
+        input: &'a OwnerInput,
+        handle: &'a ChannelMailboxHandle,
+        allow_admit: bool,
+    ) -> BoxFuture<'a, Result<bool, String>> {
+        Box::pin(may_observe(input, handle, allow_admit))
+    }
+
+    fn may_retry<'a>(
+        &self,
+        input: &'a OwnerInput,
+        handle: &'a ChannelMailboxHandle,
+    ) -> BoxFuture<'a, Result<bool, String>> {
+        Box::pin(may_retry(input, handle))
+    }
+
+    fn unbound_attempt<'a>(
+        &self,
+        input: &'a OwnerInput,
+        handle: &'a ChannelMailboxHandle,
+    ) -> BoxFuture<'a, Result<Option<ExactTurn>, String>> {
+        Box::pin(unbound_attempt(input, handle))
+    }
+
+    fn bind_observer<'a>(
+        &self,
+        input: &'a mut OwnerInput,
+        handle: &'a ChannelMailboxHandle,
+        attempt: &'a str,
+        source: Option<Value>,
+        turn_id: &'a str,
+    ) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(bind_observer(input, handle, attempt, source, turn_id))
+    }
+
+    fn settle_delivery<'a>(
+        &self,
+        input: &'a OwnerInput,
+        handle: &'a ChannelMailboxHandle,
+    ) -> BoxFuture<'a, Result<RoutineInputSettlement, String>> {
+        Box::pin(settle_delivery(input, handle))
+    }
 }
 
-impl OwnerInput {
-    pub(crate) async fn settle_delivery(
-        &self,
-        handle: &ChannelMailboxHandle,
-    ) -> Result<crate::services::turn_orchestrator::RoutineInputSettlement, String> {
-        if self.original["channel_id"].as_u64() != Some(self.channel) {
-            return Err("owner channel mismatch".into());
-        }
-        let original = serde_json::from_value(self.original.clone())
-            .map_err(|error| format!("stored original: {error}"))?;
-        handle
-            .settle_routine_input(
-                (self.namespace.clone(), self.ticket.clone()),
-                original,
-                self.context.clone(),
-                self.admission_committed == Some(true),
-            )
-            .await
+async fn settle_delivery(
+    input: &OwnerInput,
+    handle: &ChannelMailboxHandle,
+) -> Result<RoutineInputSettlement, String> {
+    if input.original["channel_id"].as_u64() != Some(input.channel) {
+        return Err("owner channel mismatch".into());
     }
-
-    pub(crate) fn new(
-        original: &PendingQueueItem,
-        namespace: &str,
-        provider: &str,
-        context: Value,
-    ) -> Self {
-        Self {
-            ticket: AdmissionTicket::new().as_str().to_owned(),
-            provider: provider.into(),
-            namespace: namespace.into(),
-            channel: original.channel_id.unwrap_or_default(),
-            original: serde_json::to_value(original).expect("queue original serializes"),
-            context,
-            bind: None,
-            admission_committed: None,
-        }
-    }
-
-    async fn check_address(&self, handle: &ChannelMailboxHandle) -> Result<(), String> {
-        let namespace = self.namespace.clone();
-        handle
-            .v2_request(move |slot| {
-                let owner = slot.as_ref().ok_or("owner not adopted")?;
-                if owner.snapshot.namespace.as_deref() != Some(namespace.as_str()) {
-                    return Err("owner namespace mismatch".into());
-                }
-                Ok(())
-            })
-            .await?;
-        if self.original["channel_id"].as_u64() != Some(self.channel) {
-            return Err("owner channel mismatch".into());
-        }
-        Ok(())
-    }
-
-    pub(crate) async fn admit(&self, handle: &ChannelMailboxHandle) -> Result<Admission, String> {
-        self.check_address(handle).await?;
-        let original: PendingQueueItem = serde_json::from_value(self.original.clone())
-            .map_err(|e| format!("stored original: {e}"))?;
-        if original.source_message_ids.len() > 1
-            || original.source_message_queued_generations.len() > 1
-        {
-            return Err("synthetic owner input must keep one original source".into());
-        }
-        Ok(admission::admit_with_context(
-            handle,
-            &original,
-            AdmissionTicket::stored(&self.ticket),
-            self.context.clone(),
+    let original = serde_json::from_value(input.original.clone())
+        .map_err(|error| format!("stored original: {error}"))?;
+    handle
+        .settle_routine_input(
+            (input.namespace.clone(), input.ticket.clone()),
+            original,
+            input.context.clone(),
+            input.admission_committed == Some(true),
         )
-        .await)
-    }
+        .await
+}
 
-    pub(crate) async fn start_rejection(
-        &self,
-        handle: &ChannelMailboxHandle,
-    ) -> Result<Option<String>, String> {
-        self.check_address(handle).await?;
-        if !handle
-            .v2_admission_status(self.ticket.clone())
-            .await?
-            .committed()
-        {
-            return Ok(None);
-        }
-        let original = serde_json::from_value(self.original.clone())
-            .map_err(|e| format!("stored original: {e}"))?;
-        let context = handle
-            .v2_admission_context(original, self.ticket.clone())
-            .await?;
-        if context.as_ref() != Some(&self.context) {
-            return Err("owner rejection context mismatch".into());
-        }
-        let original = self.original.clone();
-        handle
-            .v2_request(move |slot| {
-                let state = slot.as_ref().ok_or("owner absent")?.json()?;
-                Ok(state["retained_inputs"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .find_map(|r| {
-                        (r["input"]["original"] == original
-                            && r["input"]["attempt"].is_null()
-                            && r["disposition"] == "known_not_sent")
-                            .then(|| {
-                                r["reason"]["reason"]
-                                    .as_str()
-                                    .filter(|reason| reason.starts_with("start_rejected: "))
-                                    .map(str::to_string)
-                            })
-                            .flatten()
-                    }))
-            })
-            .await
-    }
-    pub(crate) async fn runtime_pool(&self) -> Result<sqlx::PgPool, String> {
-        let registry =
-            crate::engine::ops::turn_ops::health_registry().ok_or("owner registry unavailable")?;
-        let (shared, _) = runtime(&registry, &self.provider, self.channel).await?;
-        shared
-            .pg_pool
-            .clone()
-            .ok_or_else(|| "owner database unavailable".into())
-    }
-
-    /// NotArmed only means no arm occurred; it does not guarantee automatic progress.
-    pub(crate) async fn may_observe(
-        &self,
-        handle: &ChannelMailboxHandle,
-        allow_admit: bool,
-    ) -> Result<bool, String> {
-        self.check_address(handle).await?;
-        let original: PendingQueueItem = serde_json::from_value(self.original.clone())
-            .map_err(|e| format!("stored original: {e}"))?;
-        let ticket = AdmissionTicket::stored(&self.ticket);
-        let found = admission::exact_turn(handle, &ticket, &original).await?;
-        if !matches!(found, TurnBind::Unknown | TurnBind::Absent) {
-            let context = handle
-                .v2_admission_context(original.clone(), self.ticket.clone())
-                .await?;
-            if context.as_ref() != Some(&self.context) {
-                return Err("owner execution context mismatch".into());
+async fn check_address(input: &OwnerInput, handle: &ChannelMailboxHandle) -> Result<(), String> {
+    let namespace = input.namespace.clone();
+    handle
+        .v2_request(move |slot| {
+            let owner = slot.as_ref().ok_or("owner not adopted")?;
+            if owner.snapshot.namespace.as_deref() != Some(namespace.as_str()) {
+                return Err("owner namespace mismatch".into());
             }
+            Ok(())
+        })
+        .await?;
+    if input.original["channel_id"].as_u64() != Some(input.channel) {
+        return Err("owner channel mismatch".into());
+    }
+    Ok(())
+}
+
+async fn admit(input: &OwnerInput, handle: &ChannelMailboxHandle) -> Result<Admission, String> {
+    check_address(input, handle).await?;
+    let original: PendingQueueItem = serde_json::from_value(input.original.clone())
+        .map_err(|e| format!("stored original: {e}"))?;
+    if original.source_message_ids.len() > 1 || original.source_message_queued_generations.len() > 1
+    {
+        return Err("synthetic owner input must keep one original source".into());
+    }
+    Ok(admission::admit_with_context(
+        handle,
+        &original,
+        AdmissionTicket::stored(&input.ticket),
+        input.context.clone(),
+    )
+    .await)
+}
+
+async fn start_rejection(
+    input: &OwnerInput,
+    handle: &ChannelMailboxHandle,
+) -> Result<Option<String>, String> {
+    check_address(input, handle).await?;
+    if !handle
+        .v2_admission_status(input.ticket.clone())
+        .await?
+        .committed()
+    {
+        return Ok(None);
+    }
+    let original = serde_json::from_value(input.original.clone())
+        .map_err(|e| format!("stored original: {e}"))?;
+    let context = handle
+        .v2_admission_context(original, input.ticket.clone())
+        .await?;
+    if context.as_ref() != Some(&input.context) {
+        return Err("owner rejection context mismatch".into());
+    }
+    let original = input.original.clone();
+    handle
+        .v2_request(move |slot| {
+            let state = slot.as_ref().ok_or("owner absent")?.json()?;
+            Ok(state["retained_inputs"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find_map(|r| {
+                    (r["input"]["original"] == original
+                        && r["input"]["attempt"].is_null()
+                        && r["disposition"] == "known_not_sent")
+                        .then(|| {
+                            r["reason"]["reason"]
+                                .as_str()
+                                .filter(|reason| reason.starts_with("start_rejected: "))
+                                .map(str::to_string)
+                        })
+                        .flatten()
+                }))
+        })
+        .await
+}
+/// NotArmed only means no arm occurred; it does not guarantee automatic progress.
+async fn may_observe(
+    input: &OwnerInput,
+    handle: &ChannelMailboxHandle,
+    allow_admit: bool,
+) -> Result<bool, String> {
+    check_address(input, handle).await?;
+    let original: PendingQueueItem = serde_json::from_value(input.original.clone())
+        .map_err(|e| format!("stored original: {e}"))?;
+    let ticket = AdmissionTicket::stored(&input.ticket);
+    let found = admission::exact_turn(handle, &ticket, &original).await?;
+    if !matches!(found, TurnBind::Unknown | TurnBind::Absent) {
+        let context = handle
+            .v2_admission_context(original.clone(), input.ticket.clone())
+            .await?;
+        if context.as_ref() != Some(&input.context) {
+            return Err("owner execution context mismatch".into());
         }
-        match found {
-            TurnBind::Unknown | TurnBind::NotArmed => Ok(false),
-            TurnBind::Absent => {
-                if !allow_admit || self.admission_committed == Some(true) {
-                    return Ok(false);
-                }
-                match admission::status(handle, &ticket).await? {
-                    AdmissionState::Committed => {}
-                    AdmissionState::Pending | AdmissionState::Absent => {
-                        if let Admission::Rejected(reason) = self.admit(handle).await? {
-                            return Err(reason);
-                        }
+    }
+    match found {
+        TurnBind::Unknown | TurnBind::NotArmed => Ok(false),
+        TurnBind::Absent => {
+            if !allow_admit || input.admission_committed == Some(true) {
+                return Ok(false);
+            }
+            match admission::status(handle, &ticket).await? {
+                AdmissionState::Committed => {}
+                AdmissionState::Pending | AdmissionState::Absent => {
+                    if let Admission::Rejected(reason) = admit(input, handle).await? {
+                        return Err(reason);
                     }
                 }
-                Ok(false)
             }
-            TurnBind::Armed(turn) | TurnBind::Settled(turn) => {
-                Ok(self.bind.as_ref().is_some_and(|bind| {
-                    bind["turn_id"] == self.context["turn_id"]
-                        && bind["attempt"].as_str().is_some_and(|attempt| {
-                            turn.is(attempt, bind.get("source").filter(|v| !v.is_null()))
-                        })
-                }))
-            }
+            Ok(false)
+        }
+        TurnBind::Armed(turn) | TurnBind::Settled(turn) => {
+            Ok(input.bind.as_ref().is_some_and(|bind| {
+                bind["turn_id"] == input.context["turn_id"]
+                    && bind["attempt"].as_str().is_some_and(|attempt| {
+                        turn.is(attempt, bind.get("source").filter(|v| !v.is_null()))
+                    })
+            }))
         }
     }
+}
 
-    pub(crate) async fn may_retry(&self, handle: &ChannelMailboxHandle) -> Result<bool, String> {
-        if !self.may_observe(handle, false).await? {
-            return Ok(false);
-        }
-        let original = serde_json::from_value(self.original.clone())
-            .map_err(|e| format!("stored original: {e}"))?;
-        Ok(matches!(
-            admission::exact_turn(handle, &AdmissionTicket::stored(&self.ticket), &original)
-                .await?,
-            TurnBind::Settled(_)
-        ))
+async fn may_retry(input: &OwnerInput, handle: &ChannelMailboxHandle) -> Result<bool, String> {
+    if !may_observe(input, handle, false).await? {
+        return Ok(false);
     }
+    let original = serde_json::from_value(input.original.clone())
+        .map_err(|e| format!("stored original: {e}"))?;
+    Ok(matches!(
+        admission::exact_turn(handle, &AdmissionTicket::stored(&input.ticket), &original).await?,
+        TurnBind::Settled(_)
+    ))
+}
 
-    /// The owner's armed or settled attempt an unbound observer connects to, if any.
-    pub(crate) async fn unbound_attempt(
-        &self,
-        handle: &ChannelMailboxHandle,
-    ) -> Result<Option<(String, Option<Value>)>, String> {
-        if self.bind.is_some() {
-            return Ok(None);
-        }
-        self.check_address(handle).await?;
-        let original = serde_json::from_value(self.original.clone())
-            .map_err(|e| format!("stored original: {e}"))?;
-        let ticket = AdmissionTicket::stored(&self.ticket);
-        Ok(
-            match admission::exact_turn(handle, &ticket, &original).await? {
-                TurnBind::Armed(turn) | TurnBind::Settled(turn)
-                    if observable(handle, &turn.attempt).await? =>
-                {
-                    Some((turn.attempt, turn.turn))
-                }
-                _ => None,
-            },
-        )
+/// The owner's armed or settled attempt an unbound observer connects to, if any.
+async fn unbound_attempt(
+    input: &OwnerInput,
+    handle: &ChannelMailboxHandle,
+) -> Result<Option<ExactTurn>, String> {
+    if input.bind.is_some() {
+        return Ok(None);
     }
-
-    /// The existing observer supplies its logical turn and exact attempt before completion is read.
-    pub(crate) async fn bind_observer(
-        &mut self,
-        handle: &ChannelMailboxHandle,
-        attempt: &str,
-        source: Option<Value>,
-        turn_id: &str,
-    ) -> Result<(), String> {
-        let expected = json!({"attempt":attempt,"source":source,"turn_id":turn_id});
-        if self.bind.as_ref().is_some_and(|old| old != &expected)
-            || self.context["turn_id"] != turn_id
-        {
-            return Err("stale observer bind".into());
-        }
-        self.check_address(handle).await?;
-        let original = serde_json::from_value(self.original.clone())
-            .map_err(|e| format!("stored original: {e}"))?;
-        let ticket = AdmissionTicket::stored(&self.ticket);
-        let found = admission::exact_turn(handle, &ticket, &original).await?;
-        match found {
+    check_address(input, handle).await?;
+    let original = serde_json::from_value(input.original.clone())
+        .map_err(|e| format!("stored original: {e}"))?;
+    let ticket = AdmissionTicket::stored(&input.ticket);
+    Ok(
+        match admission::exact_turn(handle, &ticket, &original).await? {
             TurnBind::Armed(turn) | TurnBind::Settled(turn)
-                if turn.is(attempt, source.as_ref()) && observable(handle, attempt).await? =>
+                if observable(handle, &turn.attempt).await? =>
             {
-                let context = handle
-                    .v2_admission_context(original, self.ticket.clone())
-                    .await?;
-                if context.as_ref() != Some(&self.context) {
-                    return Err("owner execution context mismatch".into());
-                }
-                self.bind = Some(expected);
-                Ok(())
+                Some(turn)
             }
-            _ => Err("observer does not name the owner's exact turn".into()),
+            _ => None,
+        },
+    )
+}
+
+/// The existing observer supplies its logical turn and exact attempt before completion is read.
+async fn bind_observer(
+    input: &mut OwnerInput,
+    handle: &ChannelMailboxHandle,
+    attempt: &str,
+    source: Option<Value>,
+    turn_id: &str,
+) -> Result<(), String> {
+    let expected = json!({"attempt":attempt,"source":source,"turn_id":turn_id});
+    if input.bind.as_ref().is_some_and(|old| old != &expected)
+        || input.context["turn_id"] != turn_id
+    {
+        return Err("stale observer bind".into());
+    }
+    check_address(input, handle).await?;
+    let original = serde_json::from_value(input.original.clone())
+        .map_err(|e| format!("stored original: {e}"))?;
+    let ticket = AdmissionTicket::stored(&input.ticket);
+    let found = admission::exact_turn(handle, &ticket, &original).await?;
+    match found {
+        TurnBind::Armed(turn) | TurnBind::Settled(turn)
+            if turn.is(attempt, source.as_ref()) && observable(handle, attempt).await? =>
+        {
+            let context = handle
+                .v2_admission_context(original, input.ticket.clone())
+                .await?;
+            if context.as_ref() != Some(&input.context) {
+                return Err("owner execution context mismatch".into());
+            }
+            input.bind = Some(expected);
+            Ok(())
         }
+        _ => Err("observer does not name the owner's exact turn".into()),
     }
 }
 
@@ -301,117 +333,48 @@ pub(crate) fn synthetic_original(
     Ok((original, ticket))
 }
 
-/// The runtime that serves `provider` on `channel`.
-async fn runtime(
-    registry: &HealthRegistry,
+/// A synthetic start's original and the owner's namespace when the owner takes a start on this
+/// target; `None` leaves a process target or an unowned channel to its legacy start.
+async fn owned_start(
+    handle: &ChannelMailboxHandle,
     provider: &str,
-    channel: u64,
-) -> Result<
-    (
-        std::sync::Arc<crate::services::discord::SharedData>,
-        ChannelId,
-    ),
-    String,
-> {
-    let provider = ProviderKind::from_str(provider).ok_or("owner provider invalid")?;
-    if channel == 0 {
-        return Err("owner channel invalid".into());
+    process: bool,
+    (turn_id, channel, text): (&str, u64, &str),
+) -> Result<Option<(PendingQueueItem, String)>, String> {
+    use super::origin::InputOrigin;
+    let execution = execution(provider, channel, process);
+    if !super::ingress::owner_will_take(handle, execution, InputOrigin::Routine).await? {
+        return Ok(None);
     }
-    let channel = ChannelId::new(channel);
-    let shared = registry
-        .shared_for_provider_on_channel(&provider, channel)
-        .await
-        .ok_or("owner runtime unavailable")?;
-    Ok((shared, channel))
+    let namespace = handle
+        .v2_request(|slot| {
+            (slot
+                .as_ref()
+                .and_then(|owner| owner.snapshot.namespace.clone()))
+            .ok_or_else(|| "owner namespace missing".into())
+        })
+        .await?;
+    let (original, _) = synthetic_original(turn_id, channel, text, 1)?;
+    Ok(Some((original, namespace)))
 }
 
-/// The channel's mailbox, its local TUI queue adopted first as at any other ingress seam.
-pub(crate) async fn mailbox(
-    registry: &HealthRegistry,
-    provider: &str,
-    channel: u64,
-) -> Result<ChannelMailboxHandle, String> {
-    let (shared, channel) = runtime(registry, provider, channel).await?;
-    super::ingress::adopt(&shared, &shared.provider, channel).await?;
-    Ok(shared.mailbox(channel))
-}
-
-impl ChannelMailboxHandle {
-    pub(crate) fn new_owner_input(
-        original: &PendingQueueItem,
-        namespace: &str,
-        provider: &str,
-        context: Value,
-    ) -> OwnerInput {
-        OwnerInput::new(original, namespace, provider, context)
-    }
-
-    pub(crate) fn restore_owner_input(value: Value) -> Result<OwnerInput, serde_json::Error> {
-        serde_json::from_value(value)
-    }
-
-    /// A synthetic start's original and the owner's namespace when the owner takes a start on this
-    /// target; `None` leaves a process target or an unowned channel to its legacy start.
-    pub(crate) async fn owned_start(
-        &self,
-        execution: super::origin::Execution,
-        (turn_id, channel, text): (&str, u64, &str),
-    ) -> Result<Option<(PendingQueueItem, String)>, String> {
-        use super::origin::InputOrigin;
-        if !super::ingress::owner_will_take(self, execution, InputOrigin::Routine).await? {
-            return Ok(None);
-        }
-        let namespace = self
-            .v2_request(|slot| {
-                (slot
-                    .as_ref()
-                    .and_then(|owner| owner.snapshot.namespace.clone()))
-                .ok_or_else(|| "owner namespace missing".into())
-            })
-            .await?;
-        let (original, _) = synthetic_original(turn_id, channel, text, 1)?;
-        Ok(Some((original, namespace)))
-    }
-
-    pub(crate) async fn owner_input_mailbox(
-        registry: &HealthRegistry,
-        provider: &str,
-        channel: u64,
-    ) -> Result<Self, String> {
-        mailbox(registry, provider, channel).await
-    }
-
-    /// How the owner runs a start on this channel; a process routine never reaches the TUI owner.
-    pub(crate) fn owner_input_execution(provider: &str, channel: u64, process: bool) -> Execution {
-        match ProviderKind::from_str(provider) {
-            Some(_) if process => Execution::Process,
-            Some(provider) => super::ingress::execution(&provider, channel),
-            None => Execution::NonTuiProvider,
-        }
-    }
-
-    /// Wakes the owner drive of a channel whose start the owner just accepted.
-    pub(crate) async fn owner_input_wake(registry: &HealthRegistry, provider: &str, channel: u64) {
-        let Ok((shared, channel)) = runtime(registry, provider, channel).await else {
-            return;
-        };
-        #[cfg(unix)]
-        (shared.router_ports.owner_wake)(&shared, channel);
-        #[cfg(not(unix))]
-        let _ = (shared, channel);
+/// How the owner runs a start on this channel; a process routine never reaches the TUI owner.
+fn execution(provider: &str, channel: u64, process: bool) -> Execution {
+    match ProviderKind::from_str(provider) {
+        Some(_) if process => Execution::Process,
+        Some(provider) => super::ingress::execution(&provider, channel),
+        None => Execution::NonTuiProvider,
     }
 }
 
-impl OwnerInput {
-    pub(crate) async fn confirm_admission(
-        &self,
-        handle: &ChannelMailboxHandle,
-    ) -> Result<bool, String> {
-        match self.admit(handle).await? {
-            Admission::Accepted(_) => Ok(true),
-            Admission::Pending(_) => Ok(false),
-            Admission::Rejected(reason) => Err(reason),
-        }
+async fn confirm_admission(
+    input: &OwnerInput,
+    handle: &ChannelMailboxHandle,
+) -> Result<bool, String> {
+    match admit(input, handle).await? {
+        Admission::Accepted(_) => Ok(true),
+        Admission::Pending(_) => Ok(false),
+        Admission::Rejected(reason) => Err(reason),
     }
 }
 
@@ -435,12 +398,22 @@ mod tests {
             serde_json::from_value(json!({"author_id":1,"message_id":8000000000000001991u64,
             "channel_id":7272991,"queued_generation":9,"text":"raw"}))
             .unwrap();
-        let mut input =
-            OwnerInput::new(&original, "unknown", "claude", json!({"turn_id":"logical"}));
+        let input = OwnerInput::new(&original, "unknown", "claude", json!({"turn_id":"logical"}));
+        let uuid = uuid::Uuid::parse_str(&input.ticket).unwrap();
+        assert_eq!(input.ticket, uuid.simple().to_string());
+        let mut stored = serde_json::to_value(&input).unwrap();
+        assert!(stored.get("admission_committed").is_none());
+        assert_eq!(
+            stored.as_object_mut().unwrap().remove("bind"),
+            Some(Value::Null)
+        );
+        let mut input = OwnerInput::restore(stored).unwrap();
+        assert_eq!(input.ticket, uuid.simple().to_string());
+        assert!(input.bind.is_none());
+        assert!(input.admission_committed.is_none());
         let before_admission = std::fs::read(&path).unwrap();
         assert!(
-            input
-                .bind_observer(&handle, "nonce", None, "logical")
+            bind_observer(&mut input, &handle, "nonce", None, "logical")
                 .await
                 .is_err()
         );
@@ -450,18 +423,16 @@ mod tests {
             "a stale observer never admits an absent ticket"
         );
         assert!(matches!(
-            input.admit(&handle).await.unwrap(),
+            admit(&input, &handle).await.unwrap(),
             Admission::Accepted(_)
         ));
         handle.v2_arm_head_for_tests("nonce").await.unwrap();
         assert!(
-            input
-                .bind_observer(&handle, "wrong", None, "logical")
+            bind_observer(&mut input, &handle, "wrong", None, "logical")
                 .await
                 .is_err()
         );
-        input
-            .bind_observer(&handle, "nonce", None, "logical")
+        bind_observer(&mut input, &handle, "nonce", None, "logical")
             .await
             .unwrap();
         handle
@@ -480,7 +451,7 @@ mod tests {
             TurnBind::Unknown
         ));
         let before = std::fs::read(&path).unwrap();
-        assert!(!input.may_observe(&handle, false).await.unwrap());
+        assert!(!may_observe(&input, &handle, false).await.unwrap());
         assert_eq!(before, std::fs::read(&path).unwrap());
     }
     #[tokio::test]
@@ -497,7 +468,7 @@ mod tests {
             "channel_id":7272992,"queued_generation":9,"source_message_ids":[8000000000000001992u64,8000000000000001993u64],"text":"A+B"})).unwrap();
         let input = OwnerInput::new(&original, "grouped", "claude", json!({"turn_id":"logical"}));
         let before = std::fs::read(&path).unwrap();
-        assert!(input.admit(&handle).await.is_err());
+        assert!(admit(&input, &handle).await.is_err());
         assert_eq!(before, std::fs::read(&path).unwrap());
     }
 }

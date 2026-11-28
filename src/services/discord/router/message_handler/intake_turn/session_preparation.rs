@@ -1,5 +1,7 @@
 //! Session restore keeps the original policy and side-effect order.
 use super::*;
+#[cfg(test)]
+use crate::services::turn_orchestrator::retry_prompt_codec::RetryPromptContext;
 
 pub(in crate::services::discord) struct Restore<'a> {
     pub session_id: &'a mut Option<String>,
@@ -116,11 +118,8 @@ pub(in crate::services::discord) async fn selected_reply(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel: ChannelId,
-    context: crate::services::discord::router::response_format::retry_prompt_context::RetryPromptContext,
-) -> (
-    crate::services::discord::router::response_format::retry_prompt_context::RetryPromptContext,
-    Option<String>,
-) {
+    context: RetryPromptContext,
+) -> (RetryPromptContext, Option<String>) {
     let prepared = super::retry_prompt::prepare(shared, provider, channel, context).await;
     (prepared.context, prepared.rendered)
 }

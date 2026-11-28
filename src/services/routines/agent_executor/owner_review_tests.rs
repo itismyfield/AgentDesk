@@ -1,6 +1,8 @@
 use super::*;
+use crate::services::discord::health::routine_ports::build_routine_agent_executor;
 #[cfg(unix)]
 use crate::services::discord::queue_io::input_owner::cold::v2_cold_observed;
+use crate::services::engine_runtime::health_port::owner_input::{OwnerInput, owner_input_actor};
 use crate::services::turn_orchestrator::{ChannelMailboxHandle, ChannelMailboxRegistry};
 
 async fn accepted_fixture() -> (
@@ -36,7 +38,7 @@ async fn accepted_fixture() -> (
         .await
         .unwrap();
     let claimed = store.claim_due_runs(1).await.unwrap().pop().unwrap();
-    let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), None, 60);
+    let executor = build_routine_agent_executor(Arc::new(pool.clone()), None, 60);
     OWNER
         .scope(
             handle.clone(),
@@ -503,9 +505,7 @@ async fn settlement_boundary(
     recover: bool,
 ) -> (String, bool, bool, i32) {
     let (db, pool, store, executor, run, old_handle) = accepted_fixture().await;
-    let mut input =
-        ChannelMailboxHandle::restore_owner_input(run.result_json.unwrap()["owner_input"].clone())
-            .unwrap();
+    let mut input = OwnerInput::restore(run.result_json.unwrap()["owner_input"].clone()).unwrap();
     let deadline = u64::try_from(Utc::now().timestamp_millis()).unwrap();
     input.context[ChannelMailboxHandle::ROUTINE_DELIVERY_DEADLINE] = json!(deadline);
     let registry = ChannelMailboxRegistry::default();
@@ -517,7 +517,12 @@ async fn settlement_boundary(
         .v2_adopt(path.clone(), input.namespace.clone())
         .await
         .unwrap();
-    assert!(input.confirm_admission(&handle).await.unwrap());
+    assert!(
+        owner_input_actor()
+            .confirm_admission(&input, &handle)
+            .await
+            .unwrap()
+    );
     sqlx::query(
         "UPDATE routine_runs SET result_json=jsonb_set(result_json,'{owner_input}',$2)
         WHERE id=$1",
@@ -643,7 +648,12 @@ async fn settlement_boundary(
             (status.as_str(), Some("transcript"))
         );
     } else {
-        assert!(!input.confirm_admission(&handle).await.unwrap_or(false));
+        assert!(
+            !owner_input_actor()
+                .confirm_admission(&input, &handle)
+                .await
+                .unwrap_or(false)
+        );
     }
     pool.close().await;
     db.drop().await;

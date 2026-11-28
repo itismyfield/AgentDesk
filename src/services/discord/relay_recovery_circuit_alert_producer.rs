@@ -278,7 +278,7 @@ mod tests {
             StageHeldOutcome::Staged { id } => id,
             other => panic!("unexpected stage: {other:?}"),
         };
-        crate::services::krx_db_b_tests::status_check_migration::execute_with_status_check_lifted(
+        crate::db::status_check_test_support::execute_with_status_check_lifted(
             &pool,
             "message_outbox",
             &format!("UPDATE message_outbox SET status='unexpected_status' WHERE id={id}"),

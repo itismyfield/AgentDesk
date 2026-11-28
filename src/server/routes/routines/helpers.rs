@@ -2,6 +2,11 @@ use axum::http::StatusCode;
 use serde_json::Value;
 
 use crate::error::{AppError, AppResult, ErrorCode};
+use crate::server::routine_services;
+use crate::services::discord::health::routine_ports::{
+    build_routine_discord_logger, build_routine_session_controller,
+};
+use crate::services::routines::session_control::RoutineRuntimeReset;
 use crate::services::routines::{
     RoutineAgentExecutor, RoutineDiscordLogger, RoutineScriptLoader, RoutineSessionController,
     RoutineStore, is_migrated_launchd_script_ref, validate_routine_runtime_config,
@@ -91,12 +96,11 @@ pub(super) fn routine_agent_executor(state: &AppState) -> AppResult<RoutineAgent
             "postgres pool unavailable; routines require postgresql",
         ));
     };
-    Ok(RoutineAgentExecutor::new(
+    Ok(routine_services::agent_executor(
         std::sync::Arc::new(pool),
         state.health_registry.clone(),
-        state.config.routines.agent_timeout_secs,
-    )
-    .with_headless_fresh_agents(state.config.routines.headless_fresh_agents))
+        &state.config.routines,
+    ))
 }
 
 pub(super) fn routine_discord_logger(state: &AppState) -> AppResult<RoutineDiscordLogger> {
@@ -107,13 +111,19 @@ pub(super) fn routine_discord_logger(state: &AppState) -> AppResult<RoutineDisco
             "postgres pool unavailable; routines require postgresql",
         ));
     };
-    Ok(RoutineDiscordLogger::new_with_health_registry(
+    Ok(build_routine_discord_logger(
         std::sync::Arc::new(pool),
         state.health_registry.clone(),
     ))
 }
 
-pub(super) fn routine_session_controller(state: &AppState) -> AppResult<RoutineSessionController> {
+pub(super) fn routine_session_controller(
+    state: &AppState,
+) -> AppResult<(RoutineSessionController, Option<&dyn RoutineRuntimeReset>)> {
+    let runtime_reset = state
+        .health_registry
+        .as_deref()
+        .map(|registry| registry as &dyn RoutineRuntimeReset);
     let Some(pool) = state.pg_pool.clone() else {
         return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -121,10 +131,9 @@ pub(super) fn routine_session_controller(state: &AppState) -> AppResult<RoutineS
             "postgres pool unavailable; routines require postgresql",
         ));
     };
-    Ok(RoutineSessionController::new(
-        std::sync::Arc::new(pool),
-        state.health_registry.clone(),
-    ))
+    let controller =
+        build_routine_session_controller(std::sync::Arc::new(pool), state.health_registry.clone());
+    Ok((controller, runtime_reset))
 }
 
 pub(super) fn fallback_name(script_ref: &str) -> String {

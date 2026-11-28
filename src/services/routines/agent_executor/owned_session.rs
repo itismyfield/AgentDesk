@@ -43,9 +43,9 @@ impl RoutineAgentExecutor {
                     return;
                 }
             };
-            let controller =
-                RoutineSessionController::new(self.pool.clone(), self.health_registry.clone());
-            match controller
+            match self
+                .ports
+                .session_controller
                 .resolve_fresh_ownership_token(&routine, Some(result_json))
                 .await
             {

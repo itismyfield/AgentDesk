@@ -39,7 +39,7 @@ type_complexity = "deny"
 [features]
 # Test-only items KE·DL·ROOT tests reach once KRX is its own crate (#7353 KRX-TS). Off by default; the
 # upper packages enable it as a dev-dependency only, so release builds never see it.
-test-support = ["dep:adk-test-support", "tokio/test-util"]
+test-support = ["adk-runtime/test-support", "dep:adk-test-support", "tokio/test-util"]
 
 [dependencies]
 adk-base = { path = "crates/adk-base" }

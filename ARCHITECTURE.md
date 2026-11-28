@@ -375,6 +375,8 @@ src/
 │   │   └── write.rs
 │   ├── session_observability/
 │   │   └── background_ordering_pg_tests.rs
+│   ├── test_support/
+│   │   └── status_check.rs
 │   ├── turns/
 │   │   ├── receipt_tests.rs
 │   │   └── timestamp_tests.rs
@@ -516,6 +518,7 @@ src/
 │   │   └── naming.rs
 │   ├── tool_summary/
 │   │   └── code_mode.rs
+│   ├── agent_handoff.rs
 │   ├── atomic_write.rs
 │   ├── auto_queue_log.rs
 │   ├── automation_contract.rs
@@ -561,6 +564,9 @@ src/
 │   │   │   ├── host_repair.rs
 │   │   │   ├── host_repair_tests.rs
 │   │   │   └── key_promotion_tests.rs
+│   │   ├── turn_ops/
+│   │   │   ├── handoff_port.rs
+│   │   │   └── test_support.rs
 │   │   ├── agent_ops.rs
 │   │   ├── auto_queue_ops.rs
 │   │   ├── cards_ops.rs
@@ -590,6 +596,7 @@ src/
 │   │   ├── runtime_ops.rs
 │   │   ├── timeouts_ops.rs
 │   │   ├── turn_ops.rs
+│   │   ├── turn_ops_root_tests.rs
 │   │   ├── unsent_notify_ops.rs
 │   │   └── unsent_notify_tests.rs
 │   ├── hooks.rs
@@ -925,6 +932,7 @@ src/
 │   ├── rate_limit_sync.rs
 │   ├── resource_locks.rs
 │   ├── routine_script_audit.rs
+│   ├── routine_services.rs
 │   ├── startup_preflight.rs
 │   ├── state.rs
 │   ├── task_dispatch_claims.rs
@@ -994,7 +1002,9 @@ src/
 │   │   │   └── terminalize_tx.rs
 │   │   ├── runtime/
 │   │   │   ├── clear_slot_sessions_pg_tests.rs
+│   │   │   ├── slot_reset_archive_fixture_tests.rs
 │   │   │   ├── slot_reset_host_pg_tests.rs
+│   │   │   ├── test_support.rs
 │   │   │   ├── verified_clear_probe_tests.rs
 │   │   │   └── verified_reset_pg_tests.rs
 │   │   ├── transactions/
@@ -1616,7 +1626,8 @@ src/
 │   │   ├── adk_session/
 │   │   │   └── host_label_tests.rs
 │   │   ├── agent_handoff/
-│   │   │   └── accepted_tests.rs
+│   │   │   ├── accepted_tests.rs
+│   │   │   └── js_handoff.rs
 │   │   ├── busy_followup_retry_store/
 │   │   │   ├── draft_release_watch.rs
 │   │   │   ├── hold_release_tests.rs
@@ -1990,8 +2001,10 @@ src/
 │   │   │   ├── relay_auto_heal.rs
 │   │   │   ├── relay_dead_reattach.rs
 │   │   │   ├── relay_progress.rs
+│   │   │   ├── routine_ports.rs
 │   │   │   ├── routine_process.rs
 │   │   │   ├── routine_reset.rs
+│   │   │   ├── runtime_registry.rs
 │   │   │   ├── runtime_resolve.rs
 │   │   │   ├── session_enrichment.rs
 │   │   │   ├── snapshot.rs
@@ -2237,6 +2250,7 @@ src/
 │   │   │   ├── delivery_record.rs
 │   │   │   ├── image_format.rs
 │   │   │   ├── image_format_tests.rs
+│   │   │   ├── ke_wire_tests.rs
 │   │   │   ├── local_retry_io_tests.rs
 │   │   │   ├── manual_delivery.rs
 │   │   │   ├── message.rs
@@ -3634,6 +3648,7 @@ src/
 │   │   │   ├── replay_policy.rs
 │   │   │   ├── response_delivery.rs
 │   │   │   ├── resume_pin_tests.rs
+│   │   │   ├── retry_prompt_store.rs
 │   │   │   ├── retry_state.rs
 │   │   │   ├── runtime_handoff_loop.rs
 │   │   │   ├── session_row_writer.rs
@@ -4068,6 +4083,8 @@ src/
 │   │   │   ├── owner_tests.rs
 │   │   │   ├── thread_reuse.rs
 │   │   │   └── transport.rs
+│   │   ├── wait_queue/
+│   │   │   └── test_support.rs
 │   │   ├── cluster_hooks.rs
 │   │   ├── command_bot_launch.rs
 │   │   ├── dtos.rs
@@ -4089,7 +4106,9 @@ src/
 │   │   ├── health_port/
 │   │   │   ├── app_health.rs
 │   │   │   ├── headless_turn.rs
+│   │   │   ├── owner_input.rs
 │   │   │   ├── queue_cancel.rs
+│   │   │   ├── registry.rs
 │   │   │   ├── resume_runtime.rs
 │   │   │   ├── routine_process.rs
 │   │   │   ├── slot_reset.rs
@@ -4427,6 +4446,7 @@ src/
 │   │   │   ├── start_deferral.rs
 │   │   │   └── surface.rs
 │   │   ├── discord_log/
+│   │   │   ├── bot_http_tests.rs
 │   │   │   ├── census.rs
 │   │   │   ├── failure_alert.rs
 │   │   │   └── presentation.rs
@@ -4442,7 +4462,8 @@ src/
 │   │   │   └── formatting.rs
 │   │   ├── session_control/
 │   │   │   ├── persistent_target.rs
-│   │   │   └── provider_choice_tests.rs
+│   │   │   ├── provider_choice_tests.rs
+│   │   │   └── test_support.rs
 │   │   ├── store/
 │   │   │   ├── agent_start.rs
 │   │   │   ├── execution_modes.rs
@@ -4453,6 +4474,7 @@ src/
 │   │   ├── action.rs
 │   │   ├── agent_executor.rs
 │   │   ├── discord_log.rs
+│   │   ├── discord_port.rs
 │   │   ├── execution_mode.rs
 │   │   ├── execution_mode_pg_tests.rs
 │   │   ├── failure_escalation_pg_tests.rs
@@ -5348,6 +5370,7 @@ src/
 │   │   └── tool_open.rs
 │   ├── turn_lifecycle/
 │   │   ├── host_guard_tests.rs
+│   │   ├── policy_observability_root_tests.rs
 │   │   ├── queue_truth_tests.rs
 │   │   └── stop_result.rs
 │   ├── turn_orchestrator/
@@ -5368,6 +5391,8 @@ src/
 │   │   │   ├── queued_recovery.rs
 │   │   │   ├── queued_recovery_tests.rs
 │   │   │   └── snapshot_io.rs
+│   │   ├── policy_close/
+│   │   │   └── test_hooks.rs
 │   │   ├── queued_head/
 │   │   │   ├── v2/
 │   │   │   │   ├── owner_tests/
@@ -5407,6 +5432,7 @@ src/
 │   │   │   │   ├── requeue_tests.rs
 │   │   │   │   ├── retained.rs
 │   │   │   │   ├── retry_wait.rs
+│   │   │   │   ├── retry_wait_test_support.rs
 │   │   │   │   ├── retry_wait_tests.rs
 │   │   │   │   ├── routine_settlement.rs
 │   │   │   │   ├── source_admission.rs
@@ -5423,6 +5449,7 @@ src/
 │   │   │   ├── mend.rs
 │   │   │   ├── mend_tests.rs
 │   │   │   ├── prefix.rs
+│   │   │   ├── root_test_support.rs
 │   │   │   ├── snapshot.rs
 │   │   │   ├── v2.rs
 │   │   │   └── v2_types.rs
@@ -5430,6 +5457,7 @@ src/
 │   │   │   ├── closed_gate_tests.rs
 │   │   │   └── current_entry_tests.rs
 │   │   ├── active_source_dedup.rs
+│   │   ├── captured_ready_delivery.rs
 │   │   ├── checked_purge.rs
 │   │   ├── claim_observation.rs
 │   │   ├── clear_channel.rs
@@ -5461,6 +5489,7 @@ src/
 │   │   ├── queue_enqueue.rs
 │   │   ├── queued_head.rs
 │   │   ├── queued_head_prefix_tests.rs
+│   │   ├── queued_head_root_tests.rs
 │   │   ├── queued_head_s2a_tests.rs
 │   │   ├── queued_head_tests.rs
 │   │   ├── recovery_kickoff.rs
@@ -5471,6 +5500,7 @@ src/
 │   │   ├── restart_operation.rs
 │   │   ├── restart_operation_tests.rs
 │   │   ├── retired_exclusion.rs
+│   │   ├── retry_prompt_codec.rs
 │   │   ├── source_generation.rs
 │   │   ├── source_generation_origin_tests.rs
 │   │   ├── test_support_tests.rs
@@ -5648,10 +5678,12 @@ src/
 ├── config.rs
 ├── config_live_reload.rs
 ├── credential.rs
+├── engine_probe_tests.rs
 ├── error.rs
 ├── eventbus.rs
 ├── high_risk_recovery.rs
 ├── intake_consent_authority.rs
+├── ke_assembly_tests.rs
 ├── ke_routines_tests.rs
 ├── krx_claude_tests.rs
 ├── krx_config_tests.rs
@@ -5719,10 +5751,12 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/config.rs` | `agentdesk.yaml` parsing, configuration defaults, and shared test env helpers. |
 | `src/config_live_reload.rs` | Hot-reloads `agentdesk.yaml` without a restart: a debounced `notify` watcher pre-validates edits and atomically swaps a process-global config snapshot, keeping the running config on failure and reporting restart-required infra changes. |
 | `src/credential.rs` | Reads runtime credential files such as Discord bot tokens from the AgentDesk root. |
+| `src/engine_probe_tests.rs` | Fresh-process tests for engine probe behavior before and after the Discord adapters are installed. |
 | `src/error.rs` | Shared HTTP and policy error type with typed codes and JSON response helpers. |
 | `src/eventbus.rs` | In-process broadcast event bus (history/replay/batching) shared by the WS server layer and background services without a service→server backflow. |
 | `src/high_risk_recovery.rs` | PG-only high-risk recovery tests for boot reconciliation and review refire paths. |
 | `src/intake_consent_authority.rs` | Owns the opaque before-effects consent proof and mounts the service issuer gated by worker-private scope keys. |
+| `src/ke_assembly_tests.rs` | Mounts KE assembly tests that use the root Discord registry and runtime fixtures. |
 | `src/ke_routines_tests.rs` | Test-only host that declares KE routine and scheduled-message tests calling root-crate items. |
 | `src/krx_claude_tests.rs` | Test-only host that declares KRX claude tests calling root-crate items, so they leave the KRX crate. |
 | `src/krx_config_tests.rs` | Test-only host that declares KRX config/services tests calling root-crate items, so they leave the KRX crate. |

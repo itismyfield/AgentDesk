@@ -1,6 +1,7 @@
 //! The delivery clock ends at the owner boundary. The existing completion clock starts with
 //! the observer, and approved input stays with the owner's normal evidence settlement.
 use super::*;
+use crate::services::engine_runtime::health_port::owner_input::{OwnerInput, owner_input_actor};
 use crate::services::turn_orchestrator::{ChannelMailboxHandle, RoutineInputSettlement};
 
 pub(super) enum Deadline {
@@ -29,7 +30,7 @@ async fn settle(
     (run_id, turn_id): (&str, &str),
     (raw, owner_confirmed): (&Value, bool),
 ) -> Result<RoutineInputSettlement> {
-    let mut input = ChannelMailboxHandle::restore_owner_input(raw.clone())?;
+    let mut input = OwnerInput::restore(raw.clone())?;
     if input.context["run_id"] != run_id || input.context["turn_id"] != turn_id {
         return Err(anyhow!("routine owner run/turn mismatch"));
     }
@@ -37,8 +38,8 @@ async fn settle(
         input.admission_committed = Some(true);
     }
     let handle = owner_input::custody::handle(executor, &input.provider, input.channel).await?;
-    input
-        .settle_delivery(&handle)
+    owner_input_actor()
+        .settle_delivery(&input, &handle)
         .await
         .map_err(anyhow::Error::msg)
 }

@@ -9,15 +9,16 @@ use crate::domain::outbound::{
     DeliveryResult, DiscordOutboundPolicy, OutboundDelivery, OutboundIntent, OutboundMessageId,
     OutboundOperationKey, OutboundTargetKey, first_raw_message_id,
 };
-use crate::services::discord::health::resolve_bot_http;
 use crate::services::dispatches::http_outbound::HttpOutbound;
-use crate::services::engine_runtime::health_port::AppHealthRegistry;
 
+use super::discord_port::{RoutineBotHttpPort, resolve_routine_thread_http};
 use super::provider_choice::AgentProviderChannels;
 use super::run_diagnostics::formatting::*;
 use super::runtime::RoutineRunOutcome;
 use super::store::{ClaimedRoutineRun, RecoveredRoutineRun, RoutineRecord, RoutineStore};
 
+#[cfg(test)]
+mod bot_http_tests;
 mod census;
 mod failure_alert;
 mod presentation;
@@ -28,7 +29,7 @@ const RUN_LOG_SECTION_ORDER: [&str; 4] = ["started", "js_inputs", "js_action", "
 #[derive(Clone)]
 pub struct RoutineDiscordLogger {
     pool: Arc<PgPool>,
-    health_registry: Option<Arc<AppHealthRegistry>>,
+    bot_http: Option<Arc<dyn RoutineBotHttpPort>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -41,14 +42,8 @@ pub struct RoutineDiscordLogStatus {
 }
 
 impl RoutineDiscordLogger {
-    pub fn new_with_health_registry(
-        pool: Arc<PgPool>,
-        health_registry: Option<Arc<AppHealthRegistry>>,
-    ) -> Self {
-        Self {
-            pool,
-            health_registry,
-        }
+    pub(crate) fn new(pool: Arc<PgPool>, bot_http: Option<Arc<dyn RoutineBotHttpPort>>) -> Self {
+        Self { pool, bot_http }
     }
 
     pub async fn log_routine_event_by_id(
@@ -331,21 +326,19 @@ impl RoutineDiscordLogger {
     ) -> Result<Option<RoutineLogTarget>, String> {
         if let Some(target) = discord_thread_id.and_then(channel_target_from_id) {
             let bot = match normalized_agent_id(agent_id) {
-                Some(agent_id) => match resolve_agent_log_bot(
-                    &self.pool,
-                    self.health_registry.as_deref(),
-                    agent_id,
-                )
-                .await
-                {
-                    Ok(bot) => bot,
-                    Err(error) => {
-                        tracing::warn!(
-                            "routine thread log bot resolution failed for {agent_id}: {error}"
-                        );
-                        return Err(error);
+                Some(agent_id) => {
+                    match resolve_agent_log_bot(&self.pool, self.bot_http.as_deref(), agent_id)
+                        .await
+                    {
+                        Ok(bot) => bot,
+                        Err(error) => {
+                            tracing::warn!(
+                                "routine thread log bot resolution failed for {agent_id}: {error}"
+                            );
+                            return Err(error);
+                        }
                     }
-                },
+                }
                 None => UtilityBotRole::Notify.alias().to_string(),
             };
             return Ok(Some(RoutineLogTarget { target, bot }));
@@ -355,16 +348,13 @@ impl RoutineDiscordLogger {
             return Ok(None);
         };
 
-        if let (Some(store), Some(routine_id), Some(routine_name), Some(registry)) = (
-            store,
-            routine_id,
-            routine_name,
-            self.health_registry.as_deref(),
-        ) {
+        if let (Some(store), Some(routine_id), Some(routine_name), Some(bot_http)) =
+            (store, routine_id, routine_name, self.bot_http.as_deref())
+        {
             match self
                 .resolve_or_create_log_thread(
                     store,
-                    registry,
+                    bot_http,
                     routine_id,
                     routine_name,
                     agent_id,
@@ -393,8 +383,7 @@ impl RoutineDiscordLogger {
             }
         };
 
-        let bot = match resolve_agent_log_bot(&self.pool, self.health_registry.as_deref(), agent_id)
-            .await
+        let bot = match resolve_agent_log_bot(&self.pool, self.bot_http.as_deref(), agent_id).await
         {
             Ok(bot) => bot,
             Err(error) => {
@@ -516,14 +505,14 @@ impl RoutineDiscordLogger {
     async fn resolve_or_create_log_thread(
         &self,
         store: &RoutineStore,
-        registry: &AppHealthRegistry,
+        bot_http: &dyn RoutineBotHttpPort,
         routine_id: &str,
         routine_name: &str,
         agent_id: &str,
         existing_discord_thread_id: Option<&str>,
     ) -> Result<(String, String)> {
         if let Some(thread_id) = existing_discord_thread_id.and_then(parse_channel_id) {
-            let bot = validate_routine_thread(registry, &self.pool, agent_id, thread_id).await?;
+            let bot = validate_routine_thread(bot_http, &self.pool, agent_id, thread_id).await?;
             return Ok((format!("channel:{}", thread_id.get()), bot));
         }
 
@@ -534,7 +523,7 @@ impl RoutineDiscordLogger {
             .and_then(|routine| routine.discord_thread_id)
         {
             if let Some(thread_id) = parse_channel_id(&saved_thread_id) {
-                match validate_routine_thread(registry, &self.pool, agent_id, thread_id).await {
+                match validate_routine_thread(bot_http, &self.pool, agent_id, thread_id).await {
                     Ok(bot) => return Ok((format!("channel:{}", thread_id.get()), bot)),
                     Err(error) => {
                         tracing::warn!(
@@ -568,7 +557,7 @@ impl RoutineDiscordLogger {
         })?;
         let title = routine_thread_title(routine_name, agent_id);
         let (thread_id, bot) = create_routine_thread(
-            registry,
+            bot_http,
             provider.as_str(),
             agent_id,
             poise::serenity_prelude::ChannelId::new(parent_channel_id),
@@ -693,11 +682,6 @@ impl RoutineDiscordLogStatus {
     }
 }
 
-struct RoutineThreadHttp {
-    http: Arc<poise::serenity_prelude::Http>,
-    bot: String,
-}
-
 struct RoutineLogTarget {
     target: String,
     bot: String,
@@ -720,7 +704,7 @@ fn parse_message_id(value: &str) -> Option<poise::serenity_prelude::MessageId> {
 }
 
 async fn validate_routine_thread(
-    registry: &AppHealthRegistry,
+    bot_http: &dyn RoutineBotHttpPort,
     pool: &PgPool,
     agent_id: &str,
     thread_id: poise::serenity_prelude::ChannelId,
@@ -732,7 +716,7 @@ async fn validate_routine_thread(
     let provider = bindings
         .resolved_primary_provider_kind()
         .ok_or_else(|| anyhow!("agent {agent_id} has no primary provider for routine log"))?;
-    let resolved = resolve_routine_thread_http(registry, provider.as_str(), agent_id).await?;
+    let resolved = resolve_routine_thread_http(bot_http, provider.as_str(), agent_id).await?;
     let channel = thread_id
         .to_channel(&*resolved.http)
         .await
@@ -755,13 +739,13 @@ async fn validate_routine_thread(
 }
 
 async fn create_routine_thread(
-    registry: &AppHealthRegistry,
+    bot_http: &dyn RoutineBotHttpPort,
     provider_name: &str,
     agent_id: &str,
     parent_channel_id: poise::serenity_prelude::ChannelId,
     title: &str,
 ) -> Result<(poise::serenity_prelude::ChannelId, String)> {
-    let resolved = resolve_routine_thread_http(registry, provider_name, agent_id).await?;
+    let resolved = resolve_routine_thread_http(bot_http, provider_name, agent_id).await?;
     let thread = parent_channel_id
         .create_thread(
             &*resolved.http,
@@ -777,34 +761,6 @@ async fn create_routine_thread(
             )
         })?;
     Ok((thread.id, resolved.bot))
-}
-
-async fn resolve_routine_thread_http(
-    registry: &AppHealthRegistry,
-    provider_name: &str,
-    agent_id: &str,
-) -> Result<RoutineThreadHttp> {
-    let mut errors = Vec::new();
-    let mut tried = Vec::new();
-    for bot in [provider_name, agent_id, UtilityBotRole::Notify.alias()] {
-        if bot.trim().is_empty() || tried.contains(&bot) {
-            continue;
-        }
-        tried.push(bot);
-        match resolve_bot_http(registry, bot).await {
-            Ok(http) => {
-                return Ok(RoutineThreadHttp {
-                    http,
-                    bot: bot.to_string(),
-                });
-            }
-            Err((_, error)) => errors.push(format!("{bot}: {error}")),
-        }
-    }
-    Err(anyhow!(
-        "no routine discord bot available ({})",
-        errors.join("; ")
-    ))
 }
 
 fn routine_thread_title(routine_name: &str, agent_id: &str) -> String {
@@ -925,7 +881,7 @@ async fn resolve_agent_provider_bot(pool: &PgPool, agent_id: &str) -> Result<Str
 
 async fn resolve_agent_log_bot(
     pool: &PgPool,
-    health_registry: Option<&AppHealthRegistry>,
+    bot_http: Option<&dyn RoutineBotHttpPort>,
     agent_id: &str,
 ) -> Result<String, String> {
     let provider_bot = match resolve_agent_provider_bot(pool, agent_id).await {
@@ -938,14 +894,14 @@ async fn resolve_agent_log_bot(
         }
     };
     let candidates = routine_log_bot_candidates(provider_bot.as_deref(), Some(agent_id));
-    resolve_available_log_bot(health_registry, &candidates).await
+    resolve_available_log_bot(bot_http, &candidates).await
 }
 
 async fn resolve_available_log_bot(
-    health_registry: Option<&AppHealthRegistry>,
+    bot_http: Option<&dyn RoutineBotHttpPort>,
     candidates: &[String],
 ) -> Result<String, String> {
-    let Some(health_registry) = health_registry else {
+    let Some(bot_http) = bot_http else {
         return candidates
             .first()
             .cloned()
@@ -954,7 +910,7 @@ async fn resolve_available_log_bot(
 
     let mut errors = Vec::new();
     for bot in candidates {
-        match resolve_bot_http(health_registry, bot).await {
+        match bot_http.resolve(bot).await {
             Ok(_) => return Ok(bot.clone()),
             Err((status, error)) => errors.push(format!("{bot}: {status} {error}")),
         }

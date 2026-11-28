@@ -3,6 +3,8 @@ use chrono::{DateTime, Duration, Utc};
 
 mod execution;
 mod launch;
+pub(crate) use launch::RoutineLaunchRuntime;
+use launch::RoutineTurnLaunch;
 pub(crate) mod owner_input;
 use owner_input::AgentStartDisposition;
 mod owned_session;
@@ -17,13 +19,13 @@ use sqlx::PgPool;
 use std::sync::Arc;
 
 use crate::domain::bot_role::UtilityBotRole;
-use crate::services::discord::health::resolve_bot_http;
-use crate::services::engine_runtime::health_port::{
-    AppHealthRegistry, HeadlessDmTurnStart, HeadlessTurnPort, HeadlessTurnStart, RoutineProcessPort,
-};
+use crate::services::engine_runtime::health_port::{OwnerInputRuntimePort, RoutineProcessPort};
 use crate::services::provider::ProviderKind;
 use crate::services::provider_error_transcript::is_strong_provider_error_transcript;
 
+use super::discord_port::{
+    RoutineBotHttpPort, RoutineFailureAdmissionPort, resolve_routine_thread_http,
+};
 use super::fresh_context_guaranteed;
 use super::runtime::RoutineRunOutcome;
 use super::session_control::RoutineSessionController;
@@ -35,9 +37,19 @@ use super::store::{
 #[derive(Clone)]
 pub struct RoutineAgentExecutor {
     pool: Arc<PgPool>,
-    health_registry: Option<Arc<AppHealthRegistry>>,
+    launch: Option<Arc<dyn RoutineTurnLaunch>>,
+    ports: RoutineAgentPorts,
     default_completion_timeout_secs: u64,
     headless_fresh_agents: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct RoutineAgentPorts {
+    pub(crate) bot_http: Option<Arc<dyn RoutineBotHttpPort>>,
+    pub(crate) failure_admission: Arc<dyn RoutineFailureAdmissionPort>,
+    pub(crate) owner_input: Option<Arc<dyn OwnerInputRuntimePort>>,
+    pub(crate) process: Option<Arc<dyn RoutineProcessPort>>,
+    pub(crate) session_controller: RoutineSessionController,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -90,14 +102,16 @@ pub(crate) struct AgentTurnCompletion {
 }
 
 impl RoutineAgentExecutor {
-    pub fn new(
+    pub(crate) fn new<R: RoutineLaunchRuntime + 'static>(
         pool: Arc<PgPool>,
-        health_registry: Option<Arc<AppHealthRegistry>>,
+        launch: Option<Arc<R>>,
+        ports: RoutineAgentPorts,
         default_completion_timeout_secs: u64,
     ) -> Self {
         Self {
             pool,
-            health_registry,
+            launch: launch.map(|runtime| runtime as Arc<dyn RoutineTurnLaunch>),
+            ports,
             default_completion_timeout_secs: default_completion_timeout_secs.max(1),
             headless_fresh_agents: false,
         }
@@ -900,9 +914,9 @@ impl RoutineAgentExecutor {
             return;
         }
 
-        let controller =
-            RoutineSessionController::new(self.pool.clone(), self.health_registry.clone());
-        match controller
+        match self
+            .ports
+            .session_controller
             .teardown_fresh_session(&routine, result_json, reason)
             .await
         {
@@ -1002,9 +1016,9 @@ impl RoutineAgentExecutor {
         if routine.execution_strategy != "fresh" {
             return;
         }
-        let controller =
-            RoutineSessionController::new(self.pool.clone(), self.health_registry.clone());
-        match controller
+        match self
+            .ports
+            .session_controller
             .teardown_fresh_session_by_name(
                 &routine,
                 &owned_tmux_session,
@@ -1052,7 +1066,7 @@ impl RoutineAgentExecutor {
     async fn resolve_or_create_routine_thread(
         &self,
         store: &RoutineStore,
-        registry: &AppHealthRegistry,
+        bot_http: &dyn RoutineBotHttpPort,
         claimed: &ClaimedRoutineRun,
         agent_id: &str,
         provider_name: &str,
@@ -1063,7 +1077,7 @@ impl RoutineAgentExecutor {
             .as_deref()
             .and_then(parse_channel_id)
         {
-            match validate_routine_thread(registry, provider_name, agent_id, thread_id).await {
+            match validate_routine_thread(bot_http, provider_name, agent_id, thread_id).await {
                 Ok(delivery_bot) => {
                     return Ok(RoutineThreadTarget {
                         channel_id: thread_id,
@@ -1102,7 +1116,7 @@ impl RoutineAgentExecutor {
 
         let title = routine_thread_title(&claimed.name, agent_id);
         let (thread_id, delivery_bot) =
-            create_routine_thread(registry, provider_name, agent_id, parent_channel_id, &title)
+            create_routine_thread(bot_http, provider_name, agent_id, parent_channel_id, &title)
                 .await?;
         let thread_id_string = thread_id.get().to_string();
         if let Err(error) = store
@@ -1140,11 +1154,6 @@ struct RoutineThreadTarget {
     delivery_bot: String,
 }
 
-struct RoutineThreadHttp {
-    http: Arc<poise::serenity_prelude::Http>,
-    bot: String,
-}
-
 fn parse_channel_id(value: &str) -> Option<poise::serenity_prelude::ChannelId> {
     value
         .trim()
@@ -1154,12 +1163,12 @@ fn parse_channel_id(value: &str) -> Option<poise::serenity_prelude::ChannelId> {
 }
 
 async fn validate_routine_thread(
-    registry: &AppHealthRegistry,
+    bot_http: &dyn RoutineBotHttpPort,
     provider_name: &str,
     agent_id: &str,
     thread_id: poise::serenity_prelude::ChannelId,
 ) -> Result<String> {
-    let resolved = resolve_routine_thread_http(registry, provider_name, agent_id)
+    let resolved = resolve_routine_thread_http(bot_http, provider_name, agent_id)
         .await
         .map_err(start_deferral::thread_runtime_error)?;
     let channel = thread_id
@@ -1187,13 +1196,13 @@ async fn validate_routine_thread(
 }
 
 async fn create_routine_thread(
-    registry: &AppHealthRegistry,
+    bot_http: &dyn RoutineBotHttpPort,
     provider_name: &str,
     agent_id: &str,
     parent_channel_id: poise::serenity_prelude::ChannelId,
     title: &str,
 ) -> Result<(poise::serenity_prelude::ChannelId, String)> {
-    let resolved = resolve_routine_thread_http(registry, provider_name, agent_id)
+    let resolved = resolve_routine_thread_http(bot_http, provider_name, agent_id)
         .await
         .map_err(start_deferral::thread_runtime_error)?;
     let thread = parent_channel_id
@@ -1210,34 +1219,6 @@ async fn create_routine_thread(
             start_deferral::thread_error(message, &error, false)
         })?;
     Ok((thread.id, resolved.bot))
-}
-
-async fn resolve_routine_thread_http(
-    registry: &AppHealthRegistry,
-    provider_name: &str,
-    agent_id: &str,
-) -> Result<RoutineThreadHttp> {
-    let mut errors = Vec::new();
-    let mut tried = Vec::new();
-    for bot in [provider_name, agent_id, UtilityBotRole::Notify.alias()] {
-        if bot.trim().is_empty() || tried.contains(&bot) {
-            continue;
-        }
-        tried.push(bot);
-        match resolve_bot_http(registry, bot).await {
-            Ok(http) => {
-                return Ok(RoutineThreadHttp {
-                    http,
-                    bot: bot.to_string(),
-                });
-            }
-            Err((_, error)) => errors.push(format!("{bot}: {error}")),
-        }
-    }
-    Err(anyhow!(
-        "no routine discord bot available ({})",
-        errors.join("; ")
-    ))
 }
 
 fn routine_thread_title(routine_name: &str, agent_id: &str) -> String {

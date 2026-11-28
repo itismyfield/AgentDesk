@@ -5,8 +5,6 @@ use crate::db::auto_queue::slot_predicate::{
     DispatchSlotPolarity, active_dispatch_on_slot_predicate,
 };
 use crate::domain::session_identity::tmux_name_from_session_key;
-#[cfg(test)]
-use crate::services::engine_runtime::health_port::SlotResetOutcome;
 use crate::services::engine_runtime::health_port::{
     ManagedResetPort, SlotResetVerdict, SlotRowGuard, SlotRuntimeHealth,
 };
@@ -267,26 +265,20 @@ async fn clear_slot_threads_pg(
     }
 
     if health_registry.is_some() {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let slot_threads = target.thread_channel_ids.clone();
         tokio::spawn(async move {
             for verdict in verdicts {
                 let thread = verdict.channel_id().get();
                 // Runs on the target approved before the sessions update; nothing is judged again.
                 let reset = verdict.apply().await;
-                #[cfg(test)]
-                RUNTIME_CLEARS
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner())
-                    .push((thread, reset));
-                #[cfg(not(test))]
+                #[cfg(any(test, feature = "test-support"))]
+                test_support::record_runtime_clear(thread, reset);
+                #[cfg(not(any(test, feature = "test-support")))]
                 let _ = (thread, reset);
             }
-            #[cfg(test)]
-            RUNTIME_CLEARS_DONE
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .push(slot_threads);
+            #[cfg(any(test, feature = "test-support"))]
+            test_support::record_runtime_clear_done(slot_threads);
         });
     }
 
@@ -431,9 +423,9 @@ async fn archive_slot_threads(thread_channel_ids: &[u64]) -> Result<usize, Strin
     };
     let client = reqwest::Client::new();
     let mut archived = 0usize;
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     let discord_api_base = "https://discord.com/api/v10";
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let discord_api_base = crate::services::dispatches::discord_delivery::discord_api_base_url();
 
     for thread_channel_id in thread_channel_ids {
@@ -596,28 +588,12 @@ async fn slot_thread_host_refusal(
     None
 }
 
-/// Each spawned slot-thread runtime clear, in order, for the tests that wait on it.
-#[cfg(test)]
-pub(crate) static RUNTIME_CLEARS: std::sync::Mutex<Vec<(u64, SlotResetOutcome)>> =
-    std::sync::Mutex::new(Vec::new());
-
-/// The slot's thread ids once each spawned runtime-clear loop has finished.
-#[cfg(test)]
-pub(crate) static RUNTIME_CLEARS_DONE: std::sync::Mutex<Vec<Vec<u64>>> =
-    std::sync::Mutex::new(Vec::new());
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 #[cfg(test)]
 #[path = "runtime/clear_slot_sessions_pg_tests.rs"]
 mod clear_slot_sessions_pg_tests;
-
-#[cfg(test)]
-#[path = "runtime/slot_reset_host_pg_tests.rs"]
-pub(crate) mod slot_reset_host_pg_tests;
-
-#[cfg(test)]
-#[cfg(unix)]
-#[path = "runtime/verified_reset_pg_tests.rs"]
-pub(crate) mod verified_reset_pg_tests;
 
 #[cfg(any(test, feature = "test-support"))]
 #[path = "runtime/verified_clear_probe_tests.rs"]

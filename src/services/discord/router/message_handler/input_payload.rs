@@ -1,5 +1,5 @@
 //! Shared preparation leaves raw provenance and file lifetimes with the caller.
-use super::super::response_format::retry_prompt_context::RetryPromptContext;
+use super::super::response_format::retry_prompt_context;
 #[cfg(test)]
 pub(in crate::services::discord) use super::intake_turn::session_preparation::selected_reply;
 pub(in crate::services::discord) use super::intake_turn::session_preparation::{
@@ -8,6 +8,7 @@ pub(in crate::services::discord) use super::intake_turn::session_preparation::{
 pub(in crate::services::discord) use super::turn_context::TurnContext;
 use super::*;
 use crate::services::cluster::attachment_transfer::{materialize, uploads::Upload};
+use crate::services::turn_orchestrator::retry_prompt_codec::RetryPromptContext;
 
 pub(in crate::services::discord) fn render_turn(input: TurnContext<'_>) -> String {
     let mut chunks = Vec::new();
@@ -150,9 +151,12 @@ pub(in crate::services::discord) fn member_body(
     item: &crate::services::turn_orchestrator::PendingQueueItem,
     uploads: &[String],
 ) -> String {
-    let context = RetryPromptContext::restore(item.reply_context.clone())
-        .render_with(super::super::response_format::merge_reply_contexts);
-    render_input_chunks(uploads, context, item.text.clone())
+    let context = RetryPromptContext::restore(item.reply_context.clone());
+    render_input_chunks(
+        uploads,
+        retry_prompt_context::render(&context),
+        item.text.clone(),
+    )
 }
 
 #[cfg(test)]

@@ -9,7 +9,9 @@ pub(crate) use turn_stop::{PendingQueueView, TurnStopJudgement, TurnStopPort};
 
 mod app_health;
 mod headless_turn;
+pub(crate) mod owner_input;
 mod queue_cancel;
+mod registry;
 mod resume_runtime;
 mod routine_process;
 mod slot_reset;
@@ -18,8 +20,12 @@ pub use app_health::{AppHealth, AppHealthBinding, AppHealthRegistry};
 pub(crate) use headless_turn::{
     HeadlessDmTurnStart, HeadlessTurnPort, HeadlessTurnReservationView, HeadlessTurnStart,
 };
+pub(crate) use owner_input::OwnerInputRuntimePort;
 pub use queue_cancel::FinishCancelledMailboxResult;
 pub(crate) use queue_cancel::QueueCancelPort;
+pub(crate) use registry::{
+    RuntimeRegistryPort, install_runtime_registry_accessor, published_runtime_registry,
+};
 pub(crate) use resume_runtime::{ResumePorts, ResumeRuntimePort};
 pub(crate) use routine_process::RoutineProcessPort;
 pub(crate) use slot_reset::{

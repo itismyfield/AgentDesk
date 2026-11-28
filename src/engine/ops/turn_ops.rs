@@ -1,37 +1,15 @@
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
 use sqlx::PgPool;
-use std::sync::{Mutex, Weak};
+use std::sync::{Arc, Mutex};
 
-use crate::services::engine_runtime::health_port::AppHealthRegistry;
+use crate::domain::agent_handoff::AgentHandoffChannelKind;
+use crate::services::engine_runtime::health_port::{
+    RuntimeRegistryPort, published_runtime_registry,
+};
 
-// ── Global registry handle ─────────────────────────────────────────────────
-//
-// Mirrors the `cancel_tombstones` global-pool pattern: a process-scoped
-// `Weak<HealthRegistry>` set once at dcserver startup so the policy-engine
-// thread (which has no async executor or access to AppState) can call
-// `start_agent_handoff_turn` synchronously via the async bridge.
-//
-// `Weak` is intentional: the registry is owned by the Discord runtime.
-// If it's gone (standalone mode / unit tests without Discord), the host fn
-// returns `{ok:false, error:"Discord not available"}` without panicking.
-
-static GLOBAL_HEALTH_REGISTRY: Mutex<Option<Weak<AppHealthRegistry>>> = Mutex::new(None);
-
-/// Called once from dcserver setup (after both the engine and the registry
-/// exist) to wire the JS bridge to the live registry.
-pub fn set_global_health_registry(registry: &std::sync::Arc<AppHealthRegistry>) {
-    if let Ok(mut slot) = GLOBAL_HEALTH_REGISTRY.lock() {
-        *slot = Some(std::sync::Arc::downgrade(registry));
-    }
-}
-
-pub(crate) fn health_registry() -> Option<std::sync::Arc<AppHealthRegistry>> {
-    GLOBAL_HEALTH_REGISTRY
-        .lock()
-        .ok()?
-        .as_ref()
-        .and_then(Weak::upgrade)
-}
+pub(crate) mod handoff_port;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 // ── Main runtime handle ─────────────────────────────────────────────────────
 //
@@ -62,6 +40,15 @@ fn get_runtime_handle() -> Option<tokio::runtime::Handle> {
 // ── Host binding ───────────────────────────────────────────────────────────
 
 pub(super) fn register_turn_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) -> JsResult<()> {
+    register_turn_ops_with(ctx, pg_pool, published_runtime_registry, get_runtime_handle)
+}
+
+fn register_turn_ops_with<'js>(
+    ctx: &Ctx<'js>,
+    pg_pool: Option<PgPool>,
+    registry: impl Fn() -> Option<Arc<dyn RuntimeRegistryPort>> + Send + 'static,
+    runtime: impl Fn() -> Option<tokio::runtime::Handle> + Send + 'static,
+) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let turn_obj = Object::new(ctx.clone())?;
 
@@ -83,7 +70,14 @@ pub(super) fn register_turn_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) ->
         Function::new(
             ctx.clone(),
             move |agent_id: String, prompt: String, options_json: String| -> String {
-                start_turn_raw(pg.as_ref(), &agent_id, &prompt, &options_json)
+                start_turn_raw(
+                    pg.as_ref(),
+                    &agent_id,
+                    &prompt,
+                    &options_json,
+                    &registry,
+                    &runtime,
+                )
             },
         )?,
     )?;
@@ -138,6 +132,8 @@ fn start_turn_raw(
     agent_id: &str,
     prompt: &str,
     options_json: &str,
+    registry: impl FnOnce() -> Option<Arc<dyn RuntimeRegistryPort>>,
+    runtime: impl FnOnce() -> Option<tokio::runtime::Handle>,
 ) -> String {
     let agent_id = agent_id.trim();
     if agent_id.is_empty() {
@@ -150,12 +146,9 @@ fn start_turn_raw(
 
     let opts: TurnStartOptions = serde_json::from_str(options_json).unwrap_or_default();
 
-    let channel_kind_str = opts.channel_kind.as_deref().unwrap_or("cc");
-    let channel_kind = match crate::services::discord::agent_handoff::AgentHandoffChannelKind::parse(
-        Some(channel_kind_str),
-    ) {
+    let channel_kind = match AgentHandoffChannelKind::parse(opts.channel_kind.as_deref()) {
         Ok(kind) => kind,
-        Err(e) => return err_json(&e.one_line(), "error"),
+        Err(error) => return err_json(error, "error"),
     };
     let from_agent_id = opts
         .from_agent_id
@@ -168,11 +161,11 @@ fn start_turn_raw(
         return err_json("postgres backend is unavailable", "unavailable");
     };
 
-    let Some(registry) = health_registry() else {
+    let Some(registry) = registry() else {
         return err_json("Discord not available (standalone mode)", "unavailable");
     };
 
-    let Some(runtime) = get_runtime_handle() else {
+    let Some(runtime) = runtime() else {
         return err_json("policy runtime handle unavailable", "unavailable");
     };
 
@@ -197,34 +190,31 @@ fn start_turn_raw(
     // always runs to completion exactly like the HTTP handoff caller; conflicts
     // and errors are logged rather than surfaced synchronously to JS.
     runtime.spawn(async move {
-        match crate::services::discord::agent_handoff::start_agent_handoff_turn(
-            &registry,
-            &pool_owned,
-            &from_owned,
-            &agent_id_owned,
-            &prompt_owned,
-            channel_kind,
-            prefix,
-            None, // expect_reply: None → no contract appended
-            Some("js:turn.start".to_string()),
-            None, // metadata
-        )
-        .await
+        match registry
+            .start_js_handoff_turn(
+                &pool_owned,
+                &from_owned,
+                &agent_id_owned,
+                &prompt_owned,
+                channel_kind,
+                prefix,
+            )
+            .await
         {
             Ok(response) => {
                 tracing::info!(
                     to_agent = %agent_id_owned,
-                    result = %response.to_value(),
+                    result = %response,
                     "js turn.start dispatched"
                 );
             }
-            Err(e) => {
+            Err((status, error)) => {
                 // Classify by the real HTTP status (the busy-mailbox conflict
                 // message is "agent mailbox is busy ...", not "conflict"/"409").
                 tracing::warn!(
                     to_agent = %agent_id_owned,
-                    status = e.status().as_u16(),
-                    error = %e.one_line(),
+                    status = status,
+                    error = %error,
                     "js turn.start failed"
                 );
             }
@@ -287,37 +277,11 @@ mod tests {
         assert!(is_fn2, "agentdesk.turn.start should be a function");
     }
 
-    // ── No-registry path ─────────────────────────────────────────────────
-
-    #[test]
-    fn turn_start_returns_error_without_registry() {
-        let engine = test_engine();
-        // Without a registry the raw fn returns a JSON error object (does not
-        // panic and does not throw).
-        let result: String = engine
-            .eval_js(
-                r#"JSON.stringify(
-                    JSON.parse(
-                        agentdesk.turn.__startRaw("some-agent", "hello", "{}")
-                    )
-                )"#,
-            )
-            .unwrap();
-        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(v["ok"], serde_json::json!(false));
-        // Must carry either "postgres" or "Discord not available" in the error.
-        let error = v["error"].as_str().unwrap_or("");
-        assert!(
-            error.contains("postgres") || error.contains("Discord"),
-            "unexpected error: {error}"
-        );
-    }
-
     // ── Argument validation ──────────────────────────────────────────────
 
     #[test]
     fn turn_start_raw_requires_agent_id() {
-        let result = start_turn_raw(None, "", "prompt", "{}");
+        let result = start_turn_raw(None, "", "prompt", "{}", || None, || None);
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(v["ok"], serde_json::json!(false));
         assert_eq!(v["error"], "agent_id is required");
@@ -325,7 +289,7 @@ mod tests {
 
     #[test]
     fn turn_start_raw_requires_prompt() {
-        let result = start_turn_raw(None, "some-agent", "  ", "{}");
+        let result = start_turn_raw(None, "some-agent", "  ", "{}", || None, || None);
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(v["ok"], serde_json::json!(false));
         assert_eq!(v["error"], "prompt is required");
@@ -334,13 +298,10 @@ mod tests {
     #[test]
     fn turn_start_raw_rejects_invalid_channel_kind() {
         let opts = r#"{"channel_kind":"invalid"}"#;
-        let result = start_turn_raw(None, "some-agent", "hello", opts);
+        let result = start_turn_raw(None, "some-agent", "hello", opts, || None, || None);
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(v["ok"], serde_json::json!(false));
-        let error = v["error"].as_str().unwrap_or("");
-        assert!(
-            error.contains("channel_kind"),
-            "expected channel_kind error, got: {error}"
-        );
+        assert_eq!(v["error"], "channel_kind must be cc or cdx");
+        assert_eq!(v["status"], "error");
     }
 }

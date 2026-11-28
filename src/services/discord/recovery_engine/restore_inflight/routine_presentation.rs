@@ -1,4 +1,5 @@
 //! Settle a persisted successful quiet result before recovery can offer its raw body.
+use super::super::completion_delivery::commit_captured_ready_delivery;
 use super::*;
 use crate::services::agent_protocol::NativeTerminalKind;
 use crate::services::discord::routine_presentation::TerminalPresentation;
@@ -44,16 +45,17 @@ pub(in crate::services::discord::recovery_engine) async fn settle_routine_no_vis
         return true;
     }
     if row.restart_mode.is_some() {
-        let Some(adopted) = shared
-            .mailbox(channel)
-            .commit_captured_ready_delivery(CapturedReadyDeliveryCommit {
+        let Some(adopted) = commit_captured_ready_delivery(
+            &shared.mailbox(channel),
+            CapturedReadyDeliveryCommit {
                 shared: shared.clone(),
                 state: row,
                 actor: None,
                 quiet_restart_generation: Some(shared.restart.current_generation),
                 delivery: RecoveryRelayOutcome::Delivered.into(),
-            })
-            .await
+            },
+        )
+        .await
         else {
             return true;
         };
@@ -74,16 +76,17 @@ pub(in crate::services::discord::recovery_engine) async fn settle_routine_no_vis
     else {
         return true;
     };
-    let Some(committed) = shared
-        .mailbox(channel)
-        .commit_captured_ready_delivery(CapturedReadyDeliveryCommit {
+    let Some(committed) = commit_captured_ready_delivery(
+        &shared.mailbox(channel),
+        CapturedReadyDeliveryCommit {
             shared: shared.clone(),
             state: row,
             actor: None,
             quiet_restart_generation: None,
             delivery: RecoveryRelayOutcome::Delivered.into(),
-        })
-        .await
+        },
+    )
+    .await
     else {
         return true;
     };

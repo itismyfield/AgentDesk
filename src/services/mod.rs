@@ -108,7 +108,7 @@ pub(crate) use adk_runtime::services::provider_teardown;
 pub mod queue;
 pub mod qwen;
 pub mod qwen_tmux_wrapper;
-// Scheduling contracts remain unavailable to runtime callers until activation.
+// The ROOT restart-report tests share this scheduler probe.
 #[cfg(test)]
 pub(crate) mod recovery_defer;
 pub(crate) use adk_runtime::services::release_source;

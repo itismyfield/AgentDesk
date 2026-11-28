@@ -1309,6 +1309,7 @@ mod nondestructive_loader_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn archive_defer_probe_reads_only_the_probed_thread() {
         let env = Env::new();
+        crate::services::discord::install_engine_probes();
         let mut other = row(5_996_101, Some("AgentDesk-claude-p4r-b"));
         other.born_generation = G;
         let other = env.seed(&other, 0);

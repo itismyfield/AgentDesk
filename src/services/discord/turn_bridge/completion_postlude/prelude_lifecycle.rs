@@ -3,6 +3,9 @@ use std::io::{BufRead, Seek};
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::inflight::InflightTurnState;
 use crate::services::provider::ProviderKind;
+use crate::services::turn_orchestrator::retry_prompt_codec::RetryPromptContext;
+
+use super::super::retry_prompt_store;
 
 pub(super) fn completed(state: &super::CompletionPostludeState) -> bool {
     state.terminal_delivery_committed
@@ -30,8 +33,7 @@ fn input_receipt(state: &InflightTurnState) -> Result<bool, &'static str> {
     ) {
         return Ok(true);
     }
-    let context = state
-        .retry_prompt_snapshot()
+    let context = RetryPromptContext::decode(state.followup_reply_context.as_deref())
         .ok_or("missing prompt snapshot")?;
     let prompt = context
         .expected_prompt
@@ -159,11 +161,10 @@ pub(super) async fn settle(
     if !confirmed_input(state) {
         return false;
     }
-    let Some(context) = state.retry_prompt_snapshot() else {
+    let Some(context) = RetryPromptContext::decode(state.followup_reply_context.as_deref()) else {
         return true;
     };
-    match context
-        .consume_confirmed(pool, provider, state.channel_id, turn_id)
+    match retry_prompt_store::consume_confirmed(pool, provider, state.channel_id, turn_id, &context)
         .await
     {
         Ok(()) => true,

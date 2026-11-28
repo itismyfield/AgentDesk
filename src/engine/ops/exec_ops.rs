@@ -32,8 +32,6 @@ pub(crate) fn install_policy_op_remove(remove: fn(&std::path::Path) -> PolicyOpR
 }
 
 fn policy_op_remove_row(path: &std::path::Path) -> PolicyOpRemoveOutcome {
-    #[cfg(test)]
-    crate::services::discord::install_engine_probes();
     match POLICY_OP_REMOVE.get() {
         Some(remove) => remove(path),
         None => PolicyOpRemoveOutcome::Io("inflight store not installed".to_string()),

@@ -1,10 +1,13 @@
-#![cfg(test)]
+#![cfg(any(test, feature = "test-support"))]
+
+use std::sync::{Arc, MutexGuard, PoisonError};
+
+use tokio::sync::mpsc;
 
 pub(crate) use super::pending_queue_persistence::{
     load_channel_pending_dispatch_marker_checked, load_channel_pending_queue_checked,
 };
-
-use std::sync::{MutexGuard, PoisonError};
+use super::{ChannelMailboxHandle, RecoveryDoneSignal};
 
 pub(crate) const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
 
@@ -55,4 +58,13 @@ pub(crate) fn injection_abandons(channel: super::ChannelId) -> usize {
         .iter()
         .filter(|abandoned| **abandoned == channel)
         .count()
+}
+
+pub(super) fn closed_handle() -> ChannelMailboxHandle {
+    let (sender, receiver) = mpsc::unbounded_channel();
+    drop(receiver);
+    ChannelMailboxHandle {
+        sender,
+        recovery_done: Arc::new(RecoveryDoneSignal::new()),
+    }
 }

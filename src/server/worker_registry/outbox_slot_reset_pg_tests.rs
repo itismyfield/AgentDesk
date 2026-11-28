@@ -15,7 +15,7 @@ use crate::config::session_hosts::{ForcedSessionHosts, force_for_test};
 use crate::config::{Config, TestEnvVarGuard, TestRuntimeRootGuard};
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::engine::PolicyEngine;
-use crate::services::auto_queue::runtime::slot_reset_host_pg_tests::host::{
+use crate::ke_assembly_tests::slot_reset_host_pg_tests::host::{
     exec, slot, slot_map, thread_row, thread_rows,
 };
 use crate::services::cluster::node_registry::ClusterRuntime;
@@ -61,7 +61,7 @@ struct RestThread {
     messages: u64,
     age_minutes: i64,
     reads: usize,
-    archived: bool,
+    patches: usize,
 }
 
 type RestThreads = Arc<Mutex<BTreeMap<u64, RestThread>>>;
@@ -76,7 +76,7 @@ async fn read_thread(
     let created = chrono::Utc::now() - chrono::Duration::minutes(thread.age_minutes);
     Ok(Json(json!({
         "total_message_sent": thread.messages,
-        "thread_metadata": {"archived": thread.archived, "create_timestamp": created.to_rfc3339()},
+        "thread_metadata": {"archived": thread.patches != 0, "create_timestamp": created.to_rfc3339()},
     })))
 }
 
@@ -90,7 +90,7 @@ async fn archive_thread(
     }
     let mut threads = threads.lock().unwrap();
     let thread = threads.get_mut(&id).ok_or(StatusCode::NOT_FOUND)?;
-    thread.archived = true;
+    thread.patches += 1;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -142,6 +142,8 @@ struct Fixture {
 
 impl Fixture {
     async fn new(root: &TestRuntimeRootGuard, db: &TestPostgresDb, parent_base: u64) -> Self {
+        crate::services::discord::install_engine_probes();
+        crate::services::discord::outbound::install_engine_ports();
         ROW_GUARD_CALLS.lock().unwrap().clear();
         let token = crate::runtime_layout::credential_token_path(
             root.path(),
@@ -429,11 +431,15 @@ async fn check_outbox_reset(explicit: bool) {
     for (agent, parent, original) in before {
         let thread = parent + 1;
         let should_clear = matches!(agent, "legacy" | "aged");
-        let (archived, reads) = {
+        let (patches, reads) = {
             let threads = fixture.threads.lock().unwrap();
-            (threads[&thread].archived, threads[&thread].reads)
+            (threads[&thread].patches, threads[&thread].reads)
         };
-        assert_eq!(archived, should_clear, "REST archive state for {agent}");
+        assert_eq!(
+            patches,
+            usize::from(should_clear),
+            "REST archive PATCHes for {agent}"
+        );
         if should_clear {
             assert_eq!(reads, usize::from(!explicit), "reset branch for {agent}");
             assert_session_cleared(pool, thread).await;
@@ -511,10 +517,7 @@ async fn manual_slot_reset_uses_the_engine_row_guard_and_archives_pg() {
                 "cleared_sessions": count, "cleared_bindings": count,
             })
         );
-        assert_eq!(
-            fixture.threads.lock().unwrap()[&thread].archived,
-            should_clear
-        );
+        assert_eq!(fixture.threads.lock().unwrap()[&thread].patches, count);
         assert_eq!(
             ROW_GUARD_CALLS.lock().unwrap().contains(&thread),
             agent != "hosted"

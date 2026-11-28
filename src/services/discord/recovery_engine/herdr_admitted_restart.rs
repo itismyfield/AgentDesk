@@ -1,6 +1,7 @@
 //! Restart settles a prior process's admitted Herdr terminal by its persisted kind, acks it on
 //! the row its delivery changed (O keeps a body it owns), then clears only that episode.
 
+use super::completion_delivery::commit_captured_ready_delivery;
 use super::*;
 use crate::services::agent_protocol::NativeTerminalKind;
 
@@ -147,7 +148,7 @@ impl AdmittedRestartTerminal {
                 delivery,
             };
             let mailbox = shared.mailbox(channel_id);
-            let Some(committed) = mailbox.commit_captured_ready_delivery(commit).await else {
+            let Some(committed) = commit_captured_ready_delivery(&mailbox, commit).await else {
                 return kept(state, "the delivery ack was not committed");
             };
             row = committed.state;

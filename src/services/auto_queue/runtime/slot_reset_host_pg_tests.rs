@@ -2,30 +2,28 @@
 
 use crate::services::engine_runtime::health_port::SlotResetOutcome;
 
+use crate::services::auto_queue::runtime::test_support::take_runtime_clears_after_done;
+
 /// The runtime clears recorded for `slot_threads` once their spawned loop signalled it finished.
 pub(crate) async fn runtime_clears_after_done(
     slot_threads: &[u64],
 ) -> Vec<(u64, SlotResetOutcome)> {
-    let done = || {
-        let runs = super::RUNTIME_CLEARS_DONE.lock();
-        let runs = runs.unwrap_or_else(|poison| poison.into_inner());
-        runs.iter().any(|run| run.as_slice() == slot_threads)
-    };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while !done() {
+    loop {
+        if let Some(clears) = take_runtime_clears_after_done(slot_threads) {
+            return clears;
+        }
         assert!(
             std::time::Instant::now() < deadline,
             "no completion signal for slot threads {slot_threads:?}"
         );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    let clears = super::RUNTIME_CLEARS.lock();
-    let clears = clears.unwrap_or_else(|poison| poison.into_inner());
-    let ours = clears
-        .iter()
-        .filter(|(thread, _)| slot_threads.contains(thread));
-    ours.cloned().collect()
 }
+
+#[cfg(unix)]
+#[path = "slot_reset_archive_fixture_tests.rs"]
+mod archive_fixture;
 
 #[cfg(unix)]
 pub(crate) mod host {
@@ -37,6 +35,10 @@ pub(crate) mod host {
     use super::runtime_clears_after_done;
     use crate::config::TestEnvVarGuard;
     use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::services::auto_queue::runtime::{
+        clear_slot_threads_for_slot_pg, reset_slot_thread_bindings_excluding_pg,
+        test_support::{runtime_clear_completion_count, runtime_target_session_keys},
+    };
     use crate::services::discord::health::slot_row_host_refusal;
     use crate::services::discord::host_teardown_gate::test_support::{
         Stored, busy_turn, channel_key, inflight_needing_backfill, mailbox_turn_active,
@@ -213,6 +215,7 @@ pub(crate) mod host {
 
         async fn check_slot_clear(deferred: bool) {
             let root = crate::config::TestRuntimeRootGuard::new();
+            crate::services::discord::install_engine_probes();
             let db = TestPostgresDb::create().await;
             let pool = db.connect_and_migrate_with_max_connections(8).await;
             let shared = crate::services::discord::make_shared_data_for_tests();
@@ -398,6 +401,13 @@ pub(crate) mod host {
         let root = tempfile::TempDir::new().unwrap();
         let _root =
             TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
+        let archive = super::archive_fixture::ArchiveFixture::install(root.path()).await;
+        let base = format!("http://{}", archive.address());
+        let _archive_base = TestEnvVarGuard::set_value_after_shared_test_env_lock(
+            "AGENTDESK_DISCORD_API_BASE_URL",
+            base.as_ref(),
+        );
+        crate::services::discord::install_engine_probes();
         let db = TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
         let shared = crate::services::discord::make_shared_data_for_tests();
@@ -455,15 +465,9 @@ pub(crate) mod host {
                 tmux.start(&name(n));
             }
             // T3 is a real runtime target no earlier check already keeps; T2b's is its legacy row.
-            let target = super::super::build_slot_clear_target_pg(&pool, &agent, 0)
+            let chosen = runtime_target_session_keys(&pool, &agent, 0, &[t3, t2b])
                 .await
                 .unwrap();
-            let chosen = |thread: u64| {
-                let mut found = target.runtime_targets.iter();
-                let found = found.find(|target| target.thread_channel_id == thread);
-                found.and_then(|target| target.session_key.clone())
-            };
-            let chosen = [chosen(t3), chosen(t2b)];
             assert_eq!(chosen, [Some(t3_key), Some(t2b_key)], "{ctx}");
             let defer = crate::services::discord::should_defer_thread_archive_pg;
             assert_eq!(
@@ -481,7 +485,7 @@ pub(crate) mod host {
                 before.push(thread_rows(&pool, thread).await);
             }
             let _ = tmux.take_calls();
-            let clear = super::super::clear_slot_threads_for_slot_pg;
+            let clear = clear_slot_threads_for_slot_pg;
             let cleared = clear(
                 slot_row_host_refusal,
                 Some(registry.clone()),
@@ -546,7 +550,7 @@ pub(crate) mod host {
                 thread_rows(&pool, t2c).await,
                 slot_map(&pool, &agent).await,
             );
-            let reset = super::super::reset_slot_thread_bindings_excluding_pg;
+            let reset = reset_slot_thread_bindings_excluding_pg;
             assert_eq!(
                 reset(slot_row_host_refusal, &pool, &agent, 0, None, None).await,
                 Ok((0, 0, 0)),
@@ -591,11 +595,9 @@ pub(crate) mod host {
                 Some("claude"),
             )
             .await;
-            assert_eq!(
-                reset(slot_row_host_refusal, &pool, &agent, 0, None, None).await,
-                Ok((0, 1, 1)),
-                "{ctx}"
-            );
+            let result = reset(slot_row_host_refusal, &pool, &agent, 0, None, None).await;
+            assert_eq!(archive.take_patches(), [t5], "{ctx}: loopback PATCH");
+            assert_eq!(result, Ok((1, 1, 1)), "{ctx}");
             assert_eq!(slot_map(&pool, &agent).await, ["{}"], "{ctx}");
             assert!(
                 tmux.take_calls().is_empty(),
@@ -614,6 +616,7 @@ pub(crate) mod host {
         let root = tempfile::TempDir::new().unwrap();
         let _root =
             TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
+        crate::services::discord::install_engine_probes();
         let db = TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
         let (shared, registry) = runtime(&pool).await;
@@ -663,7 +666,7 @@ pub(crate) mod host {
             let (a_state, b_state, c_state) = (state(ta).await, state(tb).await, state(tc).await);
             let _ = tmux.take_calls();
 
-            let clear = super::super::clear_slot_threads_for_slot_pg;
+            let clear = clear_slot_threads_for_slot_pg;
             let cleared = clear(
                 slot_row_host_refusal,
                 Some(registry.clone()),
@@ -675,11 +678,11 @@ pub(crate) mod host {
             // Before the spawned clear runs, D's runtime switches to another session's name.
             running_session(&shared, &pool, channel(td), &name(6), false, None).await;
             let slot_threads = [ta, tb, tc, td];
-            let early = {
-                let runs = super::super::RUNTIME_CLEARS_DONE.lock().unwrap();
-                runs.iter().any(|run| run.as_slice() == slot_threads)
-            };
-            assert!(!early, "{ctx}: the rename runs before the spawned clear");
+            assert_eq!(
+                runtime_clear_completion_count(&slot_threads),
+                0,
+                "{ctx}: the rename runs before the spawned clear"
+            );
             assert_eq!(cleared, Ok(2), "{ctx}: only A's and D's rows are idled");
 
             // Waits for the spawned clears; their records are checked after the effects.
@@ -735,6 +738,7 @@ pub(crate) mod host {
         let root = tempfile::TempDir::new().unwrap();
         let _root =
             TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
+        crate::services::discord::install_engine_probes();
         let db = TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
         let (shared, registry) = runtime(&pool).await;
@@ -791,7 +795,7 @@ pub(crate) mod host {
             let f_state = runtime_state(&shared, channel(tf)).await;
             let _ = tmux.take_calls();
 
-            let clear = super::super::clear_slot_threads_for_slot_pg;
+            let clear = clear_slot_threads_for_slot_pg;
             let cleared = clear(
                 slot_row_host_refusal,
                 Some(registry.clone()),
@@ -805,12 +809,9 @@ pub(crate) mod host {
             std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
             std::fs::write(&marker, "herdr").unwrap();
             let slot_threads = [te, tf];
-            let early = {
-                let runs = super::super::RUNTIME_CLEARS_DONE.lock().unwrap();
-                runs.iter().any(|run| run.as_slice() == slot_threads)
-            };
-            assert!(
-                !early,
+            assert_eq!(
+                runtime_clear_completion_count(&slot_threads),
+                0,
                 "{ctx}: the marker is written before the spawned clear"
             );
             assert_eq!(cleared, Ok(1), "{ctx}: only E's row is idled");
@@ -858,6 +859,7 @@ pub(crate) mod host {
         let root = tempfile::TempDir::new().unwrap();
         let _root =
             TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
+        crate::services::discord::install_engine_probes();
         let tmux = TmuxEnv::install(Tmux::MissingBinary);
         let db = TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
@@ -883,7 +885,7 @@ pub(crate) mod host {
             }
         };
 
-        let reset = super::super::reset_slot_thread_bindings_excluding_pg;
+        let reset = reset_slot_thread_bindings_excluding_pg;
         let kept = before(configured[0], "p9b1-slot-1").await;
         let done = reset(slot_row_host_refusal, &pool, "p9b1-slot-1", 0, None, None).await;
         assert_eq!(done, Ok((0, 0, 0)), "registry-less reset");
@@ -891,7 +893,7 @@ pub(crate) mod host {
 
         let empty = std::sync::Arc::new(crate::services::discord::health::HealthRegistry::new());
         let kept = before(configured[1], "p9b1-slot-2").await;
-        let clear = super::super::clear_slot_threads_for_slot_pg;
+        let clear = clear_slot_threads_for_slot_pg;
         let cleared = clear(slot_row_host_refusal, Some(empty), &pool, "p9b1-slot-2", 0).await;
         assert_eq!(cleared, Ok(0), "no runtime verdict");
         assert_eq!(before(configured[1], "p9b1-slot-2").await, kept, "no write");
@@ -921,6 +923,7 @@ pub(crate) mod host {
         let root = tempfile::TempDir::new().unwrap();
         let _root =
             TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
+        crate::services::discord::install_engine_probes();
         let tmux = TmuxEnv::install(Tmux::MissingBinary);
         let db = TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
@@ -953,7 +956,7 @@ pub(crate) mod host {
             exec(&pool, sql, &[Some(&key), Some(&thread.to_string())]).await;
             force_presence_for_test(name, presence);
         }
-        let reset = super::super::reset_slot_thread_bindings_excluding_pg;
+        let reset = reset_slot_thread_bindings_excluding_pg;
         assert_eq!(
             reset(
                 slot_row_host_refusal,
