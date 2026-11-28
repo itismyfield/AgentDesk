@@ -2,6 +2,10 @@ use super::stamp_merge::{apply_local_change_if_durable_unchanged, merge_stream_r
 use super::*;
 use crate::services::discord::inflight::store::persist_under_lock_with_snapshot;
 
+#[cfg(test)]
+#[path = "stream_loop_patch/response_offset_tests.rs"]
+mod response_offset_tests;
+
 /// Exact durable relay-authority projection used by the stream loop's
 /// lock-held visible-mutation fence.  A non-bridge projection can be a valid
 /// self-handoff (watcher/standby); callers must suppress Discord mutations
