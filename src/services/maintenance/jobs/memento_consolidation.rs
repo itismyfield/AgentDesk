@@ -38,24 +38,6 @@ pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// pulling in the full memento backend (which is intentionally `pub(crate)`).
 const MEMENTO_PROTOCOL_VERSION: &str = "2025-11-25";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Config {
-    /// Optional explicit workspace label. When `None` we default to
-    /// `agentdesk-maintenance` so the consolidation pass operates against a
-    /// neutral workspace rather than per-agent silos.
-    pub workspace: Option<String>,
-}
-
-impl Config {
-    pub fn default_runtime() -> Self {
-        Self {
-            workspace: std::env::var("MEMENTO_WORKSPACE")
-                .ok()
-                .filter(|w| !w.trim().is_empty()),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ConsolidationReport {
     pub before_count: u64,
@@ -72,8 +54,8 @@ impl ConsolidationReport {
 }
 
 /// Job entrypoint registered against the maintenance scheduler.
-pub async fn run(config: Config) -> Result<()> {
-    let report = run_inner(config).await?;
+pub async fn run() -> Result<()> {
+    let report = run_inner().await?;
     if report.skipped {
         tracing::info!(
             target: "maintenance",
@@ -112,7 +94,7 @@ pub async fn run(config: Config) -> Result<()> {
 
 /// Inner runner. Returns a structured report so tests can assert without
 /// going through `tracing::info!` or the observability subsystem.
-pub async fn run_inner(config: Config) -> Result<ConsolidationReport> {
+pub async fn run_inner() -> Result<ConsolidationReport> {
     let Some(runtime) = resolve_runtime() else {
         return Ok(ConsolidationReport {
             skipped: true,
@@ -121,15 +103,10 @@ pub async fn run_inner(config: Config) -> Result<ConsolidationReport> {
         });
     };
 
-    let workspace = config
-        .workspace
-        .clone()
-        .unwrap_or_else(|| "agentdesk-maintenance".to_string());
-
     let client = reqwest::Client::new();
     let session_id = initialize_session(&client, &runtime).await?;
     let payload = with_receipt_invalidation(&runtime, || {
-        call_memory_consolidate(&client, &runtime, &session_id, &workspace)
+        call_memory_consolidate(&client, &runtime, &session_id)
     })
     .await?;
 
@@ -247,7 +224,6 @@ async fn call_memory_consolidate(
     client: &reqwest::Client,
     runtime: &RuntimeConfig,
     session_id: &str,
-    workspace: &str,
 ) -> Result<Value> {
     let response = auth(client.post(&runtime.endpoint), runtime)
         .header("MCP-Session-Id", session_id)
@@ -257,9 +233,7 @@ async fn call_memory_consolidate(
             "method": "tools/call",
             "params": {
                 "name": "memory_consolidate",
-                "arguments": {
-                    "workspace": workspace,
-                }
+                "arguments": {}
             }
         }))
         .send()
@@ -385,6 +359,32 @@ mod receipt_tests {
                     .is_some()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn runtime_hygiene_memento_sends_empty_consolidation_arguments() {
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::post(|axum::Json(body): axum::Json<Value>| async move {
+                if body["params"] == json!({"name":"memory_consolidate", "arguments":{}}) {
+                    axum::Json(json!({"result":{"content":[{"text":"{\"merged_count\":1}"}]}}))
+                } else {
+                    axum::Json(json!({"error":{"message":"unexpected consolidation arguments"}}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = RuntimeConfig {
+            endpoint: format!("http://{}", listener.local_addr().unwrap()),
+            access_key: "test-key".into(),
+            receipt_dir: temp.path().to_path_buf(),
+        };
+        let server = tokio::spawn(async { axum::serve(listener, app).await.unwrap() });
+        let response =
+            call_memory_consolidate(&reqwest::Client::new(), &runtime, "test-session").await;
+        server.abort();
+        assert_eq!(response.unwrap(), json!({"merged_count":1}));
     }
 
     #[tokio::test]

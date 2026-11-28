@@ -5,6 +5,7 @@ pub use crate::domain::file_sync::{PARENT_DIR_FSYNC_FLUSHES, fsync_parent_dir};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+pub mod checkpoint_lock;
 pub mod completed_turn_ledger_model;
 mod durable_ancestors;
 pub mod durable_publish;
@@ -786,33 +787,8 @@ pub fn last_message_root() -> Option<PathBuf> {
     runtime_root().map(|root| root.join("last_message"))
 }
 
-struct LastMessageIdFileLock {
-    _file: fs::File,
-}
-
-impl Drop for LastMessageIdFileLock {
-    fn drop(&mut self) {
-        let _ = self._file.unlock();
-    }
-}
-
 fn last_message_id_lock_path(path: &Path) -> PathBuf {
     path.with_extension("txt.lock")
-}
-
-fn lock_last_message_id_path(path: &Path) -> Result<LastMessageIdFileLock, String> {
-    let lock_path = last_message_id_lock_path(path);
-    if let Some(parent) = lock_path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let file = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .open(&lock_path)
-        .map_err(|e| e.to_string())?;
-    file.lock().map_err(|error| error.to_string())?;
-    Ok(LastMessageIdFileLock { _file: file })
 }
 
 fn read_last_message_id(path: &Path) -> Option<u64> {
@@ -828,7 +804,9 @@ pub fn save_last_message_id(provider: &str, channel_id: u64, message_id: u64) {
     };
     let dir = root.join(provider);
     let path = dir.join(format!("{}.txt", channel_id));
-    let Ok(_lock) = lock_last_message_id_path(&path) else {
+    let Ok(guard) =
+        checkpoint_lock::CheckpointLock::acquire(&last_message_id_lock_path(&path), true)
+    else {
         tracing::warn!(
             provider = provider,
             channel_id = channel_id,
@@ -848,6 +826,7 @@ pub fn save_last_message_id(provider: &str, channel_id: u64, message_id: u64) {
             .provider(provider)
             .channel_id(channel_id),
     );
+    drop(guard);
 }
 
 #[cfg(test)]

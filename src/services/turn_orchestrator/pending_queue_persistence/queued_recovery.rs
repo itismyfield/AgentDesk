@@ -1,6 +1,6 @@
 use super::super::queued_head::compat::{self, SnapshotRead};
 use super::{
-    ChannelId, Instant, PendingQueueRecovery, ProviderKind, STALE_PENDING_QUEUE_TMP_AGE,
+    ChannelId, Instant, MessageId, PendingQueueRecovery, ProviderKind, STALE_PENDING_QUEUE_TMP_AGE,
     SystemTime, cleanup_stale_pending_queue_tmp_files_in_dir, fs,
     pending_dispatch_marker_channel_id, pending_queue_items_to_interventions, pending_queue_root,
 };
@@ -153,6 +153,30 @@ pub(crate) fn v2_held_sources(
     delivered.extend(settled);
     delivered.retain(|id| !owed.contains(id));
     V2HeldSources { owed, delivered }
+}
+
+pub(crate) fn queue_holds_source(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel: ChannelId,
+    message: MessageId,
+) -> Result<bool, String> {
+    let path = super::pending_queue_file_path(provider, token_hash, channel)
+        .ok_or_else(|| "pending queue root unavailable".to_owned())?;
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("read {}: {error}", path.display())),
+    };
+    let snapshot = compat::inspect(&content)?;
+    Ok(match snapshot {
+        SnapshotRead::Legacy(items, _) => items.iter().any(|item| {
+            item.message_id == message.get() || item.source_message_ids.contains(&message.get())
+        }),
+        SnapshotRead::ReadOnlyV2(v2) => {
+            v2.holds_input() || v2.unfinished_handoff.is_some() || !v2.source_bindings.is_empty()
+        }
+    })
 }
 
 pub(crate) fn read_catalog(provider: &ProviderKind, token_hash: &str) -> SnapshotCatalog {
