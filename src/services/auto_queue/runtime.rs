@@ -210,7 +210,7 @@ pub async fn clear_slot_threads_for_slot_pg(
     clear_slot_threads_pg(row_guard, health_registry, pool, agent_id, slot_index, None).await
 }
 
-pub(super) async fn clear_slot_threads_for_runs_pg(
+pub(crate) async fn clear_slot_threads_for_runs_pg(
     row_guard: SlotRowGuard,
     health_registry: Option<SlotRuntimeHealth>,
     pool: &PgPool,
