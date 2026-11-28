@@ -144,22 +144,10 @@ pub(crate) async fn input_hold(
     .map_err(|e| e.to_string())
 }
 
-impl crate::services::turn_orchestrator::ChannelMailboxHandle {
-    #[cfg(test)]
-    pub(crate) fn v2_notice_is_non_turn(text: &str) -> bool {
-        super::super::dispatch_policy::has_non_turn_provenance(text)
-            && !super::super::dispatch_policy::should_process_allowed_bot_turn_text(text)
-    }
-    #[cfg(test)]
-    pub(crate) async fn v2_notice(
-        pool: &sqlx::PgPool,
-        provider: &str,
-        channel: u64,
-        namespace: &str,
-        identity: &serde_json::Value,
-    ) -> Result<i64, String> {
-        enqueue(pool, provider, channel, namespace, identity).await
-    }
+#[cfg(test)]
+pub(crate) fn is_non_turn(text: &str) -> bool {
+    super::super::dispatch_policy::has_non_turn_provenance(text)
+        && !super::super::dispatch_policy::should_process_allowed_bot_turn_text(text)
 }
 
 #[test]
@@ -167,7 +155,7 @@ fn retained_notice_provenance_prevents_allowed_bot_turn_admission() {
     let text = crate::domain::outbound::alert_origin::prepend_operational_alert_origin(
         "retained original",
     );
-    assert!(crate::services::turn_orchestrator::ChannelMailboxHandle::v2_notice_is_non_turn(&text));
+    assert!(is_non_turn(&text));
 }
 
 #[cfg(all(test, unix))]

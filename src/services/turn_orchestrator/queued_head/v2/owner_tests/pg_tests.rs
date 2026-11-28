@@ -1,5 +1,7 @@
 use super::*;
 use crate::config::TestRuntimeRootGuard;
+use crate::services::discord::health::turn_deliver::inject::queued_owner::v2_effect;
+use crate::services::discord::queue_io::retained_notice;
 
 #[tokio::test]
 async fn v2_real_owner_entry_and_persistent_notice_are_independent_pg() {
@@ -20,17 +22,16 @@ async fn v2_real_owner_entry_and_persistent_notice_are_independent_pg() {
     let count = Arc::new(AtomicUsize::new(0));
     let effect = count.clone();
     assert!(
-        !handle
-            .v2_effect(1000, move |frame| {
-                assert_eq!(frame, "exact prepared frame");
-                effect.fetch_add(1, Ordering::SeqCst);
-                Ok(false)
-            })
-            .await
-            .unwrap()
+        !v2_effect(&handle, 1000, move |frame| {
+            assert_eq!(frame, "exact prepared frame");
+            effect.fetch_add(1, Ordering::SeqCst);
+            Ok(false)
+        })
+        .await
+        .unwrap()
     );
     assert!(
-        handle.v2_effect(1001, |_| Ok(true)).await.is_err(),
+        v2_effect(&handle, 1001, |_| Ok(true)).await.is_err(),
         "a consumed permit cannot be issued again after writer completion"
     );
     handle
@@ -38,22 +39,21 @@ async fn v2_real_owner_entry_and_persistent_notice_are_independent_pg() {
         .await
         .unwrap();
     let retained = snapshot(&handle).await["retained_inputs"][0].clone();
-    let enqueue = ChannelMailboxHandle::v2_notice;
     let dead = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://127.0.0.1:1/missing")
         .unwrap();
     dead.close().await;
     assert!(
-        enqueue(&dead, "codex", 727270, "scope-727270", &retained)
+        retained_notice::enqueue(&dead, "codex", 727270, "scope-727270", &retained)
             .await
             .is_err()
     );
     prepare(&handle, 200, "pane-pg").await;
     assert!(
-        handle.v2_effect(32_000, |_| Ok(true)).await.unwrap(),
+        v2_effect(&handle, 32_000, |_| Ok(true)).await.unwrap(),
         "notice enqueue failure cannot block B"
     );
-    let first = enqueue(&pool, "codex", 727270, "scope-727270", &retained)
+    let first = retained_notice::enqueue(&pool, "codex", 727270, "scope-727270", &retained)
         .await
         .unwrap();
     handle
@@ -66,7 +66,7 @@ async fn v2_real_owner_entry_and_persistent_notice_are_independent_pg() {
         .unwrap();
     let projected = snapshot(&handle).await["retained_inputs"][0].clone();
     assert_eq!(projected["notice"]["enqueued"], true);
-    let second = enqueue(&pool, "codex", 727270, "scope-727270", &projected)
+    let second = retained_notice::enqueue(&pool, "codex", 727270, "scope-727270", &projected)
         .await
         .unwrap();
     assert_eq!(
@@ -85,7 +85,7 @@ async fn v2_real_owner_entry_and_persistent_notice_are_independent_pg() {
         "outbox preserves retained notice payload"
     );
     assert!(
-        ChannelMailboxHandle::v2_notice_is_non_turn(&rows.1),
+        retained_notice::is_non_turn(&rows.1),
         "notice loopback admits zero new turns"
     );
     assert_eq!(
@@ -100,7 +100,7 @@ async fn v2_real_owner_entry_and_persistent_notice_are_independent_pg() {
         .unwrap();
     prepare(&handle, 300, "pane-pg").await;
     assert!(
-        handle.v2_effect(33_000, |_| Ok(true)).await.unwrap(),
+        v2_effect(&handle, 33_000, |_| Ok(true)).await.unwrap(),
         "failed notice delivery cannot block C"
     );
     pool.close().await;

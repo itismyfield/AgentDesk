@@ -325,33 +325,32 @@ async fn v2_queued_attempt(
         .min(u64::MAX as u128) as u64;
     let effect_turn = turn_id.clone();
     let kind = request.provider.clone();
-    match mailbox
-        .v2_effect(now, move |_frame| {
-            let _source = source;
-            let target = target;
-            let pane = if target.herdr.is_some() {
-                Err(String::new())
-            } else {
-                pane(input.channel, &target.session)
-            };
-            let delivered = matches!(
-                provider.run(
-                    (&pane, target.herdr.as_ref()),
-                    (
-                        &target.session,
-                        &target.transcript,
-                        target.native_turn.as_deref()
-                    ),
-                    effect_turn,
-                    MessageId::new(expected.primary),
-                    &input
+    match v2_effect(&mailbox, now, move |_frame| {
+        let _source = source;
+        let target = target;
+        let pane = if target.herdr.is_some() {
+            Err(String::new())
+        } else {
+            pane(input.channel, &target.session)
+        };
+        let delivered = matches!(
+            provider.run(
+                (&pane, target.herdr.as_ref()),
+                (
+                    &target.session,
+                    &target.transcript,
+                    target.native_turn.as_deref()
                 ),
-                InjectAttempt::Injected { .. }
-            );
-            Ok(delivered
-                && super::queued_reconcile::v2_record_matches(&recorded, &target, provider, &kind))
-        })
-        .await
+                effect_turn,
+                MessageId::new(expected.primary),
+                &input
+            ),
+            InjectAttempt::Injected { .. }
+        );
+        Ok(delivered
+            && super::queued_reconcile::v2_record_matches(&recorded, &target, provider, &kind))
+    })
+    .await
     {
         Ok(true) => InjectAttempt::Injected { turn_id },
         _ => InjectAttempt::Unconfirmed {
@@ -368,82 +367,84 @@ struct EffectCompletion<K> {
 }
 
 #[cfg(test)]
-impl crate::services::turn_orchestrator::ChannelMailboxHandle {
-    /// Uses the real mailbox and durable permit; production admission is intentionally absent.
-    pub(crate) async fn v2_effect(
-        &self,
-        now: u64,
-        effect: impl FnOnce(String) -> Result<bool, String> + Send + 'static,
-    ) -> Result<bool, String> {
-        self.v2_effect_clock(
-            now,
-            std::sync::Arc::new(|| {
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis()
-                    .min(u64::MAX as u128) as u64
-            }),
-            effect,
-        )
-        .await
-    }
-    pub(crate) async fn v2_effect_clock(
-        &self,
-        now: u64,
-        clock: std::sync::Arc<dyn Fn() -> u64 + Send + Sync>,
-        effect: impl FnOnce(String) -> Result<bool, String> + Send + 'static,
-    ) -> Result<bool, String> {
-        let mailbox = self.clone();
-        tokio::spawn(async move {
-            let (key, permit, frame) = mailbox
-                .v2_request(move |slot| {
-                    let owner = slot.as_mut().ok_or("V2 not adopted")?;
-                    let key = owner.active_attempt()?;
-                    if key.attempt.target.host != "tmux"
-                        || !matches!(key.attempt.provider.as_str(), "claude" | "codex")
-                    {
-                        return Err("provider_unsupported".into());
-                    }
-                    let frame = owner
-                        .snapshot
-                        .head_injection
-                        .as_ref()
-                        .and_then(|h| h.payload.as_ref())
-                        .ok_or("unprepared payload")?
-                        .frame
-                        .clone();
-                    let permit = owner.arm(&key, now)?;
-                    Ok((key, permit, frame))
-                })
-                .await?;
-            let fallback = key.clone();
-            let completion = tokio::task::spawn_blocking(move || {
-                let outcome = permit.consume(&key).and_then(|_writer| effect(frame));
-                EffectCompletion {
-                    attempt: key,
-                    outcome,
+/// Uses the real mailbox and durable permit; production admission is intentionally absent.
+pub(crate) async fn v2_effect(
+    mailbox: &crate::services::turn_orchestrator::ChannelMailboxHandle,
+    now: u64,
+    effect: impl FnOnce(String) -> Result<bool, String> + Send + 'static,
+) -> Result<bool, String> {
+    v2_effect_clock(
+        mailbox,
+        now,
+        std::sync::Arc::new(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                .min(u64::MAX as u128) as u64
+        }),
+        effect,
+    )
+    .await
+}
+
+#[cfg(test)]
+pub(crate) async fn v2_effect_clock(
+    mailbox: &crate::services::turn_orchestrator::ChannelMailboxHandle,
+    now: u64,
+    clock: std::sync::Arc<dyn Fn() -> u64 + Send + Sync>,
+    effect: impl FnOnce(String) -> Result<bool, String> + Send + 'static,
+) -> Result<bool, String> {
+    let mailbox = mailbox.clone();
+    tokio::spawn(async move {
+        let (key, permit, frame) = mailbox
+            .v2_request(move |slot| {
+                let owner = slot.as_mut().ok_or("V2 not adopted")?;
+                let key = owner.active_attempt()?;
+                if key.attempt.target.host != "tmux"
+                    || !matches!(key.attempt.provider.as_str(), "claude" | "codex")
+                {
+                    return Err("provider_unsupported".into());
                 }
+                let frame = owner
+                    .snapshot
+                    .head_injection
+                    .as_ref()
+                    .and_then(|h| h.payload.as_ref())
+                    .ok_or("unprepared payload")?
+                    .frame
+                    .clone();
+                let permit = owner.arm(&key, now)?;
+                Ok((key, permit, frame))
             })
-            .await
-            .unwrap_or_else(|e| EffectCompletion {
-                attempt: fallback,
-                outcome: Err(e.to_string()),
-            });
-            let identity = serde_json::to_value(&completion.attempt).map_err(|e| e.to_string())?;
-            mailbox
-                .v2_settle_exact(
-                    identity,
-                    completion.outcome.as_ref().copied().unwrap_or(false),
-                    clock(),
-                )
-                .await?;
-            completion.outcome
+            .await?;
+        let fallback = key.clone();
+        let completion = tokio::task::spawn_blocking(move || {
+            let outcome = permit.consume(&key).and_then(|_writer| effect(frame));
+            EffectCompletion {
+                attempt: key,
+                outcome,
+            }
         })
         .await
-        .map_err(|e| e.to_string())?
-    }
+        .unwrap_or_else(|e| EffectCompletion {
+            attempt: fallback,
+            outcome: Err(e.to_string()),
+        });
+        let identity = serde_json::to_value(&completion.attempt).map_err(|e| e.to_string())?;
+        super::queued_reconcile::v2_settle_exact(
+            &mailbox,
+            identity,
+            completion.outcome.as_ref().copied().unwrap_or(false),
+            clock(),
+        )
+        .await?;
+        completion.outcome
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
+
 /// No name was found for the head's author: the input stays queued.
 pub(super) const NAME_UNRESOLVED: &str = "queued_name_unresolved";
 /// The head's message, or the head claimed, is not the author's: the input stays queued.
