@@ -9,6 +9,7 @@ use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use super::SharedData;
 use super::idle_relay_drift::{DriftState, decide_drift_warn};
 use super::inflight::InflightTurnState;
+use super::queue_dispatch::busy_followup_retry::requeue_inflight_for_followup_retry;
 use crate::services::provider::{CancelToken, ProviderKind};
 use poise::serenity_prelude::ChannelId;
 
@@ -305,8 +306,7 @@ pub(super) async fn defer_unstarted_turn(
     }
     #[cfg(test)]
     handback_gap::pause(channel).await;
-    let queued =
-        super::mailbox_requeue_inflight_for_followup_retry(shared, provider, channel, state).await;
+    let queued = requeue_inflight_for_followup_retry(shared, provider, channel, state).await;
     #[cfg(test)]
     let queued = {
         let mut queued = queued;

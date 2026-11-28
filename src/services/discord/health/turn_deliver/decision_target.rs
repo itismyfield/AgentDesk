@@ -7,10 +7,9 @@ use async_trait::async_trait;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::{
-    DeliveryPorts, HealthRegistry, HumanInputError, HumanInputRequest, ProviderKind, StartAttempt,
-};
+use super::{DeliveryPorts, HealthRegistry, HumanInputRequest, ProviderKind, StartAttempt};
 use crate::db::decisions::{self, AttemptState, DecisionProvenance};
+use crate::domain::human_input::HumanInputError;
 use crate::services::discord::queue_io::input_owner::origin::InputOrigin;
 
 /// How the first attempt of an event ended.

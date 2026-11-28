@@ -3,6 +3,8 @@
 #![cfg(unix)]
 use std::sync::Arc;
 
+use super::cold::v2_cold_observed;
+
 use crate::services::claude_tui::busy_inject;
 use crate::services::claude_tui::owner_input;
 use crate::services::turn_orchestrator::{ChannelMailboxHandle, SeedStopAuthority};
@@ -99,7 +101,8 @@ pub(crate) async fn run(
     leaf: Leaf,
 ) -> Result<Completion, String> {
     // Only a panicked effect may have written; every other refusal here comes before the leaf.
-    let (identity, outcome) = (mailbox.v2_cold_observed(clock(), clock.clone(), leaf).await)
+    let (identity, outcome) = v2_cold_observed(mailbox, clock(), clock.clone(), leaf)
+        .await
         .map_err(|e| {
             if e.starts_with("cold effect ") {
                 e

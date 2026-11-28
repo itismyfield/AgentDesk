@@ -90,7 +90,7 @@ pub(super) async fn run_bot_start_gateway_runtime(
             lease,
             &shared,
             &provider,
-            settings::discord_token_hash(token),
+            crate::utils::discord::discord_token_hash(token),
             client.shard_manager.clone(),
             handback_breaker,
         )

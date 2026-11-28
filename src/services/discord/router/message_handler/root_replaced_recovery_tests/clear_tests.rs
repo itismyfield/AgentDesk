@@ -205,7 +205,7 @@ fn rr_public_clear_with_termination_disabled_retires_and_reports_empty_queue_pg(
         "the real launch still admits N1 before clear observes its replacement"
     );
     let _intake = IntakeGate::configure(&case);
-    assert!(!crate::services::discord::herdr_terminate::terminate_enabled());
+    assert!(!crate::services::session_host::operation_policy::terminate_enabled());
     let original = case.fx.record();
     let effects = case.effects();
     let report = clear(&case);

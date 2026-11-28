@@ -26,7 +26,7 @@ fn app_with_peer_filter(dashboard_enabled: bool, root: &Path, mode: PeerFilterMo
     config.data.dir = root.join("data");
     std::fs::create_dir_all(&config.policies.dir).unwrap();
     let state = crate::server::routes::AppState {
-        engine: crate::engine::PolicyEngine::new_with_pg(&config, None).unwrap(),
+        engine: crate::engine::PolicyEngine::new(&config).unwrap(),
         config: Arc::new(config),
         pg_pool: None,
         broadcast_tx: crate::eventbus::new_broadcast(),

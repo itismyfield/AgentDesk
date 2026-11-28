@@ -901,9 +901,14 @@ mod dispatch_terminal_sync_pg_tests {
         .expect("seed end phase gate");
 
         assert!(
-            crate::services::auto_queue::cancel_run::end_run_with_pg(None, &pool, "run-1")
-                .await
-                .expect("end original run")
+            crate::services::auto_queue::cancel_run::end_run_with_pg(
+                crate::services::discord::health::slot_row_host_refusal,
+                None,
+                &pool,
+                "run-1"
+            )
+            .await
+            .expect("end original run")
         );
         let dispatch_status: String = sqlx::query_scalar(
             "SELECT status FROM task_dispatches WHERE id = 'dispatch-live-after-end'",
@@ -1446,7 +1451,12 @@ mod dispatch_terminal_sync_pg_tests {
         .expect("seed pending review dispatch");
 
         let err = crate::services::auto_queue::runtime::reset_slot_thread_bindings_excluding_pg(
-            &pool, "agent-1", 0, None, None,
+            crate::services::discord::health::slot_row_host_refusal,
+            &pool,
+            "agent-1",
+            0,
+            None,
+            None,
         )
         .await
         .expect_err("pending review dispatch must block slot reset before session attach");

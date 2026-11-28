@@ -6,7 +6,7 @@ use sqlx::PgPool;
 
 use crate::db::kanban::{self, ListCardsFilter};
 use crate::db::kanban_cards::KanbanCardRecord;
-use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
+use crate::error::{AppError as ServiceError, AppResult as ServiceResult, ErrorCode};
 use crate::utils::github_links::{
     normalize_optional_github_issue_url, normalize_optional_github_repo_id,
 };

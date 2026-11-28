@@ -32,22 +32,22 @@ pub(super) fn v2_record_matches(
             .is_some_and(|offset| offset <= meta.len())
 }
 #[cfg(test)]
-impl crate::services::turn_orchestrator::ChannelMailboxHandle {
-    pub(crate) async fn v2_settle_exact(
-        &self,
-        identity: serde_json::Value,
-        delivered: bool,
-        now: u64,
-    ) -> Result<(), String> {
-        self.v2_request(move |slot| {
+pub(crate) async fn v2_settle_exact(
+    mailbox: &crate::services::turn_orchestrator::ChannelMailboxHandle,
+    identity: serde_json::Value,
+    delivered: bool,
+    now: u64,
+) -> Result<(), String> {
+    mailbox
+        .v2_request(move |slot| {
             let key = serde_json::from_value(identity).map_err(|e| e.to_string())?;
             slot.as_mut()
                 .ok_or("V2 not adopted")?
                 .settle(&key, delivered, now)
         })
         .await
-    }
 }
+
 use std::collections::HashMap;
 use std::io::{BufRead, Seek, SeekFrom};
 use std::path::{Path, PathBuf};

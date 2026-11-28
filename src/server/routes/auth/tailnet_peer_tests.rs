@@ -68,7 +68,7 @@ fn state(token: Option<&str>, runner: bool) -> (AppState, tempfile::TempDir) {
     config.data.dir = root.path().join("data");
     std::fs::create_dir_all(&config.policies.dir).unwrap();
     let state = AppState {
-        engine: crate::engine::PolicyEngine::new_with_pg(&config, None).unwrap(),
+        engine: crate::engine::PolicyEngine::new(&config).unwrap(),
         config: Arc::new(config),
         pg_pool: None,
         broadcast_tx: crate::eventbus::new_broadcast(),

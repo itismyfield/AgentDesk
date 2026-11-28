@@ -35,7 +35,7 @@ relevant 99, sha256 약 300, pane_liveness 314+207, legacy-body-census-writer 73
 | 역할/진입점 | file:line | 읽거나 만드는 값·범위 / 경계 |
 |---|---|---|
 | Discord idle/turn 입력 프레임 | `src/services/discord/router/response_format.rs:161`; `src/services/tui_input/human_frame.rs:97`, `:109` | 일반 `[User: name (ID: digits)]`; idle과 plain inject가 같은 가시 bytes 사용 |
-| created execution의 첫 prompt 제출 | `src/services/claude_tui/hosting/fresh_lifecycle.rs:175`; `src/services/discord/health/turn_deliver/inject/first_input.rs:35`, `:49`, `:164` | prepare_history → owner permit consume → with_attempt 안에서 physical submit; native JSONL user row는 provider가 기록 |
+| created execution의 첫 prompt 제출 | `src/services/claude_tui/hosting/fresh_lifecycle.rs:175`; `src/services/discord/queue_io/input_owner/cold.rs:31`, `:51`, `:116` | prepare_history → owner permit consume → with_attempt 안에서 physical submit; native JSONL user row는 provider가 기록 |
 | owner 등록/재시작 동기화 | `src/services/turn_orchestrator/queued_head/v2/sources.rs:158`, `:214` | active/retained input을 Registry::prepare/project로 연결; restored registration도 같은 native attribution에 도달 |
 | busy 주입 등록·영수증 collector | `src/services/claude_tui/busy_inject.rs:596`, `:644`; `src/services/tui_input/human_frame/history/v2.rs:566` | enqueue 영수증과 native user/command UUID 영수증은 구별됨 |
 | durable 등록 생성/PreSource 해소/수동 이관 | `src/services/tui_input/human_frame/history/v2.rs:354`, `:395`, `:434` | namespace+전체 key, source target/provider/session/path/dev/ino/offset; live/planned/passive, abandoned 제외 |

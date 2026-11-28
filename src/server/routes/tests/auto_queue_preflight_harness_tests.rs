@@ -579,6 +579,7 @@ async fn run_review_paths(
     let transport =
         crate::services::dispatches::discord_delivery::HttpDispatchTransport::from_runtime_with_pg(
             Some(pool.clone()),
+            crate::services::discord::health::slot_row_host_refusal,
         );
     crate::services::dispatches::discord_delivery::send_review_result_to_primary_for_preflight_harness_with_transport(
         card_id,
@@ -756,6 +757,7 @@ async fn exercise_review_rework_loop(
     let transport =
         crate::services::dispatches::discord_delivery::HttpDispatchTransport::from_runtime_with_pg(
             Some(pool.clone()),
+            crate::services::discord::health::slot_row_host_refusal,
         );
     crate::services::dispatches::discord_delivery::send_review_result_to_primary_for_preflight_harness_with_transport(
         card_id,
@@ -2414,8 +2416,12 @@ fn append_unique(values: &mut Vec<String>, value: String) {
 
 fn build_preflight_app(pool: sqlx::PgPool, fixture: &PreflightFixture) -> Result<Router, String> {
     let config = build_preflight_config(fixture);
-    let engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone()))
-        .map_err(|error| format!("create policy engine: {error}"))?;
+    let engine = crate::engine::PolicyEngine::new_with_pg(
+        &config,
+        Some(pool.clone()),
+        crate::services::discord::health::slot_row_host_refusal,
+    )
+    .map_err(|error| format!("create policy engine: {error}"))?;
     let broadcast_tx = crate::server::ws::new_broadcast();
     let batch_buffer = crate::server::ws::spawn_batch_flusher(broadcast_tx.clone());
     let api = crate::server::routes::api_router_with_pg(
@@ -2434,8 +2440,12 @@ fn build_preflight_engine(
     fixture: &PreflightFixture,
 ) -> Result<crate::engine::PolicyEngine, String> {
     let config = build_preflight_config(fixture);
-    crate::engine::PolicyEngine::new_with_pg(&config, Some(pool))
-        .map_err(|error| format!("create policy engine: {error}"))
+    crate::engine::PolicyEngine::new_with_pg(
+        &config,
+        Some(pool),
+        crate::services::discord::health::slot_row_host_refusal,
+    )
+    .map_err(|error| format!("create policy engine: {error}"))
 }
 
 fn build_preflight_config(fixture: &PreflightFixture) -> crate::config::Config {

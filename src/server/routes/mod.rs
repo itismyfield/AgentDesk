@@ -363,7 +363,7 @@ mod audit_explicit_auth_routes_tests {
         config.policies.dir = temp.path().join("empty-policies");
         config.policies.hot_reload = false;
         std::fs::create_dir_all(&config.policies.dir).unwrap();
-        let engine = PolicyEngine::new_with_pg(&config, None).unwrap();
+        let engine = PolicyEngine::new(&config).unwrap();
         let routes = [
             ("/kanban-cards/card/rereview", "{}", "rereview"),
             (

@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 
 use super::SharedData;
+use crate::services::engine_runtime::health_port::{SlotResetOutcome, SlotResetVerdict};
 use crate::services::provider::ProviderKind;
 
 pub(crate) use super::host_defer_gate::{configured_refusal, host_decision_of};
@@ -218,15 +219,26 @@ pub(crate) async fn managed_reset_verdict(
     })
 }
 
-impl ManagedResetVerdict {
-    pub(crate) fn channel_id(&self) -> ChannelId {
+impl SlotResetVerdict for ManagedResetVerdict {
+    fn channel_id(&self) -> ChannelId {
         self.channel_id
     }
 
-    pub(crate) fn refusal(&self) -> Option<&str> {
+    fn refusal(&self) -> Option<&str> {
         self.refusal.as_deref()
     }
 
+    fn apply(self: Box<Self>) -> BoxFuture<'static, SlotResetOutcome> {
+        Box::pin(async move {
+            match (*self).apply().await {
+                ManagedReset::Applied(name) => Ok(name),
+                ManagedReset::Refused(reason) => Err(reason),
+            }
+        })
+    }
+}
+
+impl ManagedResetVerdict {
     /// Clears the approved channel's turn, provider session and managed process. A refusal, or a
     /// runtime whose session changed since the verdict, changes nothing.
     pub(crate) async fn apply(self) -> ManagedReset {

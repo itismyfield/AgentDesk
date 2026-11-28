@@ -1,6 +1,8 @@
 use super::super::super::{ChannelMailboxHandle, ChannelMailboxRegistry, QueuePersistenceContext};
 use super::*;
 use crate::config::TestRuntimeRootGuard;
+use crate::services::discord::health::turn_deliver::inject::queued_owner::v2_effect;
+use crate::services::discord::health::turn_deliver::inject::queued_reconcile::v2_settle_exact;
 use crate::services::provider::ProviderKind;
 use poise::serenity_prelude::ChannelId;
 use serde_json::{Value, json};
@@ -96,7 +98,7 @@ async fn v2_mailbox_retains_without_releasing_live_writer_and_late_settles_exact
         let h = handle.clone();
         let effects = effects.clone();
         async move {
-            h.v2_effect(1000, move |frame| {
+            v2_effect(&h, 1000, move |frame| {
                 assert_eq!(frame, "exact prepared frame");
                 effects.fetch_add(1, Ordering::SeqCst);
                 entered.send(()).unwrap();
@@ -136,7 +138,7 @@ async fn v2_mailbox_retains_without_releasing_live_writer_and_late_settles_exact
     let b = prepare(&handle, 200, "pane-concurrency").await;
     let before = snapshot(&handle).await;
     assert!(
-        handle.v2_effect(31_001, |_| Ok(true)).await.is_err(),
+        v2_effect(&handle, 31_001, |_| Ok(true)).await.is_err(),
         "logical expiry must not release a live physical writer"
     );
     assert_eq!(
@@ -147,8 +149,7 @@ async fn v2_mailbox_retains_without_releasing_live_writer_and_late_settles_exact
     let mut wrong = a.clone();
     wrong.attempt.nonce.push('x');
     assert!(
-        handle
-            .v2_settle_exact(serde_json::to_value(wrong).unwrap(), true, 31_002)
+        v2_settle_exact(&handle, serde_json::to_value(wrong).unwrap(), true, 31_002)
             .await
             .is_err(),
         "nonce mismatch must never settle any exact attempt"
@@ -172,13 +173,13 @@ async fn v2_mailbox_retains_without_releasing_live_writer_and_late_settles_exact
     );
     assert_eq!(after["items"], before["items"]);
     assert_eq!(effects.load(Ordering::SeqCst), 1);
-    assert!(!handle.v2_effect(32_000, |_| Ok(false)).await.unwrap());
+    assert!(!v2_effect(&handle, 32_000, |_| Ok(false)).await.unwrap());
     handle
         .v2_request(|slot| slot.as_mut().unwrap().tick(62_000))
         .await
         .unwrap();
     let _c = prepare(&handle, 300, "pane-concurrency").await;
-    assert!(handle.v2_effect(63_000, |_| Ok(true)).await.unwrap());
+    assert!(v2_effect(&handle, 63_000, |_| Ok(true)).await.unwrap());
     assert_eq!(
         snapshot(&handle).await["retained_inputs"][0]["input"]["identity"],
         serde_json::to_value(&b.identity).unwrap()
@@ -602,8 +603,7 @@ async fn v2_unsupported_host_veto_precedes_may_have_sent_and_effect() {
         .await
         .unwrap();
     assert!(
-        handle
-            .v2_effect(1000, |_| panic!("unsupported adapter cannot run"))
+        v2_effect(&handle, 1000, |_| panic!("unsupported adapter cannot run"))
             .await
             .is_err()
     );

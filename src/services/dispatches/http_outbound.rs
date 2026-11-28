@@ -4,6 +4,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::OnceLock;
 
+use crate::domain::outbound::port::{DispatchMessagePostError, DispatchMessagePostErrorKind};
 use crate::domain::outbound::{DeliveryResult, OutboundDelivery, OutboundIntent};
 
 /// One bot token's connection to the Discord API.
@@ -21,11 +22,25 @@ pub(crate) type Deliver = fn(
     Option<String>,
 ) -> Pin<Box<dyn Future<Output = DeliveryResult> + Send>>;
 
-static DELIVER: OnceLock<Deliver> = OnceLock::new();
+pub(crate) type Edit = for<'a> fn(
+    HttpOutbound,
+    &'a str,
+    &'a str,
+    &'a str,
+) -> Pin<
+    Box<dyn Future<Output = Result<String, DispatchMessagePostError>> + Send + 'a>,
+>;
+
+struct HttpOutboundPort {
+    deliver: Deliver,
+    edit: Edit,
+}
+
+static PORT: OnceLock<HttpOutboundPort> = OnceLock::new();
 
 /// Installs the Discord adapter before any command runs; the first install wins.
-pub(crate) fn install(deliver: Deliver) {
-    let _ = DELIVER.set(deliver);
+pub(crate) fn install(deliver: Deliver, edit: Edit) {
+    let _ = PORT.set(HttpOutboundPort { deliver, edit });
 }
 
 impl HttpOutbound {
@@ -49,12 +64,27 @@ impl HttpOutbound {
     ) -> DeliveryResult {
         #[cfg(test)]
         crate::services::discord::outbound::install_engine_ports();
-        match DELIVER.get() {
-            Some(deliver) => deliver(self.clone(), intent, summary).await,
+        match PORT.get() {
+            Some(port) => (port.deliver)(self.clone(), intent, summary).await,
             None => DeliveryResult::PermanentFailure {
                 reason: "discord http outbound not installed".to_string(),
             },
         }
+    }
+
+    pub(crate) async fn edit_message(
+        self,
+        channel_id: &str,
+        message_id: &str,
+        content: &str,
+    ) -> Result<String, DispatchMessagePostError> {
+        let port = PORT.get().ok_or_else(|| {
+            DispatchMessagePostError::new(
+                DispatchMessagePostErrorKind::Other,
+                "discord http outbound not installed".to_string(),
+            )
+        })?;
+        (port.edit)(self, channel_id, message_id, content).await
     }
 }
 

@@ -8,6 +8,7 @@
 //! `get_pending_dispatch_for_thread`) remain in the server layer and call into
 //! these helpers.
 
+use crate::domain::outbound::port::{DispatchMessagePostError, DispatchMessagePostErrorKind};
 use sqlx::{PgPool, Row as SqlxRow};
 
 fn json_value_kind(value: &serde_json::Value) -> &'static str {
@@ -549,10 +550,7 @@ pub(crate) async fn try_reuse_thread(
     dispatch_id: &str,
     card_id: &str,
     pg_pool: Option<&PgPool>,
-) -> Result<
-    Option<(bool, Option<super::DispatchMessagePostOutcome>)>,
-    super::DispatchMessagePostError,
-> {
+) -> Result<Option<(bool, Option<super::DispatchMessagePostOutcome>)>, DispatchMessagePostError> {
     // #1968: Refuse to reuse a thread that already has a *different* active
     // dispatch. Two dispatches assigned to the same Discord thread results in
     // the second never receiving turn_started — its session_key/started_at
@@ -603,8 +601,8 @@ pub(crate) async fn try_reuse_thread(
         .send()
         .await
         .map_err(|error| {
-            super::DispatchMessagePostError::new(
-                super::DispatchMessagePostErrorKind::Other,
+            DispatchMessagePostError::new(
+                DispatchMessagePostErrorKind::Other,
                 format!("failed to inspect reusable thread {thread_id}: {error}"),
             )
         })?;
@@ -621,8 +619,8 @@ pub(crate) async fn try_reuse_thread(
     }
 
     let body: serde_json::Value = resp.json().await.map_err(|error| {
-        super::DispatchMessagePostError::new(
-            super::DispatchMessagePostErrorKind::Other,
+        DispatchMessagePostError::new(
+            DispatchMessagePostErrorKind::Other,
             format!("failed to parse reusable thread {thread_id}: {error}"),
         )
     })?;

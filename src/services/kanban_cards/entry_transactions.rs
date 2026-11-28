@@ -1,5 +1,4 @@
-//! Card writes that move auto-queue entries in the same tx as the run completion notice.
-//! The kanban delete, rereview and reopen routes reach those writes only through these names.
+//! Card deletion moves auto-queue entries in the same tx as the run completion notice.
 
 use crate::db::auto_queue::{ENTRY_STATUS_SKIPPED, EntryStatusUpdateOptions};
 use crate::db::kanban_cards::{
@@ -7,11 +6,6 @@ use crate::db::kanban_cards::{
 };
 use crate::services::auto_queue::transactions::update_entry_status_on_pg_tx;
 use sqlx::PgPool;
-
-/// Rereview and reopen only move entries to `dispatched`, which never owes run completion.
-pub(crate) use crate::db::kanban_cards::{
-    move_auto_queue_entry_to_dispatched_on_pg, reactivate_done_auto_queue_entries_pg,
-};
 
 /// Refuses while a dispatch is live; otherwise skips the card's pending auto-queue
 /// entries and stamps the card in one transaction.

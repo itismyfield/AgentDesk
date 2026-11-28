@@ -153,8 +153,12 @@ fn b2a_native_bound_health_child() {
                 .await
                 .expect("fresh private session census");
             assert_eq!(sessions, 0, "no recovered process may enter this fixture");
-            let engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone()))
-                .expect("empty native policy engine");
+            let engine = crate::engine::PolicyEngine::new_with_pg(
+                &config,
+                Some(pool.clone()),
+                crate::services::discord::health::slot_row_host_refusal,
+            )
+            .expect("empty native policy engine");
             tokio::spawn(async move {
                 for _ in 0..1200 {
                     if let Ok(Some(witness)) = lifecycle::health_witness() {

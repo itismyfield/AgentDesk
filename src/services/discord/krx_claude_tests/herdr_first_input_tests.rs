@@ -2,6 +2,7 @@
 
 use crate::services::claude::herdr_turn::{regression_attached, write_for_test};
 use crate::services::claude_tui::guarded_outcome;
+use crate::services::discord::health::turn_deliver::inject::first_input::pg_tests::v2_cold_fixture;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -38,7 +39,8 @@ fn herdr_composer_refusal_keeps_real_owner_proof_and_wake_then_submits_once() {
     let target = serde_json::json!({"host":"herdr","owner":logical,"root":rig.socket().display().to_string(),"execution_nonce":"00112233445566778899aabbccddee01"});
     let attempt = serde_json::json!({"nonce":"held-attempt-1","provider":"claude","target":target,"source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}});
     runtime
-        .block_on(mailbox.v2_cold_fixture(
+        .block_on(v2_cold_fixture(
+            &mailbox,
             root.path().join("held.json"),
             attempt.clone(),
             "one original".into(),

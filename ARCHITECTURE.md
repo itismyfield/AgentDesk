@@ -904,6 +904,7 @@ src/
 │   │   ├── peer_filter.rs
 │   │   └── tests.rs
 │   ├── worker_registry/
+│   │   ├── outbox_slot_reset_pg_tests.rs
 │   │   ├── registry.rs
 │   │   └── status.rs
 │   ├── bind_security_diagnostics.rs
@@ -2328,6 +2329,7 @@ src/
 │   │   │   ├── session_anchors.rs
 │   │   │   └── system_prompt_audit.rs
 │   │   ├── queue_dispatch/
+│   │   │   ├── busy_followup_retry.rs
 │   │   │   ├── canary_workspace.rs
 │   │   │   ├── canary_workspace_tests.rs
 │   │   │   ├── cancel_backstop_race_support_tests.rs
@@ -2360,6 +2362,7 @@ src/
 │   │   │   │   ├── claude_handoff.rs
 │   │   │   │   ├── closed.rs
 │   │   │   │   ├── closed_tests.rs
+│   │   │   │   ├── cold.rs
 │   │   │   │   ├── drive.rs
 │   │   │   │   ├── drive_tests.rs
 │   │   │   │   ├── effect.rs
@@ -2397,6 +2400,7 @@ src/
 │   │   │   ├── cancel_reclaim_support_test.rs
 │   │   │   ├── decision_drain.rs
 │   │   │   ├── decision_drain_tests.rs
+│   │   │   ├── held_sources.rs
 │   │   │   ├── idle_queue_tests.rs
 │   │   │   ├── ledger_settlement_tests.rs
 │   │   │   ├── owned_backstop_tests.rs
@@ -4065,6 +4069,7 @@ src/
 │   │   │   ├── thread_reuse.rs
 │   │   │   └── transport.rs
 │   │   ├── cluster_hooks.rs
+│   │   ├── command_bot_launch.rs
 │   │   ├── dtos.rs
 │   │   ├── http_outbound.rs
 │   │   ├── mod.rs
@@ -5569,7 +5574,6 @@ src/
 │   ├── running_binary.rs
 │   ├── scheduled_messages.rs
 │   ├── scheduling.rs
-│   ├── service_error.rs
 │   ├── session_activity.rs
 │   ├── session_activity_heartbeat_tests.rs
 │   ├── session_backend.rs

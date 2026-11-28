@@ -20,8 +20,7 @@ pub use crate::server::dto::kanban::{
     ForceTransitionBody, ListCardsQuery, PmDecisionBody, RedispatchCardBody, ReopenBody,
     RereviewBody, RetryCardBody, UpdateCardBody,
 };
-use crate::services::discord::host_teardown_gate::row_host_refusal;
-use crate::services::kanban_cards::entry_transactions;
+use crate::services::discord::{SharedData, host_teardown_gate::row_host_refusal};
 use crate::services::turn_lifecycle::{
     ForceKillVerdict, force_kill_row_verdict, force_kill_turn_with_verdict,
 };
@@ -146,7 +145,7 @@ fn target_tmux_name(target: &kanban_db::ActiveTurnTarget) -> &str {
 /// Kills each session on the host verdict the revert took before its transition.
 async fn cancel_turn_targets(
     state: &AppState,
-    verdicts: Vec<(&kanban_db::ActiveTurnTarget, ForceKillVerdict)>,
+    verdicts: Vec<(&kanban_db::ActiveTurnTarget, ForceKillVerdict<SharedData>)>,
     reason: &str,
 ) {
     for (target, verdict) in verdicts {
@@ -1729,7 +1728,7 @@ pub async fn rereview_card(
     };
 
     for entry_id in entry_ids {
-        if let Err(error) = entry_transactions::move_auto_queue_entry_to_dispatched_on_pg(
+        if let Err(error) = kanban_db::move_auto_queue_entry_to_dispatched_on_pg(
             pool,
             &entry_id,
             "rereview_dispatch",
@@ -2013,7 +2012,7 @@ pub async fn reopen_card(
                 }
 
                 if let Err(error) =
-                    entry_transactions::reactivate_done_auto_queue_entries_pg(pool, &id).await
+                    kanban_db::reactivate_done_auto_queue_entries_pg(pool, &id).await
                 {
                     return Err(database_error(format!("{error}")));
                 }

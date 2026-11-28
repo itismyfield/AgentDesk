@@ -130,9 +130,12 @@ fn measure(out: &Path) {
             Profile::S1 => {
                 let mut engine_config = crate::config::Config::default();
                 engine_config.policies.hot_reload = false;
-                let engine =
-                    crate::engine::PolicyEngine::new_with_pg(&engine_config, Some(db.pool.clone()))
-                        .expect("policy engine with PostgreSQL");
+                let engine = crate::engine::PolicyEngine::new_with_pg(
+                    &engine_config,
+                    Some(db.pool.clone()),
+                    crate::services::discord::health::slot_row_host_refusal,
+                )
+                .expect("policy engine with PostgreSQL");
                 (engine, None)
             }
             Profile::S2 | Profile::S3 => {

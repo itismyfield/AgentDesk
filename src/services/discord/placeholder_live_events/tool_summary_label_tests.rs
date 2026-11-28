@@ -1,4 +1,4 @@
-use super::{class, safe_tool_summary};
+use crate::domain::tool_summary::{class, safe_tool_summary};
 use serde_json::json;
 
 fn bash(input: serde_json::Value) -> Option<String> {

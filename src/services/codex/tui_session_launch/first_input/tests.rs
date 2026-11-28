@@ -7,6 +7,8 @@ use crate::services::codex::{
     create_for_test, prepare_codex_herdr_launch_for_test, prepare_codex_tui_launch_script,
     resolve_codex_binary_for_test,
 };
+use crate::services::discord::health::turn_deliver::inject::first_input::pg_tests::v2_cold_fixture;
+use crate::services::discord::health::turn_deliver::inject::first_input::v2_cold_bootstrap;
 use crate::services::process::shell_escape;
 use crate::services::provider::ProviderKind;
 use crate::services::tui_prompt_dedupe::{self as dedupe, binding_context::tests as fixture};
@@ -79,12 +81,15 @@ fn cold_codex_argv_create_returns_before_rollout_and_failed_create_cleans_its_fi
             );
         let channel = 727396 + u64::from(failed);
         let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(channel));
-        runtime.block_on(mailbox.v2_cold_fixture(root.path().join(format!("owner-{channel}.json")),serde_json::json!({"nonce":format!("codex-scope-{channel}"),"provider":"codex","target":{"host":"tmux","owner":name,"root":launch.prepared_for_test().context.owner_runtime_root,"execution_nonce":launch.prepared_for_test().context.execution_nonce},"source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}}),prompt.into(),channel)).unwrap();
+        runtime.block_on(v2_cold_fixture(&mailbox, root.path().join(format!("owner-{channel}.json")),serde_json::json!({"nonce":format!("codex-scope-{channel}"),"provider":"codex","target":{"host":"tmux","owner":name,"root":launch.prepared_for_test().context.owner_runtime_root,"execution_nonce":launch.prepared_for_test().context.execution_nonce},"source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}}),prompt.into(),channel)).unwrap();
         let working = root.path().display().to_string();
         let profile = overlay.profile_id.clone();
         let (_, result) = runtime
-            .block_on(
-                mailbox.v2_cold_bootstrap(1, std::sync::Arc::new(|| 10000), move |frame| {
+            .block_on(v2_cold_bootstrap(
+                &mailbox,
+                1,
+                std::sync::Arc::new(|| 10000),
+                move |frame| {
                     assert!(
                         crate::services::tui_input::human_frame::history::v2::scoped_source()
                             .is_some(),
@@ -104,8 +109,8 @@ fn cold_codex_argv_create_returns_before_rollout_and_failed_create_cleans_its_fi
                         selection: &selection,
                         end_observation: &mut end,
                     })
-                }),
-            )
+                },
+            ))
             .unwrap();
         let owner_snapshot = runtime
             .block_on(mailbox.v2_request(|s| s.as_ref().unwrap().json()))

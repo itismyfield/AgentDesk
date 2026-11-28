@@ -3,6 +3,7 @@ use std::path::Path;
 
 use super::{ResumePreviousOptions, ResumeRebindError, catalog, perform_resume_rebind};
 use crate::services::claude_tui::transcript_tail::claude_transcript_path;
+use crate::services::discord::health::resume_ports;
 use crate::services::provider::ProviderKind;
 
 const KEY: &str = "i6483-background";
@@ -53,7 +54,15 @@ async fn resume_on(
     };
     let claude = Some(ProviderKind::Claude);
     let channel = channel.map(poise::serenity_prelude::ChannelId::new);
-    let rebind = perform_resume_rebind(pool, None, KEY, claude, channel, "i6483-bg", &opts);
+    let rebind = perform_resume_rebind(
+        pool,
+        resume_ports(None),
+        KEY,
+        claude,
+        channel,
+        "i6483-bg",
+        &opts,
+    );
     let outcome = catalog::TEST_HOME.scope(home.to_path_buf(), rebind).await?;
     Ok(outcome.target_session_id)
 }
@@ -384,7 +393,15 @@ fn a_stale_active_copy_is_refused_for_named_and_automatic_targets_pg() {
                 cwd: None,
             };
             let claude = Some(ProviderKind::Claude);
-            let rebind = perform_resume_rebind(&pool, None, KEY, claude, None, "i6483-bg", &opts);
+            let rebind = perform_resume_rebind(
+                &pool,
+                resume_ports(None),
+                KEY,
+                claude,
+                None,
+                "i6483-bg",
+                &opts,
+            );
             let refused = catalog::TEST_HOME.scope(home.to_path_buf(), rebind).await;
             let case = format!("session_id={session_id:?}");
             let (status, axum::Json(body)) = refused.expect_err(&case).into_response();

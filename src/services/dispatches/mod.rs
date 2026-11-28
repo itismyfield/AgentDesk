@@ -2,12 +2,13 @@ use serde_json::{Value, json};
 use sqlx::Row;
 
 use crate::engine::PolicyEngine;
-use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
+use crate::error::{AppError as ServiceError, AppResult as ServiceResult, ErrorCode};
 
 // #1693: Discord delivery transport / error types / delivery-guard helper
 // migrated from `crate::services::discord_delivery` (the flat path is kept
 // as a re-export in `services/mod.rs` for compatibility).
 pub(crate) mod cluster_hooks;
+pub(crate) mod command_bot_launch;
 pub(crate) mod discord_delivery;
 pub(crate) mod http_outbound;
 pub(crate) mod notify_recovery;
