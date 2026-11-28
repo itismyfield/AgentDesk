@@ -3,10 +3,11 @@
 
 use std::collections::VecDeque;
 
-use super::fork_lineage::{Class, RowIds};
 use super::{
     BindingEvents, BindingRecord, BindingTarget, Boundary, CaptureBatch, CleanupWitness, Derived,
-    Fingerprint, Instant, SourceCapture, Sources, SystemTime, UnitDeriver, claude_boundary,
+    Fingerprint, Instant, RetiredWatch, SourceCapture, Sources, SystemTime, UnitDeriver,
+    claude_boundary,
+    fork_lineage::{Class, RowIds},
 };
 use crate::services::tui_o::shadow::{CapturedRecord, SourceId};
 use crate::services::tui_o::store::rotation::SourceLink;
