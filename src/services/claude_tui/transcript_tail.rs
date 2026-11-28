@@ -8,7 +8,7 @@ use crate::services::session_backend::{
 };
 use chrono::{DateTime, Utc};
 
-pub(crate) use crate::services::tui_o::shadow::identity::visible_assistant_block_text;
+pub use crate::services::tui_o::shadow::identity::visible_assistant_block_text;
 
 // #3034: test-only replay surface — `replay_transcript_file` and its outcome
 // type are exercised by the transcript-parser regression suite but not wired to
@@ -272,7 +272,7 @@ pub(crate) fn claude_transcript_entrypoint(path: &Path) -> ClaudeTranscriptEntry
 }
 
 /// True only when the transcript's recorded entrypoint is an SDK one.
-pub(crate) fn claude_transcript_is_headless_sdk(path: &Path) -> bool {
+pub fn claude_transcript_is_headless_sdk(path: &Path) -> bool {
     claude_transcript_entrypoint(path) == ClaudeTranscriptEntrypoint::HeadlessSdk
 }
 
@@ -322,7 +322,7 @@ pub fn replay_transcript_file(
     })
 }
 
-pub(crate) fn claude_transcript_timestamp_at_or_after(
+pub fn claude_transcript_timestamp_at_or_after(
     transcript_path: &Path,
     turn_started_at: DateTime<Utc>,
 ) -> Result<Option<u64>, String> {
@@ -374,7 +374,7 @@ fn claude_transcript_line_timestamp(value: &serde_json::Value) -> Option<DateTim
 /// discovery uses these semantic activity bounds instead of filesystem mtime
 /// alone so a newer same-cwd transcript cannot steal another session's relay.
 #[allow(clippy::type_complexity)]
-pub(crate) fn claude_transcript_timestamp_bounds(
+pub fn claude_transcript_timestamp_bounds(
     transcript_path: &Path,
 ) -> Result<Option<(DateTime<Utc>, DateTime<Utc>)>, String> {
     let file = std::fs::File::open(transcript_path).map_err(|error| {
@@ -400,13 +400,13 @@ pub(crate) fn claude_transcript_timestamp_bounds(
     Ok(first.zip(last))
 }
 
-pub(crate) fn observe_transcript_turn_state(
+pub fn observe_transcript_turn_state(
     transcript_path: &Path,
 ) -> crate::services::tui_turn_state::TuiTurnState {
     crate::services::tui_turn_state::observe_claude_jsonl_turn_state(transcript_path)
 }
 
-pub(crate) fn encode_project_path(path: &Path) -> String {
+pub fn encode_project_path(path: &Path) -> String {
     // Matches Claude Code's project-dir bucket shape observed under
     // ~/.claude/projects: every non-ASCII-alphanumeric path byte surface is
     // collapsed to '-'.
@@ -421,7 +421,7 @@ pub(crate) fn encode_project_path(path: &Path) -> String {
 /// `tmux_common::classify_watcher_jsonl_owner` recognises a provider-owned
 /// transcript through the same resolver the readers here use, instead of
 /// matching a hardcoded `~/.claude` the override would walk away from.
-pub(crate) fn default_claude_home() -> Option<PathBuf> {
+pub fn default_claude_home() -> Option<PathBuf> {
     if crate::config::test_instance::requested() {
         return crate::config::test_instance::environment::provider_home("claude")
             .ok()

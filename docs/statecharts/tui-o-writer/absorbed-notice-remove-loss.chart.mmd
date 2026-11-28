@@ -1,0 +1,44 @@
+---
+title: "Claude 턴 도중 사람 입력 공지"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: restart
+    lg1: active
+    lg2: Breaks NoticeExactlyOnce
+    lg3: Path to the NoticeExactlyOnce bug
+  }
+  class lg0 yellow
+  class lg1 blue
+  class lg2 breaks
+  class lg3 bugPath
+  s0: 권한 인계 전
+  s1: writer가 공지 권한을 인계받음
+  s2: 관측기가 공지를 writer에 맡김
+  s3: 큐의 입력이 흡수되길 기다림
+  s4: 원본 행을 spool에 보존
+  s5: 원본 spool 재생 대기
+  s6: 재생까지 끝났지만 공지 없음
+  [*] --> s0
+  s0 --> s1: 동결 구간을 원장에 기록
+  s1 --> s2: 관측만 기록하고 직접 게시를 생략
+  s2 --> s3: 아직 실행되지 않은 입력을 큐에 기록
+  s3 --> s4: 원본 파일의 완전한 행을 캡처
+  s4 --> s5: 재시작 후 저장된 원본을 재생
+  s5 --> s6: 원본 행을 확인
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 blue
+  class s0 bugPath
+  class s1 blue
+  class s1 bugPath
+  class s2 blue
+  class s2 bugPath
+  class s3 blue
+  class s3 bugPath
+  class s4 blue
+  class s4 bugPath
+  class s5 yellow
+  class s5 bugPath
+  class s6 blue
+  class s6 breaks
+  class s6 bugPath

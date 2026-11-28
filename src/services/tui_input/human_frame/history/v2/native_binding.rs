@@ -3,7 +3,7 @@ use super::native::Ticket;
 use super::*;
 
 impl Registry {
-    pub(crate) fn bind_native_source(
+    pub fn bind_native_source(
         &self,
         namespace: &str,
         ticket: &Ticket,

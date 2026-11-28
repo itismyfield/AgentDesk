@@ -1,5 +1,5 @@
 use super::*;
-use crate::services::tui_o::writer::pieces::SummaryInputs;
+use crate::services::tui_o::writer::{SeenMessage, pieces::SummaryInputs};
 
 fn projections(verified: &mut Verified) -> UnitDeriver {
     let channel = verified.writer.channel();

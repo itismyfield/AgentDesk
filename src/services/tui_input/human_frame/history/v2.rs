@@ -4,21 +4,23 @@ use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
 #[cfg(unix)]
-pub(crate) mod carried;
+pub mod carried;
 mod collision;
 pub(super) mod keyless;
 mod migration;
-pub(crate) mod native;
+pub mod native;
 #[cfg(unix)]
 mod native_binding;
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub mod native_support;
 #[cfg(all(test, unix))]
 pub(crate) mod native_tests;
 mod read_stamp;
 
-pub(crate) use crate::domain::human_input::native_source::Source;
+pub use crate::domain::human_input::native_source::Source;
 
 impl Source {
-    pub(crate) fn validate(&self, key: &Value) -> Result<(), String> {
+    pub fn validate(&self, key: &Value) -> Result<(), String> {
         let attempt = &key["attempt"];
         let expected = &attempt["source"];
         let meta = std::fs::metadata(&self.transcript).map_err(|e| e.to_string())?;
@@ -238,7 +240,7 @@ enum Ledger<'a> {
 type PendingPublication = Option<(String, String)>;
 
 #[derive(Clone)]
-pub(crate) struct Registry {
+pub struct Registry {
     path: PathBuf,
     cached: Arc<Mutex<read_stamp::Cache>>,
     /// (old, candidate) of a publication whose durability is unconfirmed.
@@ -246,7 +248,7 @@ pub(crate) struct Registry {
     encode_fault: Arc<std::sync::atomic::AtomicBool>,
 }
 impl Registry {
-    pub(crate) fn at(path: PathBuf) -> Self {
+    pub fn at(path: PathBuf) -> Self {
         Self {
             path,
             cached: Arc::default(),
@@ -254,7 +256,7 @@ impl Registry {
             encode_fault: Arc::default(),
         }
     }
-    pub(crate) fn runtime() -> Result<Self, String> {
+    pub fn runtime() -> Result<Self, String> {
         Ok(Self::shared(path()?))
     }
     /// The process's one handle for `path`: callers share its parse cache, unconfirmed publication
@@ -356,7 +358,7 @@ impl Registry {
             }
         }
     }
-    pub(crate) fn prepare(&self, namespace: &str, input: &Value) -> Result<(), String> {
+    pub fn prepare(&self, namespace: &str, input: &Value) -> Result<(), String> {
         let key = json!({"identity":input["identity"],"attempt":input["attempt"]});
         let frame = input["payload"]["frame"]
             .as_str()
@@ -429,7 +431,7 @@ impl Registry {
         }
         Ok(())
     }
-    pub(crate) fn bind(&self, namespace: &str, key: &Value, source: &Source) -> Result<(), String> {
+    pub fn bind(&self, namespace: &str, key: &Value, source: &Source) -> Result<(), String> {
         source.validate(key)?;
         self.transaction(|state| {
             if let Some((registered, _)) = state.locate(namespace, key)
@@ -474,7 +476,7 @@ impl Registry {
             Ok(())
         })
     }
-    pub(crate) fn project(&self, snapshot: &Value) -> Result<(), String> {
+    pub fn project(&self, snapshot: &Value) -> Result<(), String> {
         let namespace = snapshot["namespace"]
             .as_str()
             .ok_or("missing queue namespace")?;
@@ -588,7 +590,7 @@ impl Registry {
         cache.refresh(&self.path, std::time::SystemTime::now(), read_stamp::fstat)?;
         apply(&mut cache)
     }
-    pub(crate) fn source(&self, namespace: &str, key: &Value) -> Result<Source, String> {
+    pub fn source(&self, namespace: &str, key: &Value) -> Result<Source, String> {
         self.inspect(|state| {
             state
                 .locate(namespace, key)
@@ -596,13 +598,7 @@ impl Registry {
                 .ok_or_else(|| "source not bound".into())
         })
     }
-    pub(crate) fn registered(
-        &self,
-        namespace: &str,
-        key: &Value,
-        path: &Path,
-        frame: &str,
-    ) -> bool {
+    pub fn registered(&self, namespace: &str, key: &Value, path: &Path, frame: &str) -> bool {
         self.inspect(|state| {
             Ok(state.locate(namespace, key).is_some_and(|(r, e)| {
                 r.frame.hash == hash(frame)
@@ -614,7 +610,7 @@ impl Registry {
         })
         .unwrap_or(false)
     }
-    pub(crate) fn receipt(
+    pub fn receipt(
         &self,
         namespace: &str,
         key: &Value,
@@ -680,7 +676,7 @@ impl Registry {
         .ok()
         .flatten()
     }
-    pub(crate) fn json(&self) -> Result<Value, String> {
+    pub fn json(&self) -> Result<Value, String> {
         self.inspect(|state| serde_json::to_value(state).map_err(|e| e.to_string()))
     }
 }
@@ -703,7 +699,7 @@ impl Drop for Scope {
 fn context() -> Option<Context> {
     CONTEXT.with(|slot| slot.borrow().clone())
 }
-pub(crate) fn with_attempt<T>(
+pub fn with_attempt<T>(
     registry: &Registry,
     namespace: &str,
     key: &Value,
@@ -949,7 +945,7 @@ mod compaction_tests;
 #[path = "v2_tests.rs"]
 mod tests;
 
-pub(crate) fn scoped_source() -> Option<Result<Source, String>> {
+pub fn scoped_source() -> Option<Result<Source, String>> {
     let c = context()?;
     Some(c.registry.source(&c.namespace, &c.key).and_then(|source| {
         source.validate(&c.key)?;

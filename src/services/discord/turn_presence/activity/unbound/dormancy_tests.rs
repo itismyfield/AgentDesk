@@ -76,7 +76,7 @@ async fn activation_candidates_counter_crosses_the_blocking_worker() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn u_active_entrypoints_collect_real_unbound_evidence_pg() {
-    use crate::services::platform::tmux::session_inventory::tests::ChannelProbeTrace;
+    use crate::services::platform::tmux::session_inventory::test_support::ChannelProbeTrace;
     const CHANNEL: u64 = 69_180_099;
     let rig = super::live::review_tests::Rig::new(CHANNEL, false, false).await;
     let shared = rig.shared.clone();

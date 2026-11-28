@@ -2,9 +2,7 @@
 use crate::services::agent_protocol::SubagentSummary;
 use serde_json::Value;
 
-pub(crate) fn summary_from_tool_use_result(
-    value: &Value,
-) -> Option<(SubagentSummary, Option<String>)> {
+pub fn summary_from_tool_use_result(value: &Value) -> Option<(SubagentSummary, Option<String>)> {
     let result = value.get("toolUseResult")?;
     // `toolUseResult` may be a string (non-subagent tools) — only objects carry
     // the subagent accounting.
@@ -42,7 +40,7 @@ pub(crate) fn summary_from_tool_use_result(
     Some((summary, agent_id))
 }
 
-pub(crate) fn agent_id_from_tool_use_result(value: &Value) -> Option<String> {
+pub fn agent_id_from_tool_use_result(value: &Value) -> Option<String> {
     value
         .get("toolUseResult")?
         .as_object()?
@@ -53,7 +51,7 @@ pub(crate) fn agent_id_from_tool_use_result(value: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-pub(crate) fn tool_use_result_is_async_launch(value: &Value) -> bool {
+pub fn tool_use_result_is_async_launch(value: &Value) -> bool {
     value
         .get("toolUseResult")
         .and_then(Value::as_object)

@@ -1,7 +1,7 @@
 //! One hard capability contract shared by dispatch and human intake.
 use serde_json::Value;
 
-pub(crate) use crate::domain::cluster_policy::ExecutionRequirements;
+pub use crate::domain::cluster_policy::ExecutionRequirements;
 
 impl ExecutionRequirements {
     pub(crate) fn explain(&self, node: &Value, now: i64) -> Vec<String> {
@@ -66,18 +66,14 @@ impl ExecutionRequirements {
     }
 }
 
-pub(crate) async fn get(pool: &sqlx::PgPool, agent: &str) -> Result<Option<Value>, sqlx::Error> {
+pub async fn get(pool: &sqlx::PgPool, agent: &str) -> Result<Option<Value>, sqlx::Error> {
     sqlx::query_scalar("SELECT execution_requirements FROM agents WHERE id=$1")
         .bind(agent)
         .fetch_optional(pool)
         .await
 }
 
-pub(crate) async fn set(
-    pool: &sqlx::PgPool,
-    agent: &str,
-    value: &Value,
-) -> Result<bool, sqlx::Error> {
+pub async fn set(pool: &sqlx::PgPool, agent: &str, value: &Value) -> Result<bool, sqlx::Error> {
     Ok(
         sqlx::query("UPDATE agents SET execution_requirements=$2, updated_at=NOW() WHERE id=$1")
             .bind(agent)

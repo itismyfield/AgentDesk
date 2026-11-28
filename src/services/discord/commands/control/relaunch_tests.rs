@@ -15,7 +15,7 @@ use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::admin_host_guard::tests::{Recorder, api_child};
 use crate::services::discord::host_defer_gate::tests::{Case, map_channel, postgres};
 use crate::services::discord::host_teardown_gate::test_support::{Stored, channel_key, shared_on};
-use crate::services::provider_teardown::tests::test_support::{FakeTmux, cleared};
+use crate::services::provider_teardown::test_support::{FakeTmux, cleared};
 use crate::services::tmux_common as tc;
 
 const SESSION: &str = "64860000-0000-4000-8000-000000000001";

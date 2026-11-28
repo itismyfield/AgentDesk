@@ -20,7 +20,7 @@ pub(crate) struct FirstTurn {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct FirstProof {
+pub struct FirstProof {
     pub(crate) channel: u64,
     pub(crate) mark: TurnMark,
     pub(crate) nonce: String,
@@ -29,11 +29,11 @@ pub(crate) struct FirstProof {
     pub(crate) source: SourceId,
 }
 
-pub(crate) fn digest(prompt: &str) -> String {
+pub fn digest(prompt: &str) -> String {
     format!("sha256:{:x}", Sha256::digest(prompt.as_bytes()))
 }
 
-pub(crate) fn nonce_id(nonce: &str) -> [u8; 32] {
+pub fn nonce_id(nonce: &str) -> [u8; 32] {
     Sha256::digest(nonce.as_bytes()).into()
 }
 
@@ -93,7 +93,7 @@ impl FirstProof {
 }
 
 /// A clear invalidates once and excludes fresh admission until its final effect has finished.
-pub(crate) struct FirstPause(Candidate);
+pub struct FirstPause(Candidate);
 
 impl Drop for FirstPause {
     fn drop(&mut self) {
@@ -104,7 +104,7 @@ impl Drop for FirstPause {
     }
 }
 
-pub(crate) struct FirstAdmission {
+pub struct FirstAdmission {
     candidate: Candidate,
     nonce: String,
     completed: bool,
@@ -112,7 +112,7 @@ pub(crate) struct FirstAdmission {
 }
 
 impl FirstAdmission {
-    pub(crate) fn completed(&mut self) {
+    pub fn completed(&mut self) {
         self.completed = true;
     }
 }
@@ -150,7 +150,7 @@ impl Candidate {
         FirstPause(self.clone())
     }
 
-    pub(crate) fn admit_first(
+    pub fn admit_first(
         &self,
         channel: u64,
         nonce: &str,
@@ -227,6 +227,11 @@ impl Candidate {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn first_mark_for_test(&self) -> Option<TurnMark> {
+        self.first_mark()
+    }
+
     pub(crate) fn first_mark(&self) -> Option<TurnMark> {
         self.first_turn
             .borrow()
@@ -260,7 +265,7 @@ impl Candidate {
         drop(guard);
     }
 
-    pub(crate) fn attach_first_execution(
+    pub fn attach_first_execution(
         &self,
         context: &BindingContext,
         prompt: &str,
@@ -292,6 +297,11 @@ impl Candidate {
         drop(guard);
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn first_proof_for_test(&self, source: &SourceId) -> Result<Option<FirstProof>, String> {
+        self.first_proof(source)
+    }
+
     /// The caller holds the adoption lock, including when comparing this to an initial proof.
     pub(crate) fn first_proof(&self, source: &SourceId) -> Result<Option<FirstProof>, String> {
         if self.first_pauses.load(Ordering::Relaxed) > 0 {
@@ -318,7 +328,7 @@ impl Candidate {
         }))
     }
 
-    pub(crate) fn invalidate_first(&self, nonce: Option<&str>, tmux: Option<&str>) {
+    pub fn invalidate_first(&self, nonce: Option<&str>, tmux: Option<&str>) {
         let guard = self.lock();
         self.first_turn.send_if_modified(|first| {
             if let Some(first) = first.as_mut().filter(|first| {

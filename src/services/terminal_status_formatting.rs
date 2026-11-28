@@ -11,7 +11,7 @@ pub(crate) struct ContextWindowUsage {
 }
 
 /// Prefix every non-empty status line with Discord's subtext marker.
-pub(crate) fn format_subtext_lines<'a>(lines: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+pub fn format_subtext_lines<'a>(lines: impl IntoIterator<Item = &'a str>) -> Vec<String> {
     lines
         .into_iter()
         .filter_map(|line| {
@@ -29,7 +29,7 @@ pub(crate) fn format_subtext_lines<'a>(lines: impl IntoIterator<Item = &'a str>)
 
 /// Format a multiline status block as Discord subtext while preserving blank
 /// section separators. Already-formatted lines remain unchanged.
-pub(crate) fn format_subtext_block(block: &str) -> String {
+pub fn format_subtext_block(block: &str) -> String {
     block
         .lines()
         .filter(|line| line.trim() != "\u{2063}")
@@ -51,7 +51,7 @@ fn strip_subtext_prefix(mut line: &str) -> &str {
     line
 }
 
-pub(crate) fn format_elapsed_status(total_secs: i64) -> Option<String> {
+pub fn format_elapsed_status(total_secs: i64) -> Option<String> {
     (total_secs > 0).then(|| format!("⏱ {}", format_turn_duration(total_secs)))
 }
 
@@ -70,7 +70,7 @@ pub(crate) fn format_usage_status(
     render_usage_parts(rendered, context)
 }
 
-pub(crate) fn format_quota_status(cache_json: Option<&str>, now_unix: i64) -> Option<String> {
+pub fn format_quota_status(cache_json: Option<&str>, now_unix: i64) -> Option<String> {
     format_usage_status(cache_json, now_unix, None)
 }
 

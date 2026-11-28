@@ -23,7 +23,7 @@ use std::str::FromStr;
 ///   database CHECK. SQLx decoding does not call [`Self::from_str`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq, sqlx::Type)]
 #[sqlx(type_name = "text", rename_all = "snake_case")]
-pub(crate) enum IntakeOutboxStatus {
+pub enum IntakeOutboxStatus {
     Pending,
     Claimed,
     Accepted,
@@ -56,7 +56,7 @@ impl IntakeOutboxStatus {
         Self::FailedPostAccept,
     ];
 
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
             Self::Claimed => "claimed",
@@ -100,7 +100,7 @@ impl fmt::Display for IntakeOutboxStatus {
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("unknown intake outbox status: {0}")]
-pub(crate) struct UnknownIntakeStatus(String);
+pub struct UnknownIntakeStatus(String);
 
 impl FromStr for IntakeOutboxStatus {
     type Err = UnknownIntakeStatus;

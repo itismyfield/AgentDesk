@@ -3,7 +3,7 @@ use super::*;
 use sha2::{Digest, Sha256};
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
-pub(crate) struct MembershipReceipt {
+pub struct MembershipReceipt {
     namespace: String,
     ticket: Ticket,
     row: String,
@@ -13,10 +13,10 @@ pub(crate) struct MembershipReceipt {
     row_digest: String,
 }
 impl MembershipReceipt {
-    pub(crate) fn identity(&self) -> (&str, &Ticket) {
+    pub fn identity(&self) -> (&str, &Ticket) {
         (&self.namespace, &self.ticket)
     }
-    pub(crate) fn record(&self) -> (&str, &str, (u64, u64), &str) {
+    pub fn record(&self) -> (&str, &str, (u64, u64), &str) {
         (&self.kind, &self.row, self.range, &self.frame_hash)
     }
 }
@@ -25,10 +25,10 @@ pub(super) struct Fact {
     row: String,
     kind: String,
     range: (u64, u64),
-    hashes: Vec<String>,
+    pub(super) hashes: Vec<String>,
     digest: String,
 }
-fn exact_body(value: &Value) -> Option<String> {
+pub(super) fn exact_body(value: &Value) -> Option<String> {
     match value {
         Value::String(text) => Some(text.clone()),
         Value::Array(blocks) if !blocks.is_empty() => blocks
@@ -38,6 +38,13 @@ fn exact_body(value: &Value) -> Option<String> {
             .map(|texts| texts.join("\n")),
         _ => None,
     }
+}
+pub(super) fn exact_hashes(body: &str) -> Vec<String> {
+    let mut hashes = vec![format!("{:x}", Sha256::digest(body.as_bytes()))];
+    if let Some(inner) = crate::services::claude_tui::busy_inject::pasted_inner(body) {
+        hashes.push(format!("{:x}", Sha256::digest(inner.as_bytes())));
+    }
+    hashes
 }
 pub(super) fn read(value: &Value, line: &[u8], range: (u64, u64)) -> Option<Fact> {
     if ["isMeta", "isSidechain"].iter().any(|k| value[*k] == true)
@@ -64,10 +71,7 @@ pub(super) fn read(value: &Value, line: &[u8], range: (u64, u64)) -> Option<Fact
     } else {
         value["uuid"].as_str().filter(|r| !r.is_empty())?.to_owned()
     };
-    let mut hashes = vec![format!("{:x}", Sha256::digest(body.as_bytes()))];
-    if let Some(inner) = crate::services::claude_tui::busy_inject::pasted_inner(&body) {
-        hashes.push(format!("{:x}", Sha256::digest(inner.as_bytes())));
-    }
+    let hashes = exact_hashes(&body);
     let mut digest = Sha256::new();
     digest.update(line);
     digest.update(b"\n");
@@ -77,6 +81,35 @@ pub(super) fn read(value: &Value, line: &[u8], range: (u64, u64)) -> Option<Fact
         range,
         hashes,
         digest: format!("{:x}", digest.finalize()),
+    })
+}
+/// A row with an id needs its recorded receipt; an absorption without one needs the ticket's
+/// single exact enqueue after its offset.
+pub(super) fn exact(facts: &[&Fact], registration: &Registration, row: Option<&str>) -> bool {
+    if let Some(row) = row {
+        return registration.receipts.iter().any(|known| known == row);
+    }
+    let offset = registration
+        .ticket
+        .source
+        .as_ref()
+        .map_or(u64::MAX, |s| s.offset);
+    let enqueue = |f: &&&Fact| f.kind == "enqueue" && f.range.0 >= offset;
+    let hash = |f: &&&Fact| f.hashes.contains(&registration.exact_frame_hash);
+    facts.iter().filter(enqueue).filter(hash).count() == 1
+}
+
+/// More than one row of a kind after the ticket's offset carries its exact hash.
+pub(super) fn repeated(facts: &[&Fact], registration: &Registration) -> bool {
+    let offset = registration
+        .ticket
+        .source
+        .as_ref()
+        .map_or(u64::MAX, |s| s.offset);
+    ["user", "command", "enqueue"].iter().any(|kind| {
+        let same = |f: &&&Fact| f.kind == *kind && f.range.0 >= offset;
+        let hash = |f: &&&Fact| f.hashes.contains(&registration.exact_frame_hash);
+        facts.iter().filter(same).filter(hash).count() > 1
     })
 }
 pub(super) fn candidates(
@@ -176,7 +209,7 @@ pub(super) fn candidates(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::tui_input::human_frame::history::v2::{Registry, native_tests::Fixture};
+    use crate::services::tui_input::human_frame::history::v2::{Registry, native_support::Fixture};
     use serde_json::json;
     fn fixture() -> (crate::config::TestRuntimeRootGuard, Fixture, SourceBinding) {
         let guard = crate::config::TestRuntimeRootGuard::new();

@@ -627,9 +627,12 @@ async fn admission_case(case: Case) {
         }
         return;
     }
-    if let Some((_guard, sibling, external)) = progress {
-        sibling.await.unwrap();
+    if let Some((guard, sibling, external)) = progress {
+        // Close the scheduling channel if the probe never ran.
+        drop(guard);
+        let sibling_result = sibling.await;
         let (probe_thread, advanced_before_release) = external.join().unwrap();
+        sibling_result.unwrap();
         assert!(
             advanced_before_release,
             "another task must progress before the external thread releases the sync probe"

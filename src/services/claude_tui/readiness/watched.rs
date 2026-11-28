@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// One re-evaluation window, and how many a single wait may open.
-pub(crate) const WINDOW: Duration = Duration::from_secs(2);
+pub const WINDOW: Duration = Duration::from_secs(2);
 const WINDOWS: u8 = 3;
 
-pub(crate) struct Watched {
+pub struct Watched {
     session: String,
     path: Option<PathBuf>,
     seen: Option<(Source, Option<Stamp>)>,
@@ -18,7 +18,7 @@ pub(crate) struct Watched {
     /// Whether an older execution's missing source settles; only the Herdr first input opts in.
     settle_lost: bool,
 }
-pub(crate) fn watched(session: &str, path: Option<&Path>) -> Watched {
+pub fn watched(session: &str, path: Option<&Path>) -> Watched {
     let seen = Source::current(session, path).map(|source| {
         let stamp = Stamp::read(&source.path);
         (source, stamp)
@@ -34,7 +34,7 @@ pub(crate) fn watched(session: &str, path: Option<&Path>) -> Watched {
 
 /// How a wait that no later look can clear ends its input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Unproven {
+pub enum Unproven {
     /// The source sat idle and unmoved all along: the input is retained with its resend ask.
     Retained,
     /// Its transcript moved and the windows ended without evidence: the input is refused for good.
@@ -45,7 +45,7 @@ pub(crate) enum Unproven {
 
 /// What a budget that ended without a proof says of its source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Expiry {
+pub enum Expiry {
     /// Idle with no turn, control or fence open: only new activity can make it ready.
     Unproven(Unproven),
     /// The same, but its transcript moved: the same wait runs one more short window.
@@ -57,7 +57,7 @@ pub(crate) enum Expiry {
 
 /// The open cause of a `Waits`, in `expired`'s branch order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum WaitCause {
+pub enum WaitCause {
     /// The wait's first look found no source and nothing settles it: a launch may still
     /// publish one.
     NoSource,

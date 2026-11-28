@@ -1,14 +1,20 @@
 use super::*;
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
+#[cfg(test)]
 use crate::services::tui_o::shadow::capture::SourceCapture;
+#[cfg(test)]
 use crate::services::tui_o::shadow::{CaptureOutcome, CaptureSource};
+#[cfg(test)]
 use crate::services::tui_o::store::codex_provenance::{CODEX_PROVENANCE_FILE, SIDECAR_IO, Sidecar};
+#[cfg(test)]
 use crate::services::tui_o::store::tests::{enabled, initialized};
+#[cfg(test)]
 use crate::services::tui_o::store::{ChannelStore, STORE_DIR_NAME};
+#[cfg(test)]
 use crate::services::tui_o::writer::owed::{Reevaluation, reevaluate};
 use std::path::{Path, PathBuf};
 
-pub(crate) fn native_file(root: &Path) -> SourceId {
+pub fn native_file(root: &Path) -> SourceId {
     let path = root.join("native.jsonl");
     let line = serde_json::json!({"type":"session_meta","payload":{
         "id":"native-session", "cwd":"/project", "source":"cli"}});
@@ -16,7 +22,7 @@ pub(crate) fn native_file(root: &Path) -> SourceId {
     source_id_for("native-session", &path).unwrap()
 }
 
-pub(crate) fn launch(channel: u64, source: &SourceId) -> PreparedLaunch {
+pub fn launch(channel: u64, source: &SourceId) -> PreparedLaunch {
     PreparedLaunch {
         context: BindingContext {
             schema: 1,
@@ -44,7 +50,7 @@ pub(crate) fn launch(channel: u64, source: &SourceId) -> PreparedLaunch {
     }
 }
 
-pub(crate) fn native_floor(launch: PreparedLaunch, cursor: &Cursor) -> NativeFloor {
+pub fn native_floor(launch: PreparedLaunch, cursor: &Cursor) -> NativeFloor {
     let execution = ExecutionProofRef {
         owner_runtime_root: launch.context.owner_runtime_root.clone(),
         tmux_session: launch.context.tmux_session.clone(),
@@ -55,7 +61,7 @@ pub(crate) fn native_floor(launch: PreparedLaunch, cursor: &Cursor) -> NativeFlo
     NativeFloor::capture(launch, execution, cursor, 1).unwrap()
 }
 
-pub(crate) fn terminal(floor: &NativeFloor) -> CodexEpisodeSpan {
+pub fn terminal(floor: &NativeFloor) -> CodexEpisodeSpan {
     use std::io::Write;
     let mut file = std::fs::OpenOptions::new()
         .append(true)
@@ -79,12 +85,14 @@ pub(crate) fn terminal(floor: &NativeFloor) -> CodexEpisodeSpan {
     }
 }
 
+#[cfg(test)]
 struct Fixture {
     root: tempfile::TempDir,
     store: ChannelStore,
     floor: NativeFloor,
 }
 
+#[cfg(test)]
 impl Fixture {
     fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
@@ -117,6 +125,7 @@ impl Fixture {
     }
 }
 
+#[cfg(test)]
 fn old_evidence(floor: &NativeFloor) -> CodexProvenance {
     let mut a = CodexEpisodeSpan {
         execution: floor.execution.clone(),

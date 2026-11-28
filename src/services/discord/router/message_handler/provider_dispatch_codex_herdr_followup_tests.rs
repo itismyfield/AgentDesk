@@ -417,7 +417,7 @@ fn a_restart_restores_no_codex_source_behind_a_later_pending_pg() {
     restart_restores_nothing("later-pending", |fx, path| {
         let text = path.display().to_string();
         let payload = json!({"source": "clear", "session_id": "later", "transcript_path": text});
-        let hook = HookSignal::from_payload("session_start", &payload);
+        let hook = HookSignal::from_payload_for_test("session_start", &payload);
         let proposal = Proposal {
             channel_id: CHANNEL,
             provider: "codex",

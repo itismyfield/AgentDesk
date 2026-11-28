@@ -149,7 +149,7 @@ fn publication_failures_at_each_stage() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("runtime");
     let path = root.join("store").join("1.json");
-    publish_durable(&root, &path, "old").unwrap();
+    publish_durable_for_test(&root, &path, "old").unwrap();
 
     for (step, stage) in [
         (Step::CreateTemp, PrePublishStage::CreateTemp),
@@ -161,7 +161,7 @@ fn publication_failures_at_each_stage() {
             ..Plan::default()
         };
         let watch = Watch::new(temp.path(), plan);
-        let error = publish_durable(&root, &path, "new").unwrap_err();
+        let error = publish_durable_for_test(&root, &path, "new").unwrap_err();
         assert_eq!(error.stage, stage);
         assert_eq!(fs::read_to_string(&path).unwrap(), "old");
         assert_eq!(watch.count(Step::ParentSync), 0, "{stage:?}");
@@ -169,10 +169,10 @@ fn publication_failures_at_each_stage() {
     let watch = Watch::new(temp.path(), Plan::default());
     let blocked = temp.path().join("file-not-dir");
     fs::write(&blocked, "x").unwrap();
-    let error = publish_durable(&root, &blocked.join("1.json"), "new").unwrap_err();
+    let error = publish_durable_for_test(&root, &blocked.join("1.json"), "new").unwrap_err();
     assert_eq!(error.stage, PrePublishStage::CreateDir);
     let fault = rename_fault::Armed::new(&path);
-    let error = publish_durable(&root, &path, "new").unwrap_err();
+    let error = publish_durable_for_test(&root, &path, "new").unwrap_err();
     assert_eq!(error.stage, PrePublishStage::Rename);
     assert_eq!(fault.evidence().1.len(), 1, "the OS refused a real rename");
     drop(fault);
@@ -194,14 +194,15 @@ fn publication_failures_at_each_stage() {
         };
         let _watch = Watch::new(temp.path(), plan);
         let fresh = root.join(format!("{step:?}")).join("1.json");
-        let published = publish_durable(&root, &fresh, "new").unwrap();
+        let published = publish_durable_for_test(&root, &fresh, "new").unwrap();
         assert!(
             matches!(&published.flush_status, FlushStatus::SyncFailed { stage: s, .. } if *s == stage),
             "{published:?}"
         );
         assert_eq!(fs::read_to_string(&fresh).unwrap(), "new");
     }
-    let published = publish_durable(&root, &root.join("ok").join("1.json"), "new").unwrap();
+    let published =
+        publish_durable_for_test(&root, &root.join("ok").join("1.json"), "new").unwrap();
     assert_eq!(published.flush_status, FlushStatus::Flushed);
 
     let plan = Plan {

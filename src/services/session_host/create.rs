@@ -36,9 +36,18 @@ pub(super) enum Request<'a> {
 
 /// A prepared launch its owner already admitted. Only the tmux adapter builds the tmux forms; a
 /// Herdr form borrows the launch's clear-epoch effect permit, so it is held until the create ends.
-pub(crate) struct HostCreate<'a>(pub(super) Request<'a>);
+pub struct HostCreate<'a>(pub(super) Request<'a>);
 
 impl<'a> HostCreate<'a> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn herdr_for_test(
+        host: &'a dyn HerdrLaunchHost,
+        request: &'a HerdrCreateRequest,
+        _held: &'a EffectPermit,
+    ) -> Self {
+        Self::herdr(host, request, _held)
+    }
+
     pub(crate) fn herdr(
         host: &'a dyn HerdrLaunchHost,
         request: &'a HerdrCreateRequest,
@@ -73,7 +82,7 @@ enum Evidence {
     Herdr(HerdrCreateOutcome),
 }
 
-pub(crate) struct CreateOutcome {
+pub struct CreateOutcome {
     pub(crate) creation: HostCreation,
     evidence: Evidence,
 }
@@ -134,6 +143,11 @@ impl CreateOutcome {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn into_herdr_for_test(self) -> HerdrCreateOutcome {
+        self.into_herdr()
+    }
+
     /// Herdr's own reply, including an unconfirmed pane the launch still records.
     pub(crate) fn into_herdr(self) -> HerdrCreateOutcome {
         match self.evidence {
@@ -152,7 +166,7 @@ thread_local! { static IN_PORT: std::cell::Cell<bool> = const { std::cell::Cell:
 
 /// Whether this thread is inside the create port, for a fake host to tell a bypassing caller.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn create_in_effect() -> bool {
+pub fn create_in_effect() -> bool {
     IN_PORT.get()
 }
 
@@ -187,7 +201,9 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::db::dispatched_sessions::hosted_execution::{ExpectedExecution, tests::owner};
+    use crate::db::dispatched_sessions::hosted_execution::{
+        ExpectedExecution, test_support::owner,
+    };
     use crate::services::herdr_launch::{EvidenceProbe, HerdrLaunchEndpoint, clear_epoch};
     use crate::services::session_host::{
         EvidenceGap, InteractiveSessionHost, RestoreResume, ServerWitness, TmuxHost, host_for,

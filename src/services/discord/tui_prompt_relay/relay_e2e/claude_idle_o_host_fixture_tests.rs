@@ -3,7 +3,7 @@ use crate::services::discord::SharedData;
 use crate::services::discord::outbound::o_writer_io::GatewayPort;
 use crate::services::discord::tui_prompt_relay::relay_e2e::{AbortOnDrop, discord_mock};
 use crate::services::provider::ProviderKind;
-use crate::services::provider_teardown::tests::test_support::FakeTmux;
+use crate::services::provider_teardown::test_support::FakeTmux;
 use crate::services::tmux_common as tc;
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::{ShadowProvider, SourceId, binding_reader::source_id_for};

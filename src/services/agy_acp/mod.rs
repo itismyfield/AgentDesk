@@ -7,8 +7,8 @@ mod rpc;
 mod turn;
 mod wire;
 
-#[cfg(all(test, unix))]
-pub(crate) mod lifecycle_tests;
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub mod lifecycle_tests;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -38,15 +38,15 @@ impl AgyAcpConfig {
 }
 
 /// Set once per boot: a config reload never moves running sessions between paths.
-pub(crate) static ENABLED: AtomicBool = AtomicBool::new(false);
+pub static ENABLED: AtomicBool = AtomicBool::new(false);
 
-pub(crate) fn install(config: &crate::config::Config) {
+pub fn install(config: &crate::config::Config) {
     ENABLED.store(config.agy_acp.enabled, Ordering::Relaxed);
 }
 
 /// How a destination's child is started.
 #[derive(Clone, Debug)]
-pub(crate) struct Launch {
+pub struct Launch {
     pub program: PathBuf,
     pub resolution: Option<BinaryResolution>,
     pub args: Vec<String>,
@@ -55,7 +55,7 @@ pub(crate) struct Launch {
     pub unset_env: Vec<String>,
 }
 
-pub(crate) struct AcpTurn<'a> {
+pub struct AcpTurn<'a> {
     pub destination: u64,
     pub request: ProviderTurnRequest,
     /// The turn's provider-session value, returned to turn_bridge byte for byte.
@@ -65,7 +65,7 @@ pub(crate) struct AcpTurn<'a> {
     pub spool: Option<&'a mut AgySpool>,
 }
 
-pub(crate) fn run_turn(turn: AcpTurn<'_>, sender: Sender<StreamMessage>) -> Result<(), String> {
+pub fn run_turn(turn: AcpTurn<'_>, sender: Sender<StreamMessage>) -> Result<(), String> {
     let AcpTurn {
         destination,
         request,

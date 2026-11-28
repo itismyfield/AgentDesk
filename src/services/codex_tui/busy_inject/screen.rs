@@ -72,7 +72,7 @@ pub(crate) fn read(capture: &str) -> Screen {
 }
 
 /// Owned delivery ignores editor contents, but Enter must still mean prompt submission.
-pub(crate) fn delivery_veto(capture: &str) -> Option<super::Veto> {
+pub fn delivery_veto(capture: &str) -> Option<super::Veto> {
     let plain = strip_ansi_escape_sequences(capture);
     let footer = plain.lines().rev().find(|row| !row.trim().is_empty());
     (crate::services::codex_tui::input::submission_modal_in_pane(&plain)
@@ -99,7 +99,7 @@ fn completion_popup(plain: &str) -> bool {
 }
 
 /// A notice needs visible text evidence; an unread screen must not invent a person's draft.
-pub(crate) fn draft_may_be_present(capture: &str) -> bool {
+pub fn draft_may_be_present(capture: &str) -> bool {
     use crate::services::codex_tui::input::submission_draft_in_pane;
 
     let body = submission_draft_in_pane(capture).or_else(|| match read(capture).composer {

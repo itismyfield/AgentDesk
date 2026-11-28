@@ -43,7 +43,7 @@ fn hook(next: &BindingContext, id: &str, path: &Path, event: &str) {
             &payload,
             &headers,
         );
-    assert!(!ingress.refused(), "{event}: {ingress:?}");
+    assert!(!ingress.refused_for_test(), "{event}: {ingress:?}");
 }
 
 fn metadata(next: &BindingContext, id: &str, path: &Path, root: &Path) {
@@ -89,8 +89,7 @@ async fn exercise(case: Case) {
     let _dedupe = DedupeGuard::acquire();
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
     let _scope = ScopeFixture::new();
-    let _tmux =
-        crate::services::provider_teardown::tests::test_support::FakeTmux::install(CANARY_TMUX);
+    let _tmux = crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
     dedupe::reset_state_for_tests();
     dedupe::binding_events::set_test_root(Some(root.path()));
     let (_, old) = proven(root.path());
@@ -223,7 +222,7 @@ async fn exercise(case: Case) {
             let io =
                 crate::services::codex::actual_submit_tests::source_io::Watch::start(&old.path);
             let writer = harness.writer();
-            let selection = writer.suspension_for_test().clone();
+            let selection = writer.suspension_for_test();
             let (stop, stopped) = watch::channel(false);
             let (resumed, ready) = watch::channel(false);
             let actor = tokio::spawn(run_channel(
@@ -374,7 +373,7 @@ async fn restart_after_warm(harness: &Harness, context: &BindingContext, root_se
         .unwrap();
     assert!(warm.seq > root_seq);
     let writer = harness.writer();
-    let selection = writer.suspension_for_test().clone();
+    let selection = writer.suspension_for_test();
     assert!(
         selection.is_empty(),
         "a restarted actor must rebuild its own selection"

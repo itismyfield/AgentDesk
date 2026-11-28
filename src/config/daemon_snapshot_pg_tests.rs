@@ -176,23 +176,12 @@ fn run_scenario(scenario: &str) {
         "AGENTDESK_CONFIG",
         &path,
     );
-    let config = Config {
-        data: crate::config::DataConfig {
-            dir: root.join("data"),
-            ..Default::default()
-        },
-        config_hot_reload: !matches!(scenario, "boot-producer" | "http-producer"),
-        policies: crate::config::PoliciesConfig {
-            dir: root.join("policies"),
-            hot_reload: false,
-            ..Default::default()
-        },
-        cluster: crate::config::ClusterConfig {
-            gateway_lease_idle_expiry_secs: BOOT_EXPIRY,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
+    let mut config = Config::default();
+    config.data.dir = root.join("data");
+    config.config_hot_reload = !matches!(scenario, "boot-producer" | "http-producer");
+    config.policies.dir = root.join("policies");
+    config.policies.hot_reload = false;
+    config.cluster.gateway_lease_idle_expiry_secs = BOOT_EXPIRY;
     if matches!(scenario, "engine-init-failure" | "boot-producer") {
         std::fs::write(
             &config.policies.dir,

@@ -33,7 +33,7 @@ pub(super) fn boxed_composer_body<'r, 'a>(recent: &'r [&'a str]) -> Option<&'r [
 
 /// What the active composer holds. Only `Empty` shows that a write lands on nothing a person typed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ComposerContent {
+pub enum ComposerContent {
     Empty,
     Draft,
     /// Not one compact composer this reader can prove whole, such as any boxed screen.
@@ -42,7 +42,7 @@ pub(crate) enum ComposerContent {
 
 /// The Herdr turn's composer reading: `Empty` only for a bare unindented `›` right above the
 /// status row, the one `›` row on a screen of at most the scan window with no box corner on it.
-pub(crate) fn active_composer_content_in_pane(pane: &str) -> ComposerContent {
+pub fn active_composer_content_in_pane(pane: &str) -> ComposerContent {
     // Codex indents a draft's later rows, so that `›` row starts the composer only if Herdr
     // `pane.read` (capture -80, RecentUnwrapped, strip_ansi) keeps leading spaces and row breaks.
     let lines: Vec<&str> = pane.lines().map(str::trim_end).collect();

@@ -7,6 +7,8 @@ const NAMESPACE: &str = "notice-owner-tests";
 
 #[path = "notice_cache_tests.rs"]
 mod cache_tests;
+#[path = "notice_owner_command_tests.rs"]
+mod command_tests;
 #[path = "notice_resume_tests.rs"]
 mod resume_tests;
 
@@ -788,11 +790,10 @@ async fn notice_owner_history_change_after_preflight_defers_until_next_batch() {
     let decision = actor.owed_for_test().iter().find_map(|item| match item {
         Derived::Piece(piece) if piece.unit_key.kind == UnitKind::InputNotice => {
             piece.notice_origin.as_deref().map(|o| {
-                actor.writer_for_test().notice_owners_for_test().decision(
-                    o,
-                    &piece.unit_key.native_key,
-                    &frame,
-                )
+                actor
+                    .writer_for_test()
+                    .notice_owners_for_test()
+                    .decision_for_test(o, &piece.unit_key.native_key, &frame)
             })
         }
         _ => None,

@@ -66,7 +66,7 @@ const DEFINITION_COLUMNS: &str = "id, content, discord_mention_user_ids, title, 
 
 /// Test seam: the definition column list every row read selects.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) const fn definition_columns_for_test() -> &'static str {
+pub const fn definition_columns_for_test() -> &'static str {
     DEFINITION_COLUMNS
 }
 
@@ -721,7 +721,7 @@ async fn lock_active_parent_tx(
 /// evidence and (for a confirmed no-reply outcome) stages a raw fallback.
 /// This prevents a lease takeover, cancellation, or second poller from
 /// committing a competing terminal outcome around that outbox handoff.
-pub(crate) async fn lock_active_delivery_tx(
+pub async fn lock_active_delivery_tx(
     tx: &mut Transaction<'_, Postgres>,
     message_id: &str,
     delivery_id: &str,
@@ -746,7 +746,7 @@ pub(crate) async fn lock_active_delivery_tx(
 /// Finish a delivery whose parent and child rows were already locked by
 /// [`lock_active_delivery_tx`], then advance or terminalize the parent.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn finish_locked_delivery_and_finalize_parent_tx(
+pub async fn finish_locked_delivery_and_finalize_parent_tx(
     tx: &mut Transaction<'_, Postgres>,
     delivery_id: &str,
     claim_token: &str,

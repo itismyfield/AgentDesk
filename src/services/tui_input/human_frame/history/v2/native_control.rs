@@ -10,15 +10,15 @@ use crate::services::discord::runtime_store::{
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Intent {
-    pub(crate) namespace: String,
-    pub(crate) ticket: Ticket,
-    pub(crate) disposition: Disposition,
-    pub(crate) row: Option<Value>,
+pub struct Intent {
+    pub namespace: String,
+    pub ticket: Ticket,
+    pub disposition: Disposition,
+    pub row: Option<Value>,
 }
 
 impl Intent {
-    pub(crate) fn owns_row(&self, row: &Value) -> bool {
+    pub fn owns_row(&self, row: &Value) -> bool {
         let Some(source) = &self.ticket.source else {
             return false;
         };
@@ -35,7 +35,7 @@ impl Intent {
             && row["hosted_execution_nonce"] == source.target["execution_nonce"]
     }
 
-    pub(crate) fn runtime_matches(&self, row: &Value) -> bool {
+    pub fn runtime_matches(&self, row: &Value) -> bool {
         self.owns_row(row)
             && self.row.as_ref().is_some_and(|saved| {
                 saved["started_at"] == row["started_at"]
@@ -43,7 +43,7 @@ impl Intent {
             })
     }
 
-    pub(crate) fn validates(&self, namespace: &str, ticket: &Ticket, outcome: &Outcome) -> bool {
+    pub fn validates(&self, namespace: &str, ticket: &Ticket, outcome: &Outcome) -> bool {
         self.namespace == namespace
             && self.ticket == *ticket
             && ticket.source.as_ref().is_some_and(|source| {
@@ -66,10 +66,10 @@ impl Intent {
 }
 
 impl Registry {
-    pub(crate) fn same_control_registry(&self, other: &Self) -> bool {
+    pub fn same_control_registry(&self, other: &Self) -> bool {
         self.path == other.path
     }
-    pub(crate) fn try_native_settlement(
+    pub fn try_native_settlement(
         &self,
         namespace: &str,
         ticket: &Ticket,
@@ -92,7 +92,7 @@ impl Registry {
             Ok(current.clone())
         })
     }
-    pub(crate) fn try_ack_native_cleanup(
+    pub fn try_ack_native_cleanup(
         &self,
         namespace: &str,
         ticket: &Ticket,
@@ -126,8 +126,7 @@ impl Registry {
             },
         )
     }
-
-    pub(crate) fn try_native_boot_record(
+    pub fn try_native_boot_record(
         &self,
         namespace: &str,
         ticket: &Ticket,
@@ -155,6 +154,15 @@ impl Registry {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn try_native_not_sent_for_test(
+        &self,
+        namespace: &str,
+        ticket: &Ticket,
+    ) -> Result<(), String> {
+        self.try_native_not_sent(namespace, ticket)
+    }
+
     pub(crate) fn try_native_not_sent(
         &self,
         namespace: &str,
@@ -167,11 +175,7 @@ impl Registry {
     }
 
     /// The same no-key record, waiting for the registry lock; only off the async workers.
-    pub(crate) fn native_not_sent_blocking(
-        &self,
-        namespace: &str,
-        ticket: &Ticket,
-    ) -> Result<(), String> {
+    pub fn native_not_sent_blocking(&self, namespace: &str, ticket: &Ticket) -> Result<(), String> {
         self.transaction_checked(
             |state| check_not_sent(state, namespace, ticket),
             |state| mark_not_sent(state, namespace, ticket),
@@ -180,11 +184,7 @@ impl Registry {
 
     /// The no-key record outlasts a brief registry contention by awaiting between tries, so it
     /// never parks a worker; past the bound the busy refusal stands.
-    pub(crate) async fn native_not_sent(
-        &self,
-        namespace: &str,
-        ticket: &Ticket,
-    ) -> Result<(), String> {
+    pub async fn native_not_sent(&self, namespace: &str, ticket: &Ticket) -> Result<(), String> {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(1500);
         loop {
             match self.try_native_not_sent(namespace, ticket) {
@@ -199,7 +199,7 @@ impl Registry {
         }
     }
 
-    pub(crate) fn try_native_control(
+    pub fn try_native_control(
         &self,
         namespace: &str,
         ticket: &Ticket,

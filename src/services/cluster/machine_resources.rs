@@ -12,7 +12,7 @@ mod gpu;
 mod memory;
 mod network;
 mod sampler;
-pub(crate) mod store;
+pub mod store;
 #[cfg(test)]
 mod tests;
 

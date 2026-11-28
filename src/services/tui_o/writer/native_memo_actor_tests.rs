@@ -96,11 +96,11 @@ async fn memo_hits_keep_every_post_exactly_once() {
     polls(6).await;
     assert_eq!(port.snapshots.load(Ordering::SeqCst), after_first);
     port.registry_revision.fetch_add(1, Ordering::SeqCst);
-    polls(16).await;
+    polls(6).await;
     let after_registry_change = port.snapshots.load(Ordering::SeqCst);
     assert!(after_registry_change > after_first);
     append(&path, &row("m2", "second"));
-    polls(16).await;
+    polls(6).await;
     assert!(port.snapshots.load(Ordering::SeqCst) > after_registry_change);
     halt(stop, task).await;
     let (stop, task) = spawn_on(&harness, &port);

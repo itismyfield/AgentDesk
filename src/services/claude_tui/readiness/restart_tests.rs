@@ -2,6 +2,7 @@
 //! proving its own turn.
 use super::*;
 
+#[cfg(test)]
 fn finished(r: &Rig) {
     r.append(json!({"type":"user","timestamp":Utc::now(),
         "message":{"role":"user","content":"earlier prompt"}}));
@@ -9,10 +10,12 @@ fn finished(r: &Rig) {
     r.append(json!({"type":"system","subtype":"stop_hook_summary"}));
     r.terminal();
 }
+#[cfg(test)]
 fn old_launch() -> Rig {
     initialize();
     Rig::launched(None, *STARTED - chrono::Duration::hours(1))
 }
+#[cfg(test)]
 fn restored(r: &Rig) -> Option<bool> {
     observe_restored(&r.session, Some(&r.path)).map(|proof| proof.restart())
 }
@@ -125,6 +128,7 @@ fn anything_after_the_terminal_or_an_open_fence_keeps_the_floor() {
     }
 }
 
+#[cfg(test)]
 /// A turn's session-state block as Claude writes it after the turn's `turn_duration`.
 const ADK_CC_TAIL: [&str; 9] = [
     "last-prompt",
@@ -137,6 +141,7 @@ const ADK_CC_TAIL: [&str; 9] = [
     "pr-link",
     "frame-link",
 ];
+#[cfg(test)]
 fn metadata(r: &Rig, kinds: &[&str]) {
     for kind in kinds {
         r.append(match *kind {
@@ -175,10 +180,12 @@ fn a_turns_trailing_session_metadata_keeps_its_hard_terminal() {
     );
 }
 
+#[cfg(test)]
 /// What Claude 2.1.330+ writes after a turn's end; a long idle adds the away recap.
 fn data_flow(r: &Rig) {
     r.append(json!({"type":"data-flow-records","records":[{"response_id":"r1"}],"v":1}));
 }
+#[cfg(test)]
 fn recap(r: &Rig) {
     data_flow(r);
     r.append(json!({"type":"system","subtype":"away_summary","content":"recap"}));
@@ -306,6 +313,7 @@ fn the_boot_clock_starts_before_any_new_incarnation() {
     }
 }
 
+#[cfg(test)]
 /// A run resumed over an older history of `filler` answer bytes ending in a hard terminal.
 fn resumed_over_history(filler: usize) -> Rig {
     initialize();
@@ -319,6 +327,7 @@ fn resumed_over_history(filler: usize) -> Rig {
     r.hook("resume");
     r
 }
+#[cfg(test)]
 fn our_turn(r: &Rig, answer: &str) {
     r.append(json!({"type":"user","timestamp":Utc::now(),
         "message":{"role":"user","content":"one original"}}));

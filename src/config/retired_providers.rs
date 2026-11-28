@@ -43,7 +43,7 @@ pub(crate) fn retired_provider_refs(config: &Config) -> Vec<String> {
 }
 
 /// Boot calls this once: a single warning lists every retired reference instead of failing boot.
-pub(crate) fn warn_retired_provider_refs(config: &Config) {
+pub fn warn_retired_provider_refs(config: &Config) {
     let refs = retired_provider_refs(config);
     if !refs.is_empty() {
         tracing::warn!(

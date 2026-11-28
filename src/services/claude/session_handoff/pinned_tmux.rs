@@ -9,7 +9,7 @@ const WAIT: Duration = Duration::from_secs(5);
 const FORMAT: &str = "#{pid} #{session_id} #{window_id} #{pane_id} #{pane_pid} #{pane_dead}";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Pin {
+pub struct Pin {
     pub(crate) nonce: String,
     server: u32,
     session: String,
@@ -233,7 +233,7 @@ impl Pin {
 
 /// Persist and recheck this exact pane before its only destructive command. Reconnects do not
 /// inherit a previous connection's authority, even if the numeric pane id is the same.
-pub(crate) async fn end<F, Fut>(
+pub async fn end<F, Fut>(
     logical: &str,
     channel: u64,
     expected: Option<&Pin>,
@@ -250,7 +250,7 @@ where
 
 /// The pinned end against an injected tmux command, for tests outside this module.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn end_with_for_test<F, Fut>(
+pub async fn end_with_for_test<F, Fut>(
     command: std::process::Command,
     logical: &str,
     channel: u64,
@@ -364,27 +364,48 @@ where
     pin.wait_gone().await
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests {
+    #[cfg(test)]
     use super::*;
     const CAPTURE_46: &str = "      \u{001b}[38;5;114m✔ Update installed · Restart to update\u{001b}[39m\n\u{001b}[38;5;244m──────────────────────────────────────────────\n\u{001b}[38;5;246m❯ \u{001b}[39m\n\u{001b}[38;5;244m──────────────────────────────────────────────\n  \u{001b}[38;5;117m◆ Opus(X)\u{001b}[38;5;246m \u{001b}[2m│\u{001b}[0m\u{001b}[38;5;246m \u{001b}[38;5;222m⚠️\u{001b}[38;5;246m \u{001b}[2m│\u{001b}[0m\u{001b}[38;5;246m 7d: \u{001b}[38;5;151m16%\u{001b}[38;5;246m (6d1h) \u{001b}[2m│\u{001b}[0m\u{001b}[38;5;246m 7d-F: \u{001b}[38;5;151m1…\u{001b}[39m\n  \u{001b}[38;5;211m⏵⏵ bypass permissions on\u{001b}[38;5;246m · \u{001b}[38;5;44m2 shells\u{001b}[38;5;246m · \u{001b}[38;5;174m⧉\u{001b}[39m \u{001b}[38;5;246mse\u{001b}[39m\n";
-    pub(crate) struct Server {
+    pub struct Server {
         pub(crate) dir: tempfile::TempDir,
     }
     impl Server {
+        pub fn from_dir_for_test(dir: tempfile::TempDir) -> Self {
+            Self { dir }
+        }
+
+        #[cfg(any(test, feature = "test-support"))]
+        pub fn command_for_test(&self) -> std::process::Command {
+            self.command()
+        }
+
         pub(crate) fn command(&self) -> std::process::Command {
             let mut command = std::process::Command::new("tmux");
             command.args(["-S", self.dir.path().join("s").to_str().unwrap()]);
             command
         }
+        #[cfg(any(test, feature = "test-support"))]
+        pub fn run_for_test(&self, args: &[&str]) -> String {
+            self.run(args)
+        }
+
         pub(crate) fn run(&self, args: &[&str]) -> String {
             let out = self.command().args(args).output().unwrap();
             assert!(out.status.success(), "private tmux command failed");
             String::from_utf8(out.stdout).unwrap()
         }
+        #[cfg(test)]
         fn start(&self) {
             self.start_named("i8077-close-test");
         }
+        #[cfg(any(test, feature = "test-support"))]
+        pub fn start_named_for_test(&self, name: &str) {
+            self.start_named(name)
+        }
+
         pub(crate) fn start_named(&self, name: &str) {
             let capture = self.dir.path().join("busy-screen");
             std::fs::write(&capture, CAPTURE_46).unwrap();

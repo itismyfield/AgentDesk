@@ -64,7 +64,7 @@ async fn codex_restart_pending_keeps_resume_boundary_before_create_pg() {
     };
     std::fs::write(&cursor_path, serde_json::to_vec(&cursor).unwrap()).unwrap();
     let store = crate::services::tui_o::store::OStore::existing(&runtime).unwrap();
-    let start = ResumeStart::capture(
+    let start = ResumeStart::capture_for_test(
         "explicit-restart".into(),
         CHANNEL.parse().unwrap(),
         &source,

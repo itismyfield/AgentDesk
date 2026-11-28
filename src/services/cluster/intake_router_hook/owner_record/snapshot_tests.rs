@@ -1,14 +1,15 @@
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
+#[cfg(test)]
 use crate::services::cluster::intake_router_hook::owner_record::{self, custody, output, plan};
 
-pub(crate) struct Fixture {
+pub struct Fixture {
     pub db: TestPostgresDb,
     pub pool: sqlx::PgPool,
     pub channel: String,
 }
 impl Fixture {
-    pub(crate) async fn new(channel: &str) -> Self {
+    pub async fn new(channel: &str) -> Self {
         let db = TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
         sqlx::query("INSERT INTO agents(id,name,provider,discord_channel_id,default_execution_node_id) VALUES('custody-agent','fixture','claude',$1,'mac-a')")
@@ -32,7 +33,7 @@ impl Fixture {
             channel: channel.into(),
         }
     }
-    pub(crate) fn context(&self) -> Context {
+    pub fn context(&self) -> Context {
         Context {
             policy_channel: self.channel.clone(),
             pair: ["mac-a".into(), "mac-b".into()],
@@ -41,13 +42,13 @@ impl Fixture {
             lease_seconds: 15,
         }
     }
-    pub(crate) async fn observe(&self, id: &OwnerIdentity, context: &Context) -> Shared {
+    pub async fn observe(&self, id: &OwnerIdentity, context: &Context) -> Shared {
         let mut tx = self.pool.begin().await.unwrap();
         let observed = read_on_tx(&mut tx, id, context).await.unwrap();
         tx.commit().await.unwrap();
         observed
     }
-    pub(crate) async fn home(&self, id: &OwnerIdentity, value: Option<&str>) {
+    pub async fn home(&self, id: &OwnerIdentity, value: Option<&str>) {
         let previous = crate::db::channel_home_preferences::read(&self.pool, id)
             .await
             .unwrap();
@@ -64,7 +65,7 @@ impl Fixture {
         tx.commit().await.unwrap();
     }
     /// A stored bundle for one source message; routing must carry this exact reference.
-    pub(crate) async fn bundle_ref(
+    pub async fn bundle_ref(
         &self,
         channel: &str,
         message: &str,
@@ -92,7 +93,7 @@ impl Fixture {
         .unwrap();
         store::put(&self.pool, &bundle).await.unwrap()
     }
-    pub(crate) async fn finish(self) {
+    pub async fn finish(self) {
         self.pool.close().await;
         self.db.drop().await;
     }

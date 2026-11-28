@@ -3,13 +3,13 @@
 use std::cell::RefCell;
 
 thread_local! {
-    pub(crate) static RUNS: RefCell<Option<Vec<u64>>> = const { RefCell::new(None) };
-    pub(crate) static FAIL: RefCell<bool> = const { RefCell::new(false) };
+    pub static RUNS: RefCell<Option<Vec<u64>>> = const { RefCell::new(None) };
+    pub static FAIL: RefCell<bool> = const { RefCell::new(false) };
     static CHECKPOINT: RefCell<Option<CheckpointHook>> = const { RefCell::new(None) };
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Checkpoint {
+pub enum Checkpoint {
     /// The claim picked its row and has not confirmed it yet.
     ClaimSelected,
     AfterClaim,
@@ -19,8 +19,8 @@ pub(crate) enum Checkpoint {
     FinalDbDone,
 }
 type CheckpointHook = Box<dyn FnMut(Checkpoint) -> futures::future::BoxFuture<'static, ()>>;
-pub(crate) struct Hook;
-pub(crate) fn hook(callback: CheckpointHook) -> Hook {
+pub struct Hook;
+pub fn hook(callback: CheckpointHook) -> Hook {
     CHECKPOINT.with(|slot| {
         assert!(slot.borrow().is_none());
         *slot.borrow_mut() = Some(callback);
@@ -42,20 +42,20 @@ pub(super) async fn checkpoint(point: Checkpoint) {
 pub(crate) async fn claim_selected() {
     checkpoint(Checkpoint::ClaimSelected).await;
 }
-pub(crate) fn fail_execution() {
+pub fn fail_execution() {
     FAIL.with(|fail| *fail.borrow_mut() = true);
 }
 
 /// While alive, each executed turn records its channel instead of starting a TUI turn.
-pub(crate) struct Recorder;
+pub struct Recorder;
 
-pub(crate) fn record() -> Recorder {
+pub fn record() -> Recorder {
     RUNS.with(|runs| *runs.borrow_mut() = Some(Vec::new()));
     Recorder
 }
 
 impl Recorder {
-    pub(crate) fn channels(&self) -> Vec<u64> {
+    pub fn channels(&self) -> Vec<u64> {
         RUNS.with(|runs| runs.borrow().clone().unwrap_or_default())
     }
 }

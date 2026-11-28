@@ -6,7 +6,7 @@ pub(crate) fn inject(pane: &Pane, request: &Request<'_>, timing: &Timing) -> Out
     inject_report(pane, request, None, timing).outcome
 }
 
-pub(crate) fn inject_report(
+pub fn inject_report(
     pane: &Pane,
     request: &Request<'_>,
     channel: Option<u64>,
@@ -16,7 +16,7 @@ pub(crate) fn inject_report(
 }
 
 // The caller limits this policy to Claude tmux channels with confirmed transcript output.
-pub(crate) fn inject_report_any_turn(
+pub fn inject_report_any_turn(
     pane: &Pane,
     request: &Request<'_>,
     channel: Option<u64>,
@@ -33,12 +33,7 @@ pub(crate) fn inject_report_any_turn(
 /// The input owner's entry for a running pane: pasted whatever turn the transcript reads and a
 /// person's draft parked; the answer is declared only for a caller that reads it itself.
 #[cfg(unix)]
-pub(crate) fn inject_owned(
-    pane: &Pane,
-    request: &Request<'_>,
-    timing: &Timing,
-    declared: bool,
-) -> Report {
+pub fn inject_owned(pane: &Pane, request: &Request<'_>, timing: &Timing, declared: bool) -> Report {
     let policy = Policy {
         gate: TurnGate::AnyTurn,
         answer: match declared {
@@ -64,7 +59,7 @@ fn report(
     timing: &Timing,
     policy: Policy,
 ) -> Report {
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     if !stash_tests::USE_PRODUCTION_CHANNELS.get() {
         return inject_gated_with(
             pane,

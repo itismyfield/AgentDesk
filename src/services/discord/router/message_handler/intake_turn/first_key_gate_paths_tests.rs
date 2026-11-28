@@ -105,7 +105,7 @@ fn an_exact_retrys_token_gates_its_writers_first_key_pg() {
             ] {
                 observation.record(seen);
             }
-            let evidence = observation.no_effect_evidence().unwrap();
+            let evidence = observation.no_effect_evidence_for_test().unwrap();
             let ack = write::classify_no_effect(&host.pool, attempt, &evidence).await;
             let retry = ExactRetry {
                 user_message_id: MessageId::new(message),
@@ -113,7 +113,7 @@ fn an_exact_retrys_token_gates_its_writers_first_key_pg() {
                 request_owner: UserId::new(7),
                 text: "exact gate".into(),
                 reply_context: None,
-                permit: RetryPermit::from_no_effect(ack.unwrap()),
+                permit: RetryPermit::from_no_effect_for_test(ack.unwrap()),
             };
             let gateway = crate::services::discord::gateway::DiscordGateway::new(
                 host.api.http.clone(),

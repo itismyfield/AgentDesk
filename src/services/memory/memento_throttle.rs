@@ -181,7 +181,7 @@ pub(crate) fn note_memento_dedup_hit(tool_name: &'static str) {
     record_metric(tool_name, MementoMetricAction::DedupHit);
 }
 
-pub(crate) fn note_memento_tool_feedback_trigger(trigger_type: &str) {
+pub fn note_memento_tool_feedback_trigger(trigger_type: &str) {
     let trigger_type = normalize_feedback_trigger_type(trigger_type);
     with_state(|state| {
         state
@@ -194,7 +194,7 @@ pub(crate) fn note_memento_tool_feedback_trigger(trigger_type: &str) {
     });
 }
 
-pub(crate) fn memento_call_metrics_snapshot(window_hours: usize) -> Value {
+pub fn memento_call_metrics_snapshot(window_hours: usize) -> Value {
     let window_hours = window_hours.clamp(1, 24 * 7);
     let now = Utc::now();
     let current_bucket_ts = now.timestamp() - now.timestamp().rem_euclid(3600);

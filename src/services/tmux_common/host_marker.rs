@@ -4,12 +4,12 @@
 
 use super::session_temp_path;
 use crate::domain::host_observation::HostKind;
-pub(crate) use crate::domain::host_observation::HostKindMarker;
+pub use crate::domain::host_observation::HostKindMarker;
 
 const HOST_KIND_TEMP_EXT: &str = "host_kind";
 
 /// Reads only the canonical path: the pre-migration `/tmp` location never held this marker.
-pub(crate) fn read_host_kind_marker(session_name: &str) -> HostKindMarker {
+pub fn read_host_kind_marker(session_name: &str) -> HostKindMarker {
     let path = session_temp_path(session_name, HOST_KIND_TEMP_EXT);
     match std::fs::read_to_string(&path) {
         Ok(raw) => match HostKind::from_persisted(raw.trim()) {
@@ -23,7 +23,7 @@ pub(crate) fn read_host_kind_marker(session_name: &str) -> HostKindMarker {
 
 /// Marks a tmux-hosted session before its launch. A failed write only warns: the
 /// launch proceeds as before and the marker reads as absent or unrecognized.
-pub(crate) fn record_tmux_host_marker(session_name: &str) {
+pub fn record_tmux_host_marker(session_name: &str) {
     let path = session_temp_path(session_name, HOST_KIND_TEMP_EXT);
     if let Err(error) = std::fs::write(&path, HostKind::Tmux.as_str()) {
         tracing::warn!(session_name, %path, %error, "host kind marker write failed");
@@ -31,7 +31,7 @@ pub(crate) fn record_tmux_host_marker(session_name: &str) {
 }
 
 /// Whether the marker alone admits a tmux observation; rows can still refuse it.
-pub(crate) fn marker_is_tmux(marker: &HostKindMarker) -> bool {
+pub fn marker_is_tmux(marker: &HostKindMarker) -> bool {
     matches!(
         marker,
         HostKindMarker::Absent | HostKindMarker::Known(HostKind::Tmux)
@@ -39,7 +39,7 @@ pub(crate) fn marker_is_tmux(marker: &HostKindMarker) -> bool {
 }
 
 /// The `.host_kind` marker check alone, for a path holding only a tmux name.
-pub(crate) fn marker_refusal(tmux_name: &str) -> Option<String> {
+pub fn marker_refusal(tmux_name: &str) -> Option<String> {
     let marker = read_host_kind_marker(tmux_name);
     let tmux = marker_is_tmux(&marker);
     if !tmux {

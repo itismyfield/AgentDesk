@@ -76,7 +76,7 @@ pub(super) fn ensure_managed_skills_manifest(root: &Path) -> Result<(), String> 
         .map_err(|e| format!("Failed to write '{}': {e}", manifest_path.display()))
 }
 
-pub(super) fn sync_managed_skills(root: &Path) -> Result<SkillSyncReport, String> {
+pub fn sync_managed_skills(root: &Path) -> Result<SkillSyncReport, String> {
     ensure_managed_skills_manifest(root)?;
     let skills_root = managed_skills_root(root);
     if !skills_root.is_dir() {
@@ -840,7 +840,7 @@ fn skill_link_paths(
     }
 }
 
-pub(super) fn copy_skill_dir_resolving_symlinks(src: &Path, dest: &Path) -> Result<(), String> {
+pub fn copy_skill_dir_resolving_symlinks(src: &Path, dest: &Path) -> Result<(), String> {
     copy_skill_path_resolving_symlinks(src, dest)
 }
 

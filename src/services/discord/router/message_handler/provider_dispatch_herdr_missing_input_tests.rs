@@ -3,7 +3,11 @@ use super::*;
 use crate::services::discord::router::message_handler::provider_dispatch as dispatch;
 use crate::services::discord::shared_state::test_rest;
 
-fn recording_runtime(intake: &mut Intake, fx: &Fixture, launch: bool) -> tokio::runtime::Runtime {
+pub(super) fn recording_runtime(
+    intake: &mut Intake,
+    fx: &Fixture,
+    launch: bool,
+) -> tokio::runtime::Runtime {
     let install: Box<dyn Fn() + Send + Sync> = if launch {
         Box::new(fx.rig.thread_installer_with_launch(NODE, KEY, SESSION))
     } else {
@@ -35,6 +39,34 @@ fn recording_runtime(intake: &mut Intake, fx: &Fixture, launch: bool) -> tokio::
         .build()
         .unwrap();
     std::mem::replace(&mut intake.runtime, runtime)
+}
+
+pub(super) fn seed_resume_cursor(root: &Path, previous: &Started) {
+    use crate::services::tui_o::store::spool::{Cursor, source_key};
+    use sha2::{Digest, Sha256};
+    let source = source_id_for(&previous.session, &previous.path).unwrap();
+    let bytes = std::fs::read(&previous.path).unwrap();
+    let cursor = Cursor {
+        source: source.clone(),
+        captured_through: bytes.len() as u64,
+        prefix_hash: hex::encode(Sha256::digest(&bytes)),
+        retired: false,
+        transition_cleanup: None,
+    };
+    let directory = root
+        .join("o_store")
+        .join(CHANNEL.to_string())
+        .join("cursor");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join(format!("{}.json", source_key(&source))),
+        serde_json::to_vec(&cursor).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        crate::services::claude::session_handoff::o_reads(CHANNEL, &source),
+        Ok(true)
+    );
 }
 
 fn idle_case(missing: bool, restored_after_reconnect: bool, endpoint_differs: bool) {

@@ -37,6 +37,9 @@ where
     if let Some(readers) = readers {
         sources = sources.with_readers(readers);
     }
+    if let Some(anchors) = sources.reply_anchors() {
+        writer.attach_reply_anchors(anchors);
+    }
     let owed = VecDeque::new();
     let ready = admission::owed_delivery_ready(writer.channel());
     let verified = ready.then(|| writer::owed::OwedLog::new(writer.channel(), provider));
@@ -133,7 +136,8 @@ where
             }
             #[cfg(unix)]
             if let Some(port) = &_native {
-                port.inner.retry().await;
+                // Native registry revisions and reply anchors can change without a transcript write.
+                actor.sources.offer_native(port).await;
             }
             actor.publish_unsettled(&unsettled);
             continue;
@@ -255,7 +259,7 @@ where
         actor.observe_waiting(sources_resumed);
         let position = actor.progress();
         progress.publish(position);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         fresh_resume::note_work(actor.owed.len(), actor.deriver.has_unsealed());
         // A writer that stopped in this poll ends now, so its readiness drops before the next poll.
         if actor.writer.is_stopped() {

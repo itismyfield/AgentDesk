@@ -29,7 +29,7 @@ const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
 
 /// Intake waypoints in path order; `Route` lands on the first free of `route1`/`route2`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Stage {
+pub enum Stage {
     Recv,
     Route,
     Owner,
@@ -67,7 +67,7 @@ impl Stage {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Outcome {
+pub enum Outcome {
     /// The owner settled a write whose first input was applied.
     Applied,
     /// The owner settled a paste into a busy session.
@@ -369,7 +369,7 @@ fn current() -> Option<Arc<Trace>> {
 
 /// Opens the trace of a message that passed the gateway guards, timed from `event_started`, and
 /// returns the span its intake runs under. A repeated message keeps its first trace.
-pub(crate) fn begin(message: u64, event_started: Instant) -> Span {
+pub fn begin(message: u64, event_started: Instant) -> Span {
     let Some(open) = installed() else {
         return Span::none();
     };
@@ -424,30 +424,30 @@ pub(crate) fn begin(message: u64, event_started: Instant) -> Span {
 }
 
 /// The span of `message`'s open trace for work another task runs on its behalf.
-pub(crate) fn span_for(message: u64) -> Span {
+pub fn span_for(message: u64) -> Span {
     let trace = installed().and_then(|open| open.lock().get(&message).cloned());
     trace.map_or_else(Span::none, |trace| span_with(trace, false))
 }
 
 /// A root span on the current trace, to enter on the other side of a thread hop.
-pub(crate) fn carry() -> Span {
+pub fn carry() -> Span {
     current().map_or_else(Span::none, |trace| span_with(trace, true))
 }
 
-pub(crate) fn mark(stage: Stage) {
+pub fn mark(stage: Stage) {
     if let Some(trace) = current() {
         trace.mark(stage);
     }
 }
 
-pub(crate) fn mark_message(message: u64, stage: Stage) {
+pub fn mark_message(message: u64, stage: Stage) {
     if let Some(trace) = installed().and_then(|open| open.lock().get(&message).cloned()) {
         trace.mark(stage);
     }
 }
 
 /// Marks the current trace's input as a paste into a busy session.
-pub(crate) fn note_busy() {
+pub fn note_busy() {
     if let Some(trace) = current() {
         trace.busy.store(true, Ordering::Release);
     }
@@ -471,7 +471,7 @@ fn close(trace: &Trace, open: Option<Arc<Open>>, outcome: Outcome, acquire_error
 
 /// Ends the current trace once the owner settled its write; `refused` names a settled write that
 /// did not submit.
-pub(crate) fn settle(refused: Option<Outcome>) {
+pub fn settle(refused: Option<Outcome>) {
     if let Some(trace) = current() {
         trace.mark(Stage::Settled);
         let outcome = match (refused, trace.busy.load(Ordering::Acquire)) {
@@ -485,7 +485,7 @@ pub(crate) fn settle(refused: Option<Outcome>) {
 }
 
 /// Ends the current trace when the owner kept the original unsent for `reason`.
-pub(crate) fn not_sent(reason: &str) {
+pub fn not_sent(reason: &str) {
     if let Some(trace) = current() {
         let outcome = match Outcome::from_error(reason).0 {
             Outcome::Cancelled => Outcome::Cancelled,
@@ -496,7 +496,7 @@ pub(crate) fn not_sent(reason: &str) {
 }
 
 /// Ends `message`'s trace with the result its owner front handoff returned, unless a settle did.
-pub(crate) fn finish_message(message: u64, result: &Result<(), String>) {
+pub fn finish_message(message: u64, result: &Result<(), String>) {
     let Some(open) = installed() else { return };
     let Some(trace) = open.take(message) else {
         return;
@@ -511,12 +511,12 @@ pub(crate) fn finish_message(message: u64, result: &Result<(), String>) {
 }
 
 /// The loopback header naming the current trace, when there is one.
-pub(crate) fn loopback_header() -> Option<(&'static str, String)> {
+pub fn loopback_header() -> Option<(&'static str, String)> {
     current().map(|trace| (LOOPBACK_HEADER, trace.sample.to_string()))
 }
 
 /// Runs a loopback API request under the trace its header names, so the handler's DB work counts.
-pub(crate) async fn api_trace_middleware(
+pub async fn api_trace_middleware(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {

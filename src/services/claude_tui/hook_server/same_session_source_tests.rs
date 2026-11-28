@@ -7,6 +7,7 @@ use crate::services::tui_prompt_dedupe::{
     claude_session_rotation_for_tmux, register_launched_tmux_runtime_binding,
 };
 
+#[cfg(test)]
 fn execution(ingress: &Ingress, channel: u64, session: &str) -> (String, HookBindingEnvelope) {
     let tmux = format!("source-{}", uuid());
     let prepared = PreparedIncarnation::prepare_at(
@@ -34,6 +35,7 @@ fn execution(ingress: &Ingress, channel: u64, session: &str) -> (String, HookBin
     )
 }
 
+#[cfg(test)]
 fn launch(ingress: &Ingress, tmux: &str, channel: u64, session: &str) -> TuiRuntimeBinding {
     let path = ingress.transcript(session);
     let mut binding = claude(&path, session);
@@ -45,6 +47,7 @@ fn launch(ingress: &Ingress, tmux: &str, channel: u64, session: &str) -> TuiRunt
     binding
 }
 
+#[cfg(test)]
 fn observe(session: &str, event: &str, payload: &Value, envelope: &HookBindingEnvelope) {
     let mut headers = HeaderMap::new();
     headers.insert(BINDING_HEADER, envelope.encode().unwrap().parse().unwrap());
@@ -61,6 +64,7 @@ fn observe(session: &str, event: &str, payload: &Value, envelope: &HookBindingEn
     );
 }
 
+#[cfg(test)]
 fn assert_pin(channel: u64, tmux: &str, envelope: &HookBindingEnvelope) {
     let CapturedContext::Captured(context) = &envelope.context else {
         panic!("the launch has a captured execution");
