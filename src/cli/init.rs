@@ -1,15 +1,15 @@
 use crate::services::provider::ProviderRuntimeExt;
 use std::collections::HashMap;
 use std::ffi::OsStr;
+#[cfg(target_os = "macos")]
 use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::io::{self, BufRead, Write as IoWrite};
 use std::path::{Path, PathBuf};
 
-use super::{
-    args::{EmitLaunchdPlistArgs, LaunchdPlistFlavorArg},
-    dcserver,
-};
+use super::args::EmitLaunchdPlistArgs;
+#[cfg(target_os = "macos")]
+use super::{args::LaunchdPlistFlavorArg, dcserver};
 use crate::services::provider::ProviderKind;
 
 // ── Discord REST helpers ───────────────────────────────────────────

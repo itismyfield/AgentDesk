@@ -21,12 +21,12 @@ fn replacement_probe_detects_the_whole_successful_gap_but_not_failure_or_cancel(
     crate::services::discord::terminal_delivery_custody::install_dl_ports_for_tests();
     let token = token();
     let probe = Probe::new(CHANNEL, TMUX);
-    let guard = Replacement::begin(Some(CHANNEL), TMUX, Some(&token))
+    let guard = Replacement::begin_for_test(Some(CHANNEL), TMUX, Some(&token))
         .unwrap()
         .unwrap();
     assert!(probe.defer_death());
     assert!(!Probe::new(CHANNEL + 1, TMUX).defer_death());
-    guard.complete();
+    guard.complete_for_test();
     assert!(
         probe.defer_death(),
         "a negative probe spanning the whole gap must be retried"
@@ -36,7 +36,7 @@ fn replacement_probe_detects_the_whole_successful_gap_but_not_failure_or_cancel(
         !next.defer_death(),
         "a death after spawn completion remains a death"
     );
-    let failed = Replacement::begin(Some(CHANNEL), TMUX, Some(&token))
+    let failed = Replacement::begin_for_test(Some(CHANNEL), TMUX, Some(&token))
         .unwrap()
         .unwrap();
     drop(failed);
@@ -44,7 +44,7 @@ fn replacement_probe_detects_the_whole_successful_gap_but_not_failure_or_cancel(
         !next.defer_death(),
         "create failure restores ordinary cleanup"
     );
-    let cancelled = Replacement::begin(Some(CHANNEL), TMUX, Some(&token))
+    let cancelled = Replacement::begin_for_test(Some(CHANNEL), TMUX, Some(&token))
         .unwrap()
         .unwrap();
     token.publish_cancel("replacement test cancellation");
@@ -60,15 +60,15 @@ fn replacement_begin_and_terminal_cleanup_have_one_winner() {
     let token = token();
     let probe = Probe::new(CHANNEL, TMUX);
     let cleanup = probe.cleanup().unwrap();
-    assert!(Replacement::begin(Some(CHANNEL), TMUX, Some(&token)).is_err());
+    assert!(Replacement::begin_for_test(Some(CHANNEL), TMUX, Some(&token)).is_err());
     let worker = cleanup.clone();
     drop(cleanup);
     assert!(
-        Replacement::begin(Some(CHANNEL), TMUX, Some(&token)).is_err(),
+        Replacement::begin_for_test(Some(CHANNEL), TMUX, Some(&token)).is_err(),
         "blocking cleanup retains admission after parent cancellation"
     );
     drop(worker);
-    let guard = Replacement::begin(Some(CHANNEL), TMUX, Some(&token))
+    let guard = Replacement::begin_for_test(Some(CHANNEL), TMUX, Some(&token))
         .unwrap()
         .unwrap();
     assert!(
@@ -93,7 +93,7 @@ fn replacement_begin_and_terminal_cleanup_have_one_winner() {
     );
     drop(cleanup);
     assert!(
-        Replacement::begin(Some(CHANNEL), TMUX, Some(&token)).is_err(),
+        Replacement::begin_for_test(Some(CHANNEL), TMUX, Some(&token)).is_err(),
         "RowAbsent never becomes untracked launch permission"
     );
 }
@@ -104,23 +104,23 @@ fn replacement_requires_its_exact_turn_and_unwinds_on_panic() {
     crate::services::discord::terminal_delivery_custody::install_dl_ports_for_tests();
     let token = token();
     let stranger = Arc::new(CancelToken::new());
-    assert!(Replacement::begin(Some(CHANNEL), TMUX, Some(&stranger)).is_err());
-    assert!(Replacement::begin(Some(CHANNEL), "other-pane", Some(&token)).is_err());
+    assert!(Replacement::begin_for_test(Some(CHANNEL), TMUX, Some(&stranger)).is_err());
+    assert!(Replacement::begin_for_test(Some(CHANNEL), "other-pane", Some(&token)).is_err());
     let original = load_inflight_state_read_only_result(&ProviderKind::Codex, CHANNEL)
         .unwrap()
         .unwrap();
     let mut legacy = original.clone();
     legacy.turn_nonce = None;
     crate::services::discord::inflight::save_inflight_state(&legacy).unwrap();
-    assert!(Replacement::begin(Some(CHANNEL), TMUX, Some(&token)).is_err());
+    assert!(Replacement::begin_for_test(Some(CHANNEL), TMUX, Some(&token)).is_err());
     legacy = original.clone();
     legacy.request_owner_user_id = 0;
     crate::services::discord::inflight::save_inflight_state(&legacy).unwrap();
-    assert!(Replacement::begin(Some(CHANNEL), TMUX, Some(&token)).is_err());
+    assert!(Replacement::begin_for_test(Some(CHANNEL), TMUX, Some(&token)).is_err());
     crate::services::discord::inflight::save_inflight_state(&original).unwrap();
     let probe = Probe::new(CHANNEL, TMUX);
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _guard = Replacement::begin(Some(CHANNEL), TMUX, Some(&token))
+        let _guard = Replacement::begin_for_test(Some(CHANNEL), TMUX, Some(&token))
             .unwrap()
             .unwrap();
         panic!("fixture provider failure");

@@ -1,23 +1,26 @@
 //! Current-source Idle readiness; external Busy injection keeps its own entry path.
 mod clear;
 mod closed_turn;
-pub(crate) mod compact;
+pub mod compact;
 #[cfg(unix)]
-pub(crate) use source::adopt_awaiting_clear;
+pub use source::adopt_awaiting_clear;
 mod dialog;
 mod evidence;
-pub(crate) mod idle;
+pub mod idle;
 mod restored_reply;
 mod resume_record;
 mod source;
 #[cfg(unix)]
 pub(crate) use source::launch_start_hook;
-#[cfg(test)]
+/// Ledger fixtures and the reservation hook upper-crate tests reuse (KRX-TS).
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
+#[cfg(any(test, feature = "test-support"))]
 #[path = "readiness_tests.rs"]
-pub(crate) mod tests;
+pub mod tests;
 mod wait;
 mod watched;
-pub(crate) use watched::{Expiry, Unproven, WINDOW, WaitCause, watched};
+pub use watched::{Expiry, Unproven, WINDOW, WaitCause, watched};
 
 use super::hook_server::HookEventKind;
 use crate::services::tui_prompt_dedupe::binding_context::BindingContext;
@@ -88,7 +91,7 @@ struct Ledger {
     published: HashMap<FileKey, DateTime<Utc>>,
 }
 static STARTED: LazyLock<DateTime<Utc>> = LazyLock::new(Utc::now);
-pub(crate) fn initialize() {
+pub fn initialize() {
     LazyLock::force(&STARTED);
 }
 static LEDGER: LazyLock<Mutex<Ledger>> = LazyLock::new(|| Mutex::new(Ledger::default()));
@@ -108,7 +111,7 @@ enum ProofOrigin {
     RestoredHard,
     RestoredReply,
 }
-pub(crate) struct Proof {
+pub struct Proof {
     source: Source,
     stamp: Option<Stamp>,
     revision: u64,
@@ -125,17 +128,17 @@ impl Proof {
         )
     }
 }
-pub(crate) fn observe(session: &str, path: Option<&Path>) -> Option<Proof> {
+pub fn observe(session: &str, path: Option<&Path>) -> Option<Proof> {
     evidence(session, path, None)
 }
 /// Herdr only: current evidence, else a pane that outlived the daemon restart idling on its
 /// last hard terminal.
-pub(crate) fn observe_restored(session: &str, path: Option<&Path>) -> Option<Proof> {
+pub fn observe_restored(session: &str, path: Option<&Path>) -> Option<Proof> {
     evidence(session, path, Some(ProofOrigin::RestoredHard))
         .or_else(|| observe_restored_reply(session, path))
 }
 /// Only a pinned reply of this launch; never the composer's historical hard-terminal proof.
-pub(crate) fn observe_restored_reply(session: &str, path: Option<&Path>) -> Option<Proof> {
+pub fn observe_restored_reply(session: &str, path: Option<&Path>) -> Option<Proof> {
     evidence(session, path, Some(ProofOrigin::RestoredReply))
         .filter(|proof| proof.origin == ProofOrigin::RestoredReply)
 }
@@ -390,7 +393,7 @@ fn evidence(session: &str, path: Option<&Path>, origin: Option<ProofOrigin>) -> 
         && clear::current(&proof.source) == Some(proof.clear.clone()))
     .then_some(proof)
 }
-pub(crate) fn reserve(proof: Proof) -> Option<Reservation> {
+pub fn reserve(proof: Proof) -> Option<Reservation> {
     let current = evidence(
         &proof.source.session,
         Some(&proof.source.path),
@@ -432,11 +435,11 @@ pub(crate) fn reserve(proof: Proof) -> Option<Reservation> {
         clear: proof.clear,
     };
     drop(state);
-    #[cfg(all(test, unix))]
-    tests::clear_tests::after_reserve();
+    #[cfg(all(any(test, feature = "test-support"), unix))]
+    test_support::after_reserve();
     Some(reservation)
 }
-pub(crate) struct Reservation {
+pub struct Reservation {
     source: Source,
     origin: ProofOrigin,
     stamp: Option<Stamp>,
@@ -465,6 +468,11 @@ impl Reservation {
         )
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn current_for_test(&self) -> bool {
+        self.current()
+    }
+
     pub(crate) fn current(&self) -> bool {
         Source::current(&self.source.session, Some(&self.source.path)).as_ref()
             == Some(&self.source)
@@ -479,6 +487,11 @@ impl Reservation {
                 .entries
                 .get(&self.source)
                 .is_some_and(|entry| entry.revision == self.revision)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn not_sent_for_test(self) {
+        self.not_sent()
     }
 
     /// Only a known pre-key refusal releases a local reservation; uncertainty stays fenced.
@@ -510,7 +523,7 @@ impl Reservation {
 pub(crate) use wait::prepare;
 
 /// Both root output blocking and feedback continuation use this same fence before replying.
-pub(crate) fn note_hook(
+pub fn note_hook(
     provider: &str,
     kind: &HookEventKind,
     routed: &str,
@@ -744,13 +757,13 @@ pub(crate) fn note_hook(
 }
 
 /// A complete empty input box is draft evidence even when the status footer is clipped.
-pub(crate) fn empty_draft(capture: &str) -> bool {
+pub fn empty_draft(capture: &str) -> bool {
     matches!(
         super::busy_inject::screen::input_box(capture),
         super::busy_inject::screen::Composer::Empty
     )
 }
-pub(crate) fn watch_draft(session: &str, path: Option<&Path>) {
+pub fn watch_draft(session: &str, path: Option<&Path>) {
     watch(session, path, true);
 }
 // Current source evidence survives a UI modal; retry only after its focus is released.
@@ -774,7 +787,7 @@ pub(crate) fn watch_modal(session: &str, path: Option<&Path>) {
     #[cfg(not(unix))]
     let _ = (session, path);
 }
-pub(crate) fn watch_current(session: &str, path: Option<&Path>) {
+pub fn watch_current(session: &str, path: Option<&Path>) {
     watch(session, path, false);
 }
 fn watch(session: &str, path: Option<&Path>, draft_required: bool) {
@@ -803,8 +816,8 @@ fn watch(session: &str, path: Option<&Path>, draft_required: bool) {
     let _ = (session, path, draft_required);
 }
 
-#[cfg(all(test, unix))]
-pub(crate) use source::CLEAR_AFTER_PUBLICATION;
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub use source::CLEAR_AFTER_PUBLICATION;
 
 #[cfg(unix)]
 pub(crate) use source::clear_wakeable;

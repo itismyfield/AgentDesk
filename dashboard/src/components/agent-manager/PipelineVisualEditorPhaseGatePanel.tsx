@@ -1,3 +1,4 @@
+import { useId } from "react";
 import type { PipelineEditorActions, PipelineEditorCtx } from "./PipelineVisualEditor";
 import { INPUT_CLASS, INPUT_STYLE, MUTED_TEXT_STYLE } from "./pipeline-visual-editor-ui";
 
@@ -35,12 +36,14 @@ export default function PipelineVisualEditorPhaseGatePanel({ ctx, actions }: Pro
 }
 
 function TextField(props: { label: string; value: string; onChange: (value: string) => void }) {
+  const inputId = useId();
   return (
     <div>
-      <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
+      <label htmlFor={inputId} className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
         {props.label}
       </label>
       <input
+        id={inputId}
         value={props.value}
         onChange={(event) => props.onChange(event.target.value)}
         className={INPUT_CLASS}

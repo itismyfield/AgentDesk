@@ -2,6 +2,8 @@
 //! ends so the owner's next turn launches the successor with it.
 #![cfg(unix)]
 use super::admission::{Admission, AdmissionTicket, admit_reserved};
+use super::drive::FrontClaim;
+use crate::services::claude_tui::owner_input::Successor;
 pub(crate) use crate::services::turn_orchestrator::SeedStatus;
 use crate::services::turn_orchestrator::restart_operation::Operation;
 use crate::services::turn_orchestrator::{
@@ -156,6 +158,28 @@ pub(crate) fn target(context: &serde_json::Value) -> Target<'_> {
         nonce: read("target_nonce"),
         dispatch: read("dispatch"),
     }
+}
+
+/// The execution a stored greeting's own launch recorded before creating it.
+pub(crate) fn successor_nonce(context: &serde_json::Value) -> Option<&str> {
+    context["metadata"]["restart_seed"]["successor_nonce"].as_str()
+}
+
+/// Records the execution the claimed greeting's launch creates, before its row or pane exists;
+/// the launch stops when the owner refuses.
+pub(crate) fn successor(mailbox: &ChannelMailboxHandle, claim: &FrontClaim) -> Successor {
+    let (mailbox, front, number) = (mailbox.clone(), claim.front().clone(), claim.number());
+    Box::new(move |nonce: &str| {
+        let (front, nonce) = (front.clone(), nonce.to_owned());
+        let record = mailbox.v2_request(move |slot| {
+            let owner = slot.as_mut().ok_or("V2 not adopted")?;
+            owner.record_seed_successor((&front, number), &nonce)
+        });
+        // The launch asks from inside its own runtime wait; a new thread may wait again.
+        let handle = tokio::runtime::Handle::current();
+        std::thread::scope(|s| s.spawn(|| handle.block_on(record)).join())
+            .map_err(|_| "seed successor record panicked".to_string())?
+    })
 }
 
 #[cfg(test)]

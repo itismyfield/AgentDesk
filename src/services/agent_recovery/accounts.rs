@@ -1,7 +1,7 @@
 //! Account selection belongs to the durable lease, not mutable channel routing.
 use super::*;
 
-pub(crate) fn pinned_auth_profile(
+pub fn pinned_auth_profile(
     channel: &str,
     provider: &ProviderKind,
     agent: Option<&str>,

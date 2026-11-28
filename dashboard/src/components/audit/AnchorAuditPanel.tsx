@@ -337,7 +337,7 @@ export function AnchorAuditDetail({ agents, onOpenPrompts, ...detail }: AuditDet
       {state !== "ready" ? (
         <AuditRequestState state={state} retrying={query.isFetching} onRetry={retry} tr={tr} />
       ) : (
-        <div className="flex min-w-0 flex-col gap-5 xl:flex-row xl:items-start">
+        <div className="flex min-w-0 flex-col gap-5 min-[1440px]:flex-row min-[1440px]:items-start">
           <div className="flex min-w-0 flex-1 flex-col gap-2.5">
             <FilterChipGroup<AnchorFilter>
               value={filter}
@@ -467,7 +467,7 @@ export function AnchorAuditDetail({ agents, onOpenPrompts, ...detail }: AuditDet
             <aside
               aria-label={tr("선택한 앵커", "Selected anchor")}
               data-testid="audit-anchor-inspector"
-              className="w-full xl:sticky xl:top-4 xl:max-h-[calc(100dvh-2rem)] xl:w-[320px] xl:shrink-0 xl:overflow-y-auto"
+              className="w-full min-[1440px]:sticky min-[1440px]:top-4 min-[1440px]:max-h-[calc(100dvh-2rem)] min-[1440px]:w-[320px] min-[1440px]:shrink-0 min-[1440px]:overflow-y-auto"
             >
               <KitCard>
                 <AnchorDetailSections

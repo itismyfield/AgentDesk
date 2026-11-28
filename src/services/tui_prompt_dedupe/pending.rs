@@ -29,7 +29,7 @@ use crate::services::tui_prompt_dedupe::{
 use chrono::{DateTime, Utc};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum NotEligible {
+pub enum NotEligible {
     NoNonceMarker,
     LegacyNonceNone,
     NonceMismatch,
@@ -39,7 +39,7 @@ pub(crate) enum NotEligible {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Unavailable {
+pub enum Unavailable {
     LogRead(io::ErrorKind),
     NonceMarkerUnreadable,
     LaunchUnreadable,
@@ -52,13 +52,13 @@ pub(crate) enum Unavailable {
 /// The pane was bound to a transcript not verified yet: only this exact path may bind it,
 /// never the newest file of the same directory.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ExactPathWait {
+pub struct ExactPathWait {
     pub session_id: String,
     pub transcript: PathBuf,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum PendingRestore {
+pub enum PendingRestore {
     HealthyNoPending,
     Seeded {
         pending_seq: u64,
@@ -90,7 +90,7 @@ impl PendingRestore {
 impl PendingRestore {
     /// The rehydrate pass must not register the launch binding over this outcome: the restore
     /// registered the pane, found the log corrupt, or failed to register what the log names.
-    pub(crate) fn skips_launch_refresh(&self) -> bool {
+    pub fn skips_launch_refresh(&self) -> bool {
         matches!(
             self,
             Self::Seeded { .. }
@@ -103,7 +103,7 @@ impl PendingRestore {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct LaunchTranscript {
+pub struct LaunchTranscript {
     pub session_id: String,
     pub transcript: PathBuf,
 }
@@ -502,7 +502,7 @@ fn outcomes() -> MutexGuard<'static, HashMap<String, (MemoKey, PendingRestore)>>
 }
 
 /// The latest restore outcome of `tmux_session` in this process.
-pub(crate) fn last_restore_outcome(tmux_session: &str) -> Option<PendingRestore> {
+pub fn last_restore_outcome(tmux_session: &str) -> Option<PendingRestore> {
     outcomes()
         .get(tmux_session)
         .map(|(_, outcome)| outcome.clone())
@@ -521,7 +521,7 @@ pub(crate) fn forget_seeded_restore(tmux_session: &str) {
 }
 
 /// Whether `binding` is a transcript a restore bound before it existed; nothing may stand in.
-pub(crate) fn awaits_exact_path(tmux_session: &str, binding: &TuiRuntimeBinding) -> bool {
+pub fn awaits_exact_path(tmux_session: &str, binding: &TuiRuntimeBinding) -> bool {
     matches!(
         last_restore_outcome(tmux_session),
         Some(PendingRestore::BoundFromLedger { exact_wait: Some(wait), .. })
@@ -532,7 +532,7 @@ pub(crate) fn awaits_exact_path(tmux_session: &str, binding: &TuiRuntimeBinding)
 
 /// Restores `tmux_session`'s durable Pending before the rehydrate pass judges its binding; `None`
 /// is a bound pane whose restore already settled. `bind` builds a transcript's binding.
-pub(crate) fn restore_claude_pane(
+pub fn restore_claude_pane(
     tmux_session: &str,
     channel_id: u64,
     launch: Option<LaunchTranscript>,
@@ -749,14 +749,14 @@ fn note(tmux_session: &str, key: MemoKey, outcome: &PendingRestore) {
     outcomes.insert(tmux_session.to_owned(), (key, outcome.clone()));
 }
 
-#[cfg(test)]
-pub(crate) fn reset_restore_outcomes_for_tests() {
+#[cfg(any(test, feature = "test-support"))]
+pub fn reset_restore_outcomes_for_tests() {
     outcomes().clear();
 }
 
 /// Ages the pane's channel mapping past its TTL while its runtime binding stays fresh.
-#[cfg(test)]
-pub(crate) fn expire_channel_mapping_for_tests(tmux_session: &str) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn expire_channel_mapping_for_tests(tmux_session: &str) {
     let mut state = super::STATE.lock().unwrap_or_else(|p| p.into_inner());
     let aged =
         state.aged_stamp_for_tests(super::SESSION_MAPPING_TTL + std::time::Duration::from_secs(1));
@@ -766,8 +766,8 @@ pub(crate) fn expire_channel_mapping_for_tests(tmux_session: &str) {
 }
 
 /// Ages the pane's runtime binding past its TTL; its alias, channel mapping and outcome stay.
-#[cfg(test)]
-pub(crate) fn expire_runtime_binding_for_tests(tmux_session: &str) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn expire_runtime_binding_for_tests(tmux_session: &str) {
     let mut state = super::STATE.lock().unwrap_or_else(|p| p.into_inner());
     let aged =
         state.aged_stamp_for_tests(super::SESSION_MAPPING_TTL + std::time::Duration::from_secs(1));
@@ -777,11 +777,11 @@ pub(crate) fn expire_runtime_binding_for_tests(tmux_session: &str) {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) const CHANNEL_MAPPING_TTL: std::time::Duration = super::SESSION_MAPPING_TTL;
+pub const CHANNEL_MAPPING_TTL: std::time::Duration = super::SESSION_MAPPING_TTL;
 
 /// Moves the pane's channel mapping `by` into the past while its runtime binding stays fresh.
-#[cfg(test)]
-pub(crate) fn age_channel_mapping_for_tests(tmux_session: &str, by: std::time::Duration) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn age_channel_mapping_for_tests(tmux_session: &str, by: std::time::Duration) {
     let mut state = super::STATE.lock().unwrap_or_else(|p| p.into_inner());
     state.aged_stamp_for_tests(by);
     if let Some(mapping) = state.channel_by_tmux.get_mut(tmux_session) {

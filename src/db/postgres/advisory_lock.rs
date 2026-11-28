@@ -4,18 +4,14 @@ use sqlx::Connection;
 use sqlx::{PgConnection, PgPool};
 
 /// A pooled session returns to the pool only after its advisory lock was explicitly released.
-pub(crate) struct PooledAdvisoryLock {
+pub struct PooledAdvisoryLock {
     conn: Option<sqlx::pool::PoolConnection<sqlx::Postgres>>,
     namespace: String,
     key: String,
 }
 
 impl PooledAdvisoryLock {
-    pub(crate) async fn acquire(
-        pool: &PgPool,
-        namespace: &str,
-        key: &str,
-    ) -> Result<Self, sqlx::Error> {
+    pub async fn acquire(pool: &PgPool, namespace: &str, key: &str) -> Result<Self, sqlx::Error> {
         let mut guard = Self {
             conn: Some(pool.acquire().await?),
             namespace: namespace.to_owned(),
@@ -31,7 +27,7 @@ impl PooledAdvisoryLock {
         Ok(guard)
     }
 
-    pub(crate) async fn unlock(mut self) -> Result<(), sqlx::Error> {
+    pub async fn unlock(mut self) -> Result<(), sqlx::Error> {
         if let Some(conn) = self.conn.as_mut() {
             sqlx::query("SELECT pg_advisory_unlock(hashtext($1), hashtext($2))")
                 .bind(&self.namespace)
@@ -72,7 +68,7 @@ impl AdvisoryLockLease {
 
     /// Acquire under PostgreSQL `application_name`; with `idle_expiry` the server ends the
     /// session after that long without a statement, so a vanished holder cannot keep the lock.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn try_acquire_named_expiring(
         pool: &PgPool,
         lock_id: i64,
@@ -91,7 +87,7 @@ impl AdvisoryLockLease {
         .await
     }
 
-    pub(crate) async fn try_acquire_named_expiring_observed(
+    pub async fn try_acquire_named_expiring_observed(
         pool: &PgPool,
         lock_id: i64,
         label: impl Into<String>,
@@ -169,8 +165,8 @@ impl AdvisoryLockLease {
     }
 
     /// The idle timeout this lease's own session runs under, as PostgreSQL reports it.
-    #[cfg(test)]
-    pub(crate) async fn session_idle_timeout(&mut self) -> Result<String, sqlx::Error> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn session_idle_timeout(&mut self) -> Result<String, sqlx::Error> {
         sqlx::query_scalar("SHOW idle_session_timeout")
             .fetch_one(&mut self.conn)
             .await

@@ -14,7 +14,7 @@ use poise::serenity_prelude::{ChannelId, MessageId};
 
 /// Legacy and unreadable files keep their existing replacement path. A parsed V2 file always
 /// clears through its owner, including the scratch state used when no mailbox is registered.
-pub(crate) fn clear_channel(
+pub(in crate::services::turn_orchestrator) fn clear_channel(
     state: &mut ChannelMailboxState,
     channel: ChannelId,
     persistence: &QueuePersistenceContext,

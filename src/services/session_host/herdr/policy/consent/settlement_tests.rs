@@ -1,3 +1,4 @@
+#[cfg(test)]
 use super::super::{
     ApplyResult, QuestionResult,
     workflow::{Effect, Workflow},
@@ -5,10 +6,12 @@ use super::super::{
 use super::*;
 use std::{io::Write, path::PathBuf};
 
+#[cfg(test)]
 fn question(id: &str) -> super::super::Question {
     super::super::tests::question(id)
 }
 
+#[cfg(test)]
 fn applied(store: &ConsentStore) -> Consent {
     let held = store.hold(question("first"), 100).unwrap().into_consent();
     let accepted = store.decide(&held, 1, true, 101).unwrap();
@@ -412,14 +415,14 @@ async fn custody_sink_durable_idempotence_conformance() {
 }
 
 // The factory reopens the same durable fixture, including after an injected failure.
-pub(crate) trait CustodySinkFixture: CustodySink {
+pub trait CustodySinkFixture: CustodySink {
     /// Counts total observable effects by (store, id) across all nonces; deduped calls do not count.
     fn effect_counts(&self, key: &SettlementKey) -> (usize, usize);
     /// Injects one failure before the next wake has an observable effect.
     fn fail_next_wake(&mut self);
 }
 
-pub(crate) async fn custody_sink_conformance<S: CustodySinkFixture>(make: impl Fn() -> S) {
+pub async fn custody_sink_conformance<S: CustodySinkFixture>(make: impl Fn() -> S) {
     let intent = IntentRef {
         store: "conformance-custody".into(),
         id: "intent-1".into(),

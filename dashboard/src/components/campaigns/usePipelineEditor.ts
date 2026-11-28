@@ -9,7 +9,8 @@ import { warnBeforeUnload } from "./relationsEditorModel";
 import { newIdempotencyKey, rejectionText } from "./serverCampaignModel";
 import { useEditorHistory } from "./useEditorHistory";
 
-type Edit = { base: PipelineDefinition; revision: number; draft: PipelineDefinition };
+type Edit = { base: PipelineDefinition; revision: number; draft: PipelineDefinition; past: PipelineDefinition[] };
+const UNDO_CAP = 40;
 type Sent = { body: string; key: string };
 export type Checks = { errors: PipelineDiagnostic[]; warnings: PipelineDiagnostic[]; pending: boolean; failed: string | null };
 export type Notice = { kind: "saved"; revision: number } | { kind: "lost" } | { kind: "error"; text: string } | { kind: "conflict"; latest: Detail };
@@ -48,6 +49,7 @@ export function usePipelineEditor({ id, runtime, detail, reload, leave, entry, t
   const sent = useRef<Sent | null>(null);
   const changes = useMemo(() => edit && draftChanges(edit.base, edit.draft), [edit]);
   const dirty = !!changes?.count;
+  const canUndo = (edit?.past.length ?? 0) > 0;
   const draft = edit?.draft;
 
   // A recheck of a draft already checked (only the run moved) keeps the last result on screen and the save open meanwhile.
@@ -106,11 +108,11 @@ export function usePipelineEditor({ id, runtime, detail, reload, leave, entry, t
   restoreRef.current = history.restoreEntry;
 
   const open = (next: Edit) => { forget(); setNotice(null); setEdit(next); };
-  const begin = (from: Detail) => open({ base: from.pipeline, revision: from.definition_revision, draft: from.pipeline });
+  const begin = (from: Detail) => open({ base: from.pipeline, revision: from.definition_revision, draft: from.pipeline, past: [] });
   const save = async (over?: Detail) => {
     if (!edit || !id || saving) return;
     const revision = over?.definition_revision ?? edit.revision;
-    if (over) setEdit({ ...edit, base: over.pipeline, revision });
+    if (over) setEdit({ ...edit, base: over.pipeline, revision, past: [] });
     const body = JSON.stringify([revision, edit.draft]);
     const key = sent.current?.body === body ? sent.current.key : newIdempotencyKey();
     sent.current = { body, key };
@@ -146,13 +148,35 @@ export function usePipelineEditor({ id, runtime, detail, reload, leave, entry, t
   };
 
   return {
-    edit, changes, dirty, checks, saving, notice, leaving, waiting,
+    edit, changes, dirty, canUndo, checks, saving, notice, leaving, waiting,
     begin, save, forget,
     /** Picks up the kept draft over the revision it was made against; a save then reports any newer one as a conflict. */
     // The key travels with a kept draft (by reference, so an answer that came after leaving still counts).
-    resume: () => { if (waiting) { const { sent: last, ...next } = waiting; open(next); sent.current = last.current; } },
-    update: (change: (draft: PipelineDefinition) => PipelineDefinition) => { if (!busy.current) setEdit((current) => current && { ...current, draft: change(current.draft) }); },
-    revert: () => { if (!busy.current) setEdit((current) => current && { ...current, draft: current.base }); },
+    resume: () => { if (waiting) { const { sent: last, ...next } = waiting; open({ ...next, past: next.past ?? [] }); sent.current = last.current; } },
+    update: (change: (draft: PipelineDefinition) => PipelineDefinition) => {
+      if (busy.current) return;
+      setEdit((current) => {
+        if (!current) return current;
+        const next = change(current.draft);
+        return next === current.draft ? current : { ...current, draft: next, past: [...current.past, current.draft].slice(-UNDO_CAP) };
+      });
+    },
+    undo: () => {
+      if (busy.current) return;
+      setEdit((current) =>
+        current && current.past.length
+          ? { ...current, draft: current.past[current.past.length - 1], past: current.past.slice(0, -1) }
+          : current,
+      );
+    },
+    revert: () => {
+      if (busy.current) return;
+      setEdit((current) =>
+        current && current.draft !== current.base
+          ? { ...current, draft: current.base, past: [...current.past, current.draft].slice(-UNDO_CAP) }
+          : current,
+      );
+    },
     close: () => { if (busy.current) return; if (dirty) setLeaving(() => stop); else stop(); },
     decide: (discard: boolean) => { if (discard && busy.current) return; const proceed = leaving; setLeaving(null); if (discard) { stop(); proceed?.(); } },
   };

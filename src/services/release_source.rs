@@ -160,7 +160,7 @@ fn is_git_object_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-pub(crate) fn health_json(include_node_hostname: bool) -> serde_json::Value {
+pub fn health_json(include_node_hostname: bool) -> serde_json::Value {
     health_json_for(observe(), include_node_hostname)
 }
 

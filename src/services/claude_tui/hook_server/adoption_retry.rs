@@ -44,21 +44,21 @@ fn execution_current(tmux: &str, nonce: Option<&str>) -> Result<(), NotDurableRe
 
 /// What the hook that asked for an adoption may be told, judged by its own binding evidence only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AdoptionHttp {
+pub enum AdoptionHttp {
     Durable(DurableKind),
     Skipped(AdoptSkip),
     NotDurable(NotDurableReason),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DurableKind {
+pub enum DurableKind {
     Pending,
     Adopted,
     AlreadyRecorded,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum NotDurableReason {
+pub enum NotDurableReason {
     Append,
     QueuedBehind,
     ExecutionChanged,
@@ -169,7 +169,7 @@ fn pop_front(tmux_session_name: &str) {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn adopt_from_hook(
+pub fn adopt_from_hook(
     command_session_id: &str,
     payload_session_id: &str,
     hook: &HookSignal,
@@ -472,7 +472,7 @@ pub(crate) fn seed_restored(
 }
 
 /// Re-runs each pane's deferred adoptions in hook order with their original evidence.
-pub(crate) fn retry_deferred_claude_adoptions() {
+pub fn retry_deferred_claude_adoptions() {
     let panes: Vec<String> = deferred().keys().cloned().collect();
     for tmux in panes {
         with_tmux_source_authority(&tmux, |_| {
@@ -549,7 +549,7 @@ pub(crate) fn set_artifact_probe(probe: Option<ArtifactProbe>) {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn deferred_adoption_count() -> usize {
+pub fn deferred_adoption_count() -> usize {
     deferred().values().map(VecDeque::len).sum()
 }
 
@@ -562,7 +562,7 @@ pub(crate) fn forget_pending_record_for_tests(tmux: &str) {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn reset_deferred_adoptions_for_tests() {
+#[cfg(any(test, feature = "test-support"))]
+pub fn reset_deferred_adoptions_for_tests() {
     deferred().clear();
 }

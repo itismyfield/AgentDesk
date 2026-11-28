@@ -393,7 +393,7 @@ export function RoutinesTimelineWidget({ t, localeTag, language }: { t: TFunctio
         <>
           <section
             data-testid="routines-scheduled-runs"
-            className="min-w-0 overflow-x-auto [scrollbar-width:thin] [&_.aui-scheduled-runs]:max-w-none! [&_.aui-scheduled-runs-agent-mark_img]:size-4! [&_.aui-scheduled-runs-board]:min-w-[660px]! [&_.aui-scheduled-runs-board-scroll]:overflow-x-auto! [&_.aui-scheduled-runs-body]:gap-2.5! [&_.aui-scheduled-runs-body]:p-2! min-[641px]:[&_.aui-scheduled-runs-body]:grid-cols-[164px_minmax(0,1fr)]! [&_.aui-scheduled-runs-card]:h-[60px]! [&_.aui-scheduled-runs-card]:cursor-default! [&_.aui-scheduled-runs-card-mark_img]:size-3.5! [&_.aui-scheduled-runs-cell]:h-auto! [&_.aui-scheduled-runs-cell]:min-h-[40px]! [&_.aui-scheduled-runs-cell]:pb-3.5! [&_.aui-scheduled-runs-detail-hint]:hidden! [&_.aui-scheduled-runs-head]:min-h-9! [&_.aui-scheduled-runs-head]:py-1! [&_.aui-scheduled-runs-modes]:hidden! [&_.aui-scheduled-runs-queue]:min-h-0! [&_.aui-scheduled-runs-queue-list]:max-h-[256px]! [&_.aui-scheduled-runs-row]:grid-cols-[44px_repeat(var(--aui-scheduled-runs-days),minmax(0,1fr))]! [&_.aui-scheduled-runs-slot]:h-[64px]! [&_.aui-scheduled-runs-tapmove]:hidden!"
+            className="min-w-0 overflow-x-auto [scrollbar-width:thin] [&_.aui-scheduled-runs]:max-w-none! [&_.aui-scheduled-runs-agent-mark_img]:size-4! [&_.aui-scheduled-runs-board]:min-w-[684px]! [&_.aui-scheduled-runs-board-scroll]:overflow-x-auto! [&_.aui-scheduled-runs-body]:gap-2.5! [&_.aui-scheduled-runs-body]:p-2! [&_.aui-scheduled-runs-card]:h-[60px]! [&_.aui-scheduled-runs-card]:cursor-default! [&_.aui-scheduled-runs-card-mark_img]:size-3.5! [&_.aui-scheduled-runs-cell]:h-auto! [&_.aui-scheduled-runs-cell]:min-h-[40px]! [&_.aui-scheduled-runs-cell]:pb-3.5! [&_.aui-scheduled-runs-detail-hint]:hidden! [&_.aui-scheduled-runs-head]:min-h-9! [&_.aui-scheduled-runs-head]:py-1! [&_.aui-scheduled-runs-modes]:hidden! [&_.aui-scheduled-runs-queue]:min-h-0! [&_.aui-scheduled-runs-queue-list]:max-h-[256px]! [&_.aui-scheduled-runs-row]:grid-cols-[68px_repeat(var(--aui-scheduled-runs-days),minmax(0,1fr))]! [&_.aui-scheduled-runs-slot]:h-[64px]! [&_.aui-scheduled-runs-tapmove]:hidden!"
             onPointerDownCapture={(e) => { if ((e.target as HTMLElement).closest(".aui-scheduled-runs-card")) e.stopPropagation(); }}
             onKeyDownCapture={(e) => { if ((e.key === " " || e.key === "Enter") && (e.target as HTMLElement).closest(".aui-scheduled-runs-card")) e.stopPropagation(); }}
           >
@@ -402,7 +402,7 @@ export function RoutinesTimelineWidget({ t, localeTag, language }: { t: TFunctio
 
           <div className="@container/routines grid min-w-0 grid-cols-1 items-start gap-4 min-[900px]:grid-cols-[minmax(0,1fr)_clamp(320px,36%,430px)]">
             <SectionCard title={m("반복 예약 목록", "Recurring schedules")} count={sortedRoutines.length} aside={<Repeat2 size={14} aria-hidden className="ml-auto text-[var(--fg-muted)]" />}>
-              <ul ref={listRef} className="m-0 list-none divide-y divide-[var(--line-soft)] border-t border-[var(--line-soft)] p-0" data-testid="routines-timeline-list" onKeyDown={(event) => {
+              <ul ref={listRef} className="@container/routine-list m-0 list-none divide-y divide-[var(--line-soft)] border-t border-[var(--line-soft)] p-0" data-testid="routines-timeline-list" onKeyDown={(event) => {
                 const lower = event.key.toLowerCase(), down = event.key === "ArrowDown" || lower === "j", up = event.key === "ArrowUp" || lower === "k";
                 if ((!down && !up) || event.altKey || event.ctrlKey || event.metaKey) return;
                 const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLElement>("[data-row]")), idx = buttons.indexOf(event.target as HTMLElement);
@@ -424,13 +424,13 @@ export function RoutinesTimelineWidget({ t, localeTag, language }: { t: TFunctio
                         <span className="flex min-w-0 flex-1 flex-col">
                           <strong className={`truncate text-[13px] leading-5 font-medium ${enabled ? "text-[var(--fg)]" : "text-[var(--fg-muted)]"}`}>{title}</strong>
                           <Cap className="truncate"><span className="font-mono text-[11px]">{routine.name}</span> · {schedule}{routine.agent_id ? ` · ${routine.agent_id}` : ""}</Cap>
-                          <span className="hidden text-xs leading-4 tabular-nums text-[var(--fg-dim)] max-sm:block">{nextText}</span>
+                          <span className="hidden text-xs leading-4 tabular-nums text-[var(--fg-dim)] @max-[36rem]/routine-list:block">{nextText}</span>
                         </span>
-                        <span className="flex shrink-0 flex-col items-end text-xs max-sm:hidden">
+                        <span className="flex shrink-0 flex-col items-end text-xs @max-[36rem]/routine-list:hidden">
                           <Num className={enabled ? "text-[var(--fg)]" : "text-[var(--fg-muted)]"}>{nextText}</Num>
                           {relative ? <Cap>{relative}</Cap> : null}
                         </span>
-                        {latest ? <Chip tone={CHIP_TONE[runStatusTone(routine.last_run?.status)]} className="inline-flex max-sm:hidden">{latest}</Chip> : null}
+                        {latest ? <Chip tone={CHIP_TONE[runStatusTone(routine.last_run?.status)]} className="inline-flex @max-[36rem]/routine-list:hidden">{latest}</Chip> : null}
                       </button>
                       <div className="ml-auto flex shrink-0 items-center gap-1.5">
                         <Button size="sm" variant="secondary" icon={<Play size={13} />} loading={runningIds.has(routine.id)} disabled={!enabled || runningNow} data-testid={`routine-run-now-${routine.id}`} aria-label={m(`${routine.name} 지금 실행`, `Run ${routine.name} now`)} onClick={() => void runNow(routine)}>

@@ -92,7 +92,7 @@ fn tmux_metadata_only_readiness_hold_refuses_once_without_another_wake_pg() {
     for attempt in 0..2 {
         if attempt == 1 {
             // The original was already held when volatile readiness was lost.
-            readiness::tests::forget_session(&rig.name);
+            readiness::test_support::forget_session(&rig.name);
         }
         {
             let _entered = rig.runtime.enter();

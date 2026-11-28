@@ -7,14 +7,14 @@ use std::io::Read;
 const BYTE_LIMIT: u64 = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ChannelObservation {
+pub struct ChannelObservation {
     pub events: Vec<BindingEvent>,
     pub settled_companions: SettledCompanions,
     pub tail: u64,
     pub digest: String,
 }
 
-pub(crate) fn observe_channel(channel: u64, limit: usize) -> Result<ChannelObservation, String> {
+pub fn observe_channel(channel: u64, limit: usize) -> Result<ChannelObservation, String> {
     let read = || -> io::Result<ChannelObservation> {
         let path = log_path(channel)?.ok_or_else(|| invalid("Codex binding log unavailable"))?;
         let logs = lock_logs();

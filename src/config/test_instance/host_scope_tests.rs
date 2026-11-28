@@ -1,117 +1,15 @@
+#[cfg(test)]
 use super::*;
+#[cfg(test)]
 use crate::config::session_hosts::test_instance_validation::validate_hosts;
+#[cfg(test)]
 use serde_json::json;
 
-pub(crate) fn fixture() -> (tempfile::TempDir, PathBuf) {
-    let temp = tempfile::Builder::new()
-        .prefix("adk-i2-")
-        .tempdir_in("/tmp")
-        .unwrap();
-    let root = temp
-        .path()
-        .canonicalize()
-        .unwrap()
-        .join(uuid::Uuid::new_v4().to_string());
-    for directory in [
-        "",
-        "config",
-        "runtime",
-        "runtime/tmux",
-        "runtime/herdr",
-        "herdr-home",
-        "home/.adk/profiles/claude/test-claude",
-        "home/.adk/profiles/codex/test-codex",
-        "tmp",
-        "xdg",
-        "fixture-worktree/target/debug",
-    ] {
-        std::fs::create_dir_all(root.join(directory)).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(root.join(directory), std::fs::Permissions::from_mode(0o700))
-                .unwrap();
-        }
-    }
-    let id = root.file_name().unwrap().to_str().unwrap();
-    let manifest = json!({
-        "schema_version":1,"status":"DECLARED","live_ready":false,"instance_id":id,
-        "root":root,"worktree":root.join("fixture-worktree"),"head":"a".repeat(40),"profile":{
-            "features":{},"bots":{},"channels":[]},"applied_env":{},
-        "api":{"host":"127.0.0.1","port":18791,"self_url":"http://127.0.0.1:18791"},"postgres":{},
-        "config_path":root.join("config/agentdesk.yaml"),"execution_node_id":id,
-        "preferred_node_seed_required":true,"hosts":{
-            "tmux":{"socket":root.join("runtime/tmux/socket"),"tmpdir":root.join("runtime/tmux"),
-                "prefix":format!("AdkTest-{id}")},
-            "herdr":{"socket":root.join("runtime/herdr/socket"),"home":root.join("herdr-home"),
-                "session":format!("adk-test-{id}"),"endpoint_key":format!("test-{id}")}}
-    });
-    let mut receipt = manifest.as_object().unwrap().clone();
-    receipt.remove("profile");
-    receipt.remove("config_path");
-    for key in ["features", "bots", "channels"] {
-        receipt.insert(key.into(), manifest["profile"][key].clone());
-    }
-    write(&root.join("manifest.json"), &manifest);
-    write(&root.join("receipt.json"), &Value::Object(receipt));
-    write(
-        &root.join("config/agentdesk.yaml"),
-        &json!({"cluster":{
-        "instance_id":id,"gateway_preferred_instance_id":id},
-        "server":{"host":"127.0.0.1","port":18791},"mcp_servers":{},
-        "memory":{"backend":"file","mcp":{"endpoint":""}}}),
-    );
-    let mut profiles = serde_json::Map::new();
-    let mut primary = serde_json::Map::new();
-    let mut agents = serde_json::Map::new();
-    for provider in ["claude", "codex"] {
-        let name = format!("test-{provider}");
-        profiles.insert(name.clone(), json!({"provider":provider,"home":root.join(format!("home/.adk/profiles/{provider}/{name}")),"env":{}}));
-        primary.insert(provider.into(), json!(name));
-        agents.insert(
-            provider.into(),
-            json!({"display_name":provider,"provider":provider,"auth_profile":name}),
-        );
-    }
-    write(
-        &root.join("config/org.yaml"),
-        &json!({"version":1,"agents":agents,"provider_auth_profiles":profiles,"provider_auth_primary_profiles":primary}),
-    );
-    (temp, root)
-}
+#[cfg(test)]
+use super::test_support::write;
+pub use super::test_support::{assert_single_test_passed, command, fixture};
 
-pub(crate) fn command(root: &Path) -> Command {
-    let manifest = read_json(&root.join("manifest.json")).unwrap();
-    let config = read_json(&root.join("config/agentdesk.yaml")).unwrap();
-    let env = environment::Environment::load(root, &manifest, &config).unwrap();
-    let mut command = Command::new(std::env::current_exe().unwrap());
-    command.env_clear().envs(&env.required).envs(&env.flags);
-    for key in ["POSTGRES_TEST_DATABASE_URL_BASE", "AGENTDESK_REQUIRE_PG"] {
-        if let Some(value) = std::env::var_os(key) {
-            command.env(key, value);
-        }
-    }
-    command
-}
-
-pub(crate) fn assert_single_test_passed(output: &std::process::Output, selector: &str) {
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let executed = format!("test {selector} ... ok");
-    let summary = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured;";
-    assert!(
-        output.status.success()
-            && stdout.lines().any(|line| line == executed)
-            && stdout
-                .lines()
-                .filter(|line| line.starts_with(summary))
-                .count()
-                == 1,
-        "expected exactly one successful test {selector}\n{stdout}\n{stderr}"
-    );
-}
-
-pub(crate) fn instance_child(test_name: &str, marker: &str) -> bool {
+pub fn instance_child(test_name: &str, marker: &str) -> bool {
     if std::env::var_os(marker).is_some() {
         return true;
     }
@@ -141,10 +39,6 @@ fn instance_child_refuses_missing_selector() {
     };
     assert!(output.status.success());
     assert!(std::panic::catch_unwind(|| assert_single_test_passed(&output, selector)).is_err());
-}
-
-fn write(path: &Path, value: &Value) {
-    std::fs::write(path, serde_json::to_vec(value).unwrap()).unwrap();
 }
 
 #[test]
@@ -414,6 +308,7 @@ fn initialized_test_scope_names_sessions_and_refuses_herdr_runtime() {
     exercise_owner_receipt(instance);
 }
 
+#[cfg(test)]
 #[cfg(unix)]
 fn exercise_owner_receipt(instance: &'static TestInstance) {
     use crate::services::herdr_launch::HerdrLaunchEndpoint;

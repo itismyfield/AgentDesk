@@ -12,7 +12,7 @@ use crate::services::discord::inflight::{
 };
 use crate::services::discord::turn_bridge::{TurnBridgeContext, spawn_turn_bridge};
 use crate::services::provider::{CancelToken, ProviderKind};
-use crate::services::provider_teardown::tests::test_support::{FakeTmux, cleared};
+use crate::services::provider_teardown::test_support::{FakeTmux, cleared};
 use crate::services::turn_orchestrator::{Intervention, InterventionMode};
 
 const NAME: &str = "adk-t05-claude-fresh-fail";
@@ -92,7 +92,7 @@ fn fail_fresh_turn(
     let _spy = SpyGuard::install(SpyState {
         captures: std::iter::repeat_n(Some(ready), 64).collect(),
         on_alive: Some(Box::new(
-            crate::services::claude_tui::readiness::tests::fresh_fixture,
+            crate::services::claude_tui::readiness::test_support::fresh_fixture,
         )),
         ..SpyState::default()
     });
@@ -195,7 +195,7 @@ struct PublishedEndpoint {
 
 /// Needs the shared env lock already held, the order the other endpoint users take.
 fn published_endpoint() -> PublishedEndpoint {
-    let lock = crate::services::claude_tui::hook_server::tests::ENDPOINT_TEST_LOCK
+    let lock = crate::services::claude_tui::hook_server::ENDPOINT_TEST_LOCK
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let endpoint = crate::services::claude_tui::hook_server::publish_hook_endpoint(

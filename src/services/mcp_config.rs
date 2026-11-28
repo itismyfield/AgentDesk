@@ -1,7 +1,7 @@
 #[path = "mcp_config/antigravity.rs"]
 mod antigravity;
 
-pub(crate) use antigravity::sync as sync_antigravity_mcp_servers;
+pub use antigravity::sync as sync_antigravity_mcp_servers;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -62,7 +62,7 @@ struct QwenMcpSyncState {
     managed_servers: Vec<String>,
 }
 
-pub(crate) fn provider_has_memento_mcp(provider: &ProviderKind) -> bool {
+pub fn provider_has_memento_mcp(provider: &ProviderKind) -> bool {
     provider_has_mcp_server(provider, MEMENTO_SERVER_NAME)
 }
 
@@ -111,7 +111,7 @@ pub(crate) fn claude_mcp_config_arg_from_config(
     claude_mcp_config_arg_from_servers(&servers)
 }
 
-pub(crate) fn sync_codex_mcp_servers(config: &Config) -> Result<(), String> {
+pub fn sync_codex_mcp_servers(config: &Config) -> Result<(), String> {
     let runtime_root = crate::config::runtime_root()
         .ok_or_else(|| "AGENTDESK_ROOT_DIR is unavailable".to_string())?;
     let sync_state_path =
@@ -168,7 +168,7 @@ pub(crate) fn sync_codex_mcp_servers(config: &Config) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn sync_opencode_mcp_servers(config: &Config) -> Result<(), String> {
+pub fn sync_opencode_mcp_servers(config: &Config) -> Result<(), String> {
     let runtime_root = crate::config::runtime_root()
         .ok_or_else(|| "AGENTDESK_ROOT_DIR is unavailable".to_string())?;
     let sync_state_path =
@@ -227,7 +227,7 @@ pub(crate) fn sync_opencode_mcp_servers(config: &Config) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn sync_qwen_mcp_servers(config: &Config) -> Result<(), String> {
+pub fn sync_qwen_mcp_servers(config: &Config) -> Result<(), String> {
     let runtime_root = crate::config::runtime_root()
         .ok_or_else(|| "AGENTDESK_ROOT_DIR is unavailable".to_string())?;
     let sync_state_path =
@@ -265,7 +265,7 @@ pub(crate) fn sync_qwen_mcp_servers(config: &Config) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn retired_gemini_sync(_config: &Config) -> Result<(), String> {
+pub fn retired_gemini_sync(_config: &Config) -> Result<(), String> {
     let Some(root) = crate::config::runtime_root() else {
         return Ok(());
     };

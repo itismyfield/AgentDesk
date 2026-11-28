@@ -1,7 +1,7 @@
 use super::*;
-use crate::services::claude_tui::submission_fence::{
-    PreSubmitPersistenceRefused, SubmissionFence, with_scope,
-};
+#[cfg(test)]
+use crate::services::claude_tui::submission_fence::with_scope;
+use crate::services::claude_tui::submission_fence::{PreSubmitPersistenceRefused, SubmissionFence};
 use crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture;
 use std::cell::Cell;
 use std::fs;
@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-pub(crate) const PROMPT: &str = "[User: test]\nprepared question";
+pub const PROMPT: &str = "[User: test]\nprepared question";
 pub(crate) const FAST: Timing = Timing {
     lock_retries: &[],
     settle: Duration::from_millis(30),
@@ -17,7 +17,7 @@ pub(crate) const FAST: Timing = Timing {
     confirm_poll: Duration::from_millis(10),
 };
 
-pub(crate) fn view(text: &str, stashed: bool) -> String {
+pub fn view(text: &str, stashed: bool) -> String {
     format!(
         "{}\n{}\n❯\u{a0}{}\n{}\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n",
         if stashed { "› stashed" } else { "" },
@@ -29,7 +29,7 @@ pub(crate) fn view(text: &str, stashed: bool) -> String {
 fn quote(path: &Path) -> String {
     format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
 }
-pub(crate) fn wait(phase: &str, mut ready: impl FnMut() -> bool) {
+pub fn wait(phase: &str, mut ready: impl FnMut() -> bool) {
     eprintln!("fixture phase={phase} waiting");
     let deadline = Instant::now() + Duration::from_secs(4);
     while !ready() {
@@ -44,14 +44,14 @@ pub(crate) fn wait(phase: &str, mut ready: impl FnMut() -> bool) {
 
 /// A scripted `tmux` first on PATH for the managed idle path. Every capture shows `screen`;
 /// each payload write (load, paste, key) is recorded with the durable managed phase it met.
-pub(crate) struct ScriptedTmux {
+pub struct ScriptedTmux {
     dir: tempfile::TempDir,
     _path: crate::config::TestEnvVarGuard,
 }
 
 impl ScriptedTmux {
     /// The caller holds the shared env lock, as a `TestRuntimeRootGuard` does.
-    pub(crate) fn new(screen: &str) -> Self {
+    pub fn new(screen: &str) -> Self {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let script = r#"#!/bin/sh
@@ -106,16 +106,16 @@ exit 0
         tmux
     }
 
-    pub(crate) fn directory(&self) -> &Path {
+    pub fn directory(&self) -> &Path {
         self.dir.path()
     }
 
-    pub(crate) fn enable_cold_launch(&self) {
+    pub fn enable_cold_launch(&self) {
         self.set_dead(false);
         fs::write(self.dir.path().join("cold_launch"), "").unwrap();
     }
 
-    pub(crate) fn show(&self, screen: &str) {
+    pub fn show(&self, screen: &str) {
         fs::write(self.dir.path().join("screen"), screen).unwrap();
     }
 
@@ -126,37 +126,37 @@ exit 0
     }
 
     /// Fails the `n`-th payload write, counted from 0.
-    pub(crate) fn fail_send(&self, n: usize) {
+    pub fn fail_send(&self, n: usize) {
         fs::write(self.dir.path().join("fail"), n.to_string()).unwrap();
     }
 
     /// Notes the managed phase of the row file `row` at every payload write.
-    pub(crate) fn witness(&self, row: &Path) {
+    pub fn witness(&self, row: &Path) {
         fs::write(self.dir.path().join("row"), row.display().to_string()).unwrap();
     }
 
     /// Appends `line` to `file` when Enter arrives, as Claude records the submitted prompt.
-    pub(crate) fn on_enter(&self, file: &Path, line: &str) {
+    pub fn on_enter(&self, file: &Path, line: &str) {
         fs::write(self.dir.path().join("on_enter"), format!("{line}\n")).unwrap();
         let target = self.dir.path().join("on_enter_target");
         fs::write(target, file.display().to_string()).unwrap();
     }
 
-    pub(crate) fn sends(&self) -> Vec<String> {
+    pub fn sends(&self) -> Vec<String> {
         events_in(&self.dir.path().join("sends"))
     }
 
-    pub(crate) fn phases(&self) -> Vec<String> {
+    pub fn phases(&self) -> Vec<String> {
         events_in(&self.dir.path().join("phases"))
     }
 
     /// The text of the last loaded paste buffer.
-    pub(crate) fn body(&self) -> String {
+    pub fn body(&self) -> String {
         fs::read_to_string(self.dir.path().join("body")).unwrap_or_default()
     }
 
     /// The subcommands run against `session`'s pane, in order.
-    pub(crate) fn pane_calls(&self, session: &str) -> Vec<String> {
+    pub fn pane_calls(&self, session: &str) -> Vec<String> {
         let target = format!("={session}:");
         events_in(&self.dir.path().join("argv"))
             .into_iter()
@@ -165,12 +165,12 @@ exit 0
             .collect()
     }
 
-    pub(crate) fn die_on_enter(&self) {
+    pub fn die_on_enter(&self) {
         fs::write(self.dir.path().join("pane_model"), "1").unwrap();
         fs::write(self.dir.path().join("die_on_enter"), "1").unwrap();
     }
 
-    pub(crate) fn set_dead(&self, dead: bool) {
+    pub fn set_dead(&self, dead: bool) {
         let flag = self.dir.path().join("dead");
         fs::write(self.dir.path().join("pane_model"), "1").unwrap();
         if dead {
@@ -186,7 +186,7 @@ exit 0
         }
     }
 
-    pub(crate) fn clear(&self) {
+    pub fn clear(&self) {
         for file in ["argv", "sends", "sent", "body"] {
             let _ = fs::remove_file(self.dir.path().join(file));
         }
@@ -199,7 +199,7 @@ fn events_in(file: &Path) -> Vec<String> {
 }
 
 fn request(session: &str) -> Request<'_> {
-    crate::services::claude_tui::readiness::tests::idle_fixture(session);
+    crate::services::claude_tui::readiness::test_support::idle_fixture(session);
     Request {
         session,
         prompt: PROMPT,
@@ -220,7 +220,7 @@ impl StashAuthority for Authority {
     }
 }
 
-pub(crate) fn renderer(f: &Fixture, name: &str, mode: &str) -> PathBuf {
+pub fn renderer(f: &Fixture, name: &str, mode: &str) -> PathBuf {
     renderer_with(
         f,
         name,
@@ -231,7 +231,7 @@ pub(crate) fn renderer(f: &Fixture, name: &str, mode: &str) -> PathBuf {
     )
 }
 
-pub(crate) fn renderer_with(
+pub fn renderer_with(
     f: &Fixture,
     name: &str,
     mode: &str,
@@ -397,7 +397,7 @@ while True:
     root
 }
 /// A composer showing `body` at the prompt, as the frame renderer draws it.
-pub(crate) fn screen(body: &str) -> String {
+pub fn screen(body: &str) -> String {
     format!(
         "{}\n❯\u{a0}{}\n{}\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n",
         "─".repeat(160),
@@ -408,7 +408,7 @@ pub(crate) fn screen(body: &str) -> String {
 
 /// A real pane that draws `before`, records the first payload of `frame`'s length, then draws
 /// `own`; each Enter is counted and draws `after`. Returns the pane id.
-pub(crate) fn frame_renderer(
+pub fn frame_renderer(
     f: &Fixture,
     name: &str,
     frame: &str,
@@ -491,7 +491,7 @@ while True:
     pane
 }
 
-pub(crate) fn events(root: &Path) -> Vec<String> {
+pub fn events(root: &Path) -> Vec<String> {
     fs::read_to_string(root.join("events"))
         .unwrap_or_default()
         .lines()
@@ -606,7 +606,7 @@ fn fresh_pane_waits_before_one_submission_on_listed_and_unlisted_channels() {
                     relay_last_offset: None,
                 },
             );
-            crate::services::claude_tui::readiness::tests::pre_source(&name, &transcript);
+            crate::services::claude_tui::readiness::test_support::pre_source(&name, &transcript);
             let token = Arc::new(CancelToken::new());
             let (stop, stopped) = std::sync::mpsc::channel();
             let timer_token = token.clone();
@@ -775,7 +775,7 @@ esac
         "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
     )
     .unwrap();
-    crate::services::claude_tui::readiness::tests::pre_source("scripted-idle", &transcript);
+    crate::services::claude_tui::readiness::test_support::pre_source("scripted-idle", &transcript);
     let request = request("scripted-idle");
     let authority = Authority {
         admitted: Cell::new(true),
@@ -904,7 +904,7 @@ fn every_entry_on_an_unlisted_channel_takes_the_one_submission() {
         for managed in [false, true] {
             for (label, send) in entries {
                 let session = format!("one-path-{label}-{managed}-{n}");
-                crate::services::claude_tui::readiness::tests::idle_fixture(&session);
+                crate::services::claude_tui::readiness::test_support::idle_fixture(&session);
                 tmux.clear();
                 let spy = SpyGuard::install(SpyState {
                     captures: std::iter::repeat_n(Some(IDLE.to_string()), 64).collect(),
@@ -1040,7 +1040,10 @@ fn fresh_swallowed_enter_preserves_payload_and_never_retries() {
                 relay_last_offset: None,
             },
         );
-        crate::services::claude_tui::readiness::tests::pre_source(&name, &root.join("transcript"));
+        crate::services::claude_tui::readiness::test_support::pre_source(
+            &name,
+            &root.join("transcript"),
+        );
         let send = || {
             crate::services::claude_tui::input::send_prompt_with_readiness(
                 &name,
@@ -1078,10 +1081,10 @@ mod first_key_gate;
 
 /// A warm write under `token`'s receipt sink on a scripted idle pane; with `stop`, a stop decides
 /// while the writer reads the composer, after its cancel check. Returns the payload writes.
-pub(crate) fn gated_warm_write(token: &Arc<CancelToken>, stop: bool) -> Vec<String> {
+pub fn gated_warm_write(token: &Arc<CancelToken>, stop: bool) -> Vec<String> {
     use crate::services::provider::cancel_token_claude_interrupt::StopCancel;
     let tmux = ScriptedTmux::new(&view("", false));
-    crate::services::claude_tui::readiness::tests::idle_fixture("gated-warm");
+    crate::services::claude_tui::readiness::test_support::idle_fixture("gated-warm");
     let stopper = stop.then(|| {
         let (held, go) = tmux.hold_first("capture-pane");
         let token = token.clone();

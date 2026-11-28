@@ -48,11 +48,7 @@ pub(super) fn announce(
 
 /// Logs that the thread's stored session `requested` has no hook-verified binding to resume under,
 /// and posts the channel one notice that the turn starts fresh with the thread's recent messages.
-pub(crate) async fn announce_unverified(
-    pool: Option<&sqlx::PgPool>,
-    channel: u64,
-    requested: &str,
-) {
+pub async fn announce_unverified(pool: Option<&sqlx::PgPool>, channel: u64, requested: &str) {
     tracing::warn!(
         channel_id = channel,
         requested_session_id = requested,
@@ -89,24 +85,24 @@ fn claim(channel: u64, requested: &str) -> Option<String> {
     if !claimed {
         return None;
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     (POSTED.lock().unwrap_or_else(PoisonError::into_inner)).push(requested.to_string());
     Some(requested.chars().take(8).collect())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static POSTED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// How many notices this process posted for the lost session `requested`.
-#[cfg(test)]
-pub(crate) fn posted_for_tests(requested: &str) -> usize {
+#[cfg(any(test, feature = "test-support"))]
+pub fn posted_for_tests(requested: &str) -> usize {
     let posted = POSTED.lock().unwrap_or_else(PoisonError::into_inner);
     posted.iter().filter(|posted| *posted == requested).count()
 }
 
 /// Forgets the in-process claim on `requested`, as a restart does.
-#[cfg(test)]
-pub(crate) fn forget_for_tests(requested: &str) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn forget_for_tests(requested: &str) {
     let mut announced = ANNOUNCED.lock().unwrap_or_else(PoisonError::into_inner);
     announced.retain(|(_, lost)| lost != requested);
 }

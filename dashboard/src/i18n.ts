@@ -118,6 +118,12 @@ export function I18nProvider({ language, children }: I18nProviderProps) {
     [normalizedLanguage],
   );
 
+  useEffect(() => {
+    if (typeof document !== "undefined") {
+      document.documentElement.lang = normalizedLanguage;
+    }
+  }, [normalizedLanguage]);
+
   const value = useMemo(
     () => ({
       language: normalizedLanguage,

@@ -36,7 +36,7 @@ async fn readers_s1b_host_dormant_parent_keeps_its_thread_child_dormant() {
     let boot = channel_policy::boot().unwrap();
     boot.record_child_fixture(&serde_json::from_value(init).unwrap());
     assert_eq!(boot.policy_channel(CHANNEL), PARENT);
-    assert!(!boot.dormant_channels().contains(&CHANNEL));
+    assert!(!boot.dormant_channels_for_test().contains(&CHANNEL));
     let (io, ready) = (TestIo::over(&child), Arc::new(Readiness::default()));
     child.gate.acquired();
     let tasks = hosted(&child, &io, true, &ready);

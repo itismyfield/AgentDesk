@@ -1,7 +1,7 @@
 //! After a scoped terminate the owner is woken once, only when its exclusion is gone and input
 //! still waits; a retired Claude execution loses its own admission, a newer listing keeps its own.
 use super::*;
-use crate::db::dispatched_sessions::hosted_execution::tests::{owner, record, wire};
+use crate::db::dispatched_sessions::hosted_execution::test_support::{owner, record, wire};
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedLookup, HostedLookupKey, HostedState, load_hosted_execution_pg,
 };

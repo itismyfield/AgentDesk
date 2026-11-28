@@ -17,19 +17,19 @@ use crate::services::tui_o::writer::WriterAlarm;
 mod adoption;
 mod agy;
 mod children;
-pub(crate) use adoption::{
+pub use adoption::{
     Adoption, BodyClaimed, Candidate, ClaimReason, FirstAdmission, FirstPause, FirstProof,
     LateBoundary, LegacyRun, LegacySend, SendStage, Site, first_nonce_id, first_prompt_digest,
 };
-#[cfg(test)]
-pub(crate) use adoption::{
+#[cfg(any(test, feature = "test-support"))]
+pub use adoption::{
     body_check::{BodyCheck, SinkOp},
     stored,
 };
 pub(crate) use children::RetirementTicket;
 
 #[derive(Clone, Debug, Default)]
-pub(crate) struct BootChannels {
+pub struct BootChannels {
     /// The selection and, on the home, each committed channel the selection left out.
     channels: BTreeSet<u64>,
     bindings: BTreeSet<u64>,
@@ -75,7 +75,7 @@ impl PartialEq for BootChannels {
 static BOOT: OnceLock<BootChannels> = OnceLock::new();
 
 /// The config's `tui_o` section, or its defaults when the config has none.
-pub(crate) fn tui_o_of(config: &Config) -> &TuiOConfig {
+pub fn tui_o_of(config: &Config) -> &TuiOConfig {
     TuiOConfig::or_default(config.tui_o.as_ref())
 }
 
@@ -248,7 +248,7 @@ fn all_tui_kinds(config: &Config) -> Result<BTreeMap<u64, RuntimeHandoffKind>> {
 }
 
 impl BootChannels {
-    pub(crate) fn validate(config: &Config) -> Result<Self> {
+    pub fn validate(config: &Config) -> Result<Self> {
         let tui_o = tui_o_of(config);
         let mut kinds = selected_kinds(config, true)?;
         let all_selected: BTreeSet<u64> = kinds.keys().copied().collect();
@@ -285,6 +285,15 @@ impl BootChannels {
             execution: Arc::default(),
             execution_install: Arc::default(),
         })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn seeded_for_test(
+        self,
+        config: &Config,
+        stored: impl FnOnce(&BTreeSet<u64>, bool) -> std::io::Result<BTreeMap<u64, Adoption>>,
+    ) -> Result<Self> {
+        self.seeded(config, stored)
     }
 
     /// Starts each selected channel's adoption. The store is read only for an enabled writer with
@@ -373,8 +382,13 @@ impl BootChannels {
     }
 
     /// Every channel O may own here: the selection plus, on the home, its kept committed channels.
-    pub(crate) fn channels(&self) -> &BTreeSet<u64> {
+    pub fn channels(&self) -> &BTreeSet<u64> {
         &self.channels
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn selected_for_test(&self) -> &BTreeSet<u64> {
+        self.selected()
     }
 
     /// The channels the boot config selected, for restart-required comparison.
@@ -419,6 +433,11 @@ impl BootChannels {
         )
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn dormant_channels_for_test(&self) -> &BTreeSet<u64> {
+        self.dormant_channels()
+    }
+
     /// Installed dormant policy, kept fixed across live config reloads.
     pub(crate) fn dormant_channels(&self) -> &BTreeSet<u64> {
         &self.dormant_channels
@@ -428,36 +447,41 @@ impl BootChannels {
         self.late_adopt_capable
     }
 
-    pub(crate) fn turn(&self) -> &crate::services::tui_o::turn_mode::TurnConfig {
+    pub fn turn(&self) -> &crate::services::tui_o::turn_mode::TurnConfig {
         &self.turn
     }
 
     /// The boot kind of a member, or of the parent a resolved child inherits its policy from.
-    pub(crate) fn kind(&self, channel: u64) -> Option<RuntimeHandoffKind> {
+    pub fn kind(&self, channel: u64) -> Option<RuntimeHandoffKind> {
         let configured = self.kinds.get(&channel).copied();
         configured.or_else(|| Some(self.child(channel)?.ok()?.kind))
     }
 
-    pub(crate) fn site(&self) -> &Site {
+    pub fn site(&self) -> &Site {
         &self.site
     }
 
     /// `cluster.instance_id` when clustering is on: the id the home judgement used.
-    pub(crate) fn configured_id(&self) -> Option<&str> {
+    pub fn configured_id(&self) -> Option<&str> {
         self.configured_id.as_deref()
     }
 
     /// The adoption of a selected channel; none off the home or while the writer is off.
-    pub(crate) fn candidate(&self, channel: u64) -> Option<&Candidate> {
+    pub fn candidate(&self, channel: u64) -> Option<&Candidate> {
         self.candidates.get(&channel)
     }
 
-    pub(crate) fn execution(&self, channel: u64) -> Option<super::ownership::execution::View> {
+    pub fn execution(&self, channel: u64) -> Option<super::ownership::execution::View> {
         self.execution
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&channel)
             .cloned()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn output_candidate_for_test(&self, channel: u64) -> Option<Candidate> {
+        self.output_candidate(channel)
     }
 
     pub(crate) fn output_candidate(&self, channel: u64) -> Option<Candidate> {
@@ -469,7 +493,7 @@ impl BootChannels {
             .map(|candidate| candidate.with_init_scope(self.init_scope_view()))
     }
 
-    pub(crate) fn install_execution(
+    pub fn install_execution(
         &self,
         channel: u64,
         permit: Option<Result<Arc<super::ownership::execution::OwnerPermit>, String>>,
@@ -545,7 +569,7 @@ impl BootChannels {
             .insert(channel, view);
     }
 
-    pub(crate) fn suspend_execution(&self, channel: u64, reason: String, temporary: bool) {
+    pub fn suspend_execution(&self, channel: u64, reason: String, temporary: bool) {
         use super::ownership::execution::View;
         let _install = self
             .execution_install
@@ -576,7 +600,7 @@ impl BootChannels {
             );
     }
 
-    pub(crate) fn resume_execution(
+    pub fn resume_execution(
         &self,
         channel: u64,
         next: Option<&Arc<super::ownership::execution::OwnerPermit>>,
@@ -628,8 +652,8 @@ impl BootChannels {
     }
 
     /// Every selected channel starts in `state`, as `seeded` would leave it on the home.
-    #[cfg(test)]
-    pub(crate) fn adopted(mut self, state: Adoption) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn adopted(mut self, state: Adoption) -> Self {
         self.candidates = self
             .channels
             .iter()
@@ -638,7 +662,7 @@ impl BootChannels {
         self
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn foreign(mut self, home: &str) -> Self {
         self.site = Site::Foreign { home: home.into() };
         self.channels = self.selected.clone();
@@ -677,7 +701,7 @@ fn site(config: &Config, selects: bool) -> Result<(Site, Option<String>)> {
     Ok((site, Some(local)))
 }
 
-pub(crate) fn install(config: &Config) -> Result<()> {
+pub fn install(config: &Config) -> Result<()> {
     crate::services::session_host::surface_policy::install_policy_channel(
         super::cutover::policy_channel,
     );
@@ -699,7 +723,7 @@ pub(crate) fn install(config: &Config) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn boot() -> Option<&'static BootChannels> {
+pub fn boot() -> Option<&'static BootChannels> {
     BOOT.get()
 }
 

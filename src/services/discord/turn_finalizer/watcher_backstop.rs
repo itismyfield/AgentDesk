@@ -1,13 +1,4 @@
-//! #3479 r9 — watcher far-backstop liveness re-check split out of
-//! `turn_finalizer.rs`.
-//!
-//! PURE MOVE (no logic change): the proven-terminal fast-path tunables
-//! (`WATCHER_BACKSTOP_TERMINAL_PROBE_INTERVAL` / `WATCHER_BACKSTOP_TERMINAL_STREAK`)
-//! and the reconciler's terminal-or-defer verdict pair
-//! (`watcher_backstop_turn_is_terminal` / `watcher_backstop_signal_is_terminal`),
-//! plus the pure signal-truth-table unit test. The parent re-imports the
-//! consts + fns (`use self::watcher_backstop::{...}`) for the `reconcile` loop,
-//! which passes each ledger entry's key.
+//! Liveness checks for the watcher backstop's fast probe and expired deadline.
 
 use super::*;
 
@@ -42,7 +33,7 @@ pub(super) const WATCHER_BACKSTOP_TERMINAL_STREAK: u8 = 2;
 ///     transcript still says busy — absence proves nothing about the TURN;
 ///     dead/absent authority stays with the far horizon, never the fast path.
 ///   * live-but-`paused` (a Discord turn took the session over) → defer.
-///   * else `watcher_backstop_signal_is_terminal` on the transcript: `Done`
+///   * else check the completion signal on the transcript: `Done`
 ///     terminal only once the relay-space produced frontier is delivery-confirmed
 ///     (or the natural far-backstop escape fires, or O owns the channel's TUI body);
 ///     `PausedLive` defers; `Unknown`
@@ -54,6 +45,15 @@ pub(super) fn watcher_backstop_turn_is_terminal(
     provider: &ProviderKind,
     at_deadline: bool,
 ) -> bool {
+    watcher_backstop_check(shared, turn, provider, at_deadline).is_ok()
+}
+
+pub(super) fn watcher_backstop_check(
+    shared: &Arc<SharedData>,
+    turn: impl Into<BackstopTurn>,
+    provider: &ProviderKind,
+    at_deadline: bool,
+) -> Result<(), &'static str> {
     let BackstopTurn { channel_id, ledger } = turn.into();
     let inflight_state =
         crate::services::discord::inflight::load_inflight_state(provider, channel_id.get());
@@ -68,18 +68,23 @@ pub(super) fn watcher_backstop_turn_is_terminal(
             Some(tmux) => shared.tmux_watchers.by_tmux_session.get(tmux),
             None => shared.tmux_watchers.get(&channel_id),
         };
-        let Some(handle) = handle else {
-            match herdr_hold.clone() {
-                Some(source) => break 'source source,
-                None => return at_deadline,
+        let handle = handle.ok_or("watcher_handle_missing").and_then(|handle| {
+            if handle.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                Err("watcher_handle_cancelled")
+            } else if handle.heartbeat_stale() {
+                Err("watcher_heartbeat_stale")
+            } else {
+                Ok(handle)
             }
+        });
+        let handle = match handle {
+            Ok(handle) => handle,
+            Err(reason) => match herdr_hold.clone() {
+                Some(source) => break 'source source,
+                None if at_deadline => return Ok(()),
+                None => return Err(reason),
+            },
         };
-        if handle.cancel.load(std::sync::atomic::Ordering::Relaxed) || handle.heartbeat_stale() {
-            match herdr_hold.clone() {
-                Some(source) => break 'source source,
-                None => return at_deadline,
-            }
-        }
         (
             handle.tmux_session_name.clone(),
             handle.output_path.clone(),
@@ -88,7 +93,7 @@ pub(super) fn watcher_backstop_turn_is_terminal(
         // dashmap `Ref` dropped here, BEFORE the (blocking) pane capture below.
     };
     if paused {
-        return false;
+        return Err("watcher_paused");
     }
     let runtime_binding =
         crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&tmux_session_name);
@@ -153,7 +158,11 @@ pub(super) fn watcher_backstop_turn_is_terminal(
     ) == Ok(true);
     let delivery_confirmed_or_natural_deadline_escape =
         o_owns_body || delivery_confirmed || at_deadline;
-    if matches!(signal, CompletionSignal::Done) && !delivery_confirmed && !o_owns_body {
+    if at_deadline
+        && matches!(signal, CompletionSignal::Done)
+        && !delivery_confirmed
+        && !o_owns_body
+    {
         tracing::warn!(
             channel_id = channel_id.get(),
             provider = %provider.as_str(),
@@ -165,7 +174,7 @@ pub(super) fn watcher_backstop_turn_is_terminal(
             "watcher backstop observed Done before delivery confirmation"
         );
     }
-    watcher_backstop_signal_is_terminal(
+    watcher_backstop_signal_check(
         signal,
         at_deadline && herdr_hold.is_none(),
         delivery_confirmed_or_natural_deadline_escape,
@@ -332,16 +341,18 @@ fn watcher_backstop_produced_terminal_end(
 /// idle, and probing it every 15s would amplify the old once-per-1800s
 /// exposure ~120× (and block the actor task). Only the NATURAL at-deadline
 /// re-check (`true`) consults `pane_ready` — lazily, only on `Unknown`.
-pub(super) fn watcher_backstop_signal_is_terminal(
+fn watcher_backstop_signal_check(
     signal: CompletionSignal,
     allow_pane_probe: bool,
     delivery_confirmed: bool,
     pane_ready: impl FnOnce() -> bool,
-) -> bool {
+) -> Result<(), &'static str> {
     match signal {
-        CompletionSignal::PausedLive => false,
-        CompletionSignal::Done => delivery_confirmed,
-        CompletionSignal::Unknown => allow_pane_probe && pane_ready(),
+        CompletionSignal::PausedLive => Err("transcript_paused_live"),
+        CompletionSignal::Done if delivery_confirmed => Ok(()),
+        CompletionSignal::Done => Err("delivery_unconfirmed"),
+        CompletionSignal::Unknown if allow_pane_probe && pane_ready() => Ok(()),
+        CompletionSignal::Unknown => Err("transcript_unknown"),
     }
 }
 
@@ -459,7 +470,8 @@ mod tests {
             );
             std::fs::write(&marker, "herdr").unwrap();
             assert!(terminal(true), "an unindexed prior row concedes");
-            let mut owner = crate::db::dispatched_sessions::hosted_execution::tests::owner("1");
+            let mut owner =
+                crate::db::dispatched_sessions::hosted_execution::test_support::owner("1");
             owner.logical_key = session.clone();
             let _live = token.prepare_herdr_interrupt(ProviderKind::Claude, &owner);
             assert!(!terminal(true), "a live Herdr turn outlasts the deadline");
@@ -746,7 +758,8 @@ mod tests {
             let path = dir.path().join("rewritten.jsonl");
             std::fs::write(&path, &seen_start).unwrap();
             let held = HeldTurn::new(&path, 0, &path);
-            held.herdr.own_start_observed(seen_start.len() as u64, "a");
+            held.herdr
+                .own_start_observed_for_test(seen_start.len() as u64, "a");
             let inode = std::fs::metadata(&path).unwrap().ino();
             for (rewrite, ends) in [("b", false), ("a", true)] {
                 std::fs::write(&path, turn(rewrite)).unwrap();
@@ -923,52 +936,46 @@ mod tests {
         use std::cell::Cell;
         // Unknown + fast path: non-terminal AND the pane capture must not run.
         let captured = Cell::new(false);
-        assert!(!watcher_backstop_signal_is_terminal(
-            CompletionSignal::Unknown,
-            false,
-            false,
-            || {
+        assert_eq!(
+            watcher_backstop_signal_check(CompletionSignal::Unknown, false, false, || {
                 captured.set(true);
                 true
-            }
-        ));
+            }),
+            Err("transcript_unknown")
+        );
         assert!(
             !captured.get(),
             "the 15s fast-path probe must never run a blocking pane capture"
         );
         // Unknown + at-deadline: pane fallback decides (both directions).
-        assert!(watcher_backstop_signal_is_terminal(
-            CompletionSignal::Unknown,
-            true,
-            false,
-            || true
-        ));
-        assert!(!watcher_backstop_signal_is_terminal(
-            CompletionSignal::Unknown,
-            true,
-            false,
-            || false
-        ));
+        assert_eq!(
+            watcher_backstop_signal_check(CompletionSignal::Unknown, true, false, || true),
+            Ok(())
+        );
+        assert_eq!(
+            watcher_backstop_signal_check(CompletionSignal::Unknown, true, false, || false),
+            Err("transcript_unknown")
+        );
         // Done: terminal only after delivery confirmation, in both probe modes.
         for probe in [false, true] {
-            assert!(watcher_backstop_signal_is_terminal(
-                CompletionSignal::Done,
-                probe,
-                true,
-                || unreachable!("Done must not consult the pane")
-            ));
-            assert!(!watcher_backstop_signal_is_terminal(
-                CompletionSignal::Done,
-                probe,
-                false,
-                || unreachable!("Done must not consult the pane")
-            ));
-            assert!(!watcher_backstop_signal_is_terminal(
-                CompletionSignal::PausedLive,
-                probe,
-                true,
-                || unreachable!("PausedLive must not consult the pane")
-            ));
+            assert_eq!(
+                watcher_backstop_signal_check(CompletionSignal::Done, probe, true, || {
+                    unreachable!("Done must not consult the pane")
+                }),
+                Ok(())
+            );
+            assert_eq!(
+                watcher_backstop_signal_check(CompletionSignal::Done, probe, false, || {
+                    unreachable!("Done must not consult the pane")
+                }),
+                Err("delivery_unconfirmed")
+            );
+            assert_eq!(
+                watcher_backstop_signal_check(CompletionSignal::PausedLive, probe, true, || {
+                    unreachable!("PausedLive must not consult the pane")
+                }),
+                Err("transcript_paused_live")
+            );
         }
     }
 

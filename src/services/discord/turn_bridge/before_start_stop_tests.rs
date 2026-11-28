@@ -293,11 +293,11 @@ fn coldstop_closed_drops_callback_and_own_start_is_negative_evidence() {
     })));
     state.user_stop.store(true, Ordering::Release);
     assert!(prelaunch_closed(Some(&actor)).unwrap());
-    state.own_start_observed(1, "later-start");
+    state.own_start_observed_for_test(1, "later-start");
     assert_eq!(fired.load(Ordering::Relaxed), 0);
     let (actor, _) = prepared(ProviderKind::Codex, 915);
     let state = actor.herdr_interrupt_state().unwrap();
-    state.own_start_observed(1, "own");
+    state.own_start_observed_for_test(1, "own");
     finish_execution(Some(&actor), false);
     state.user_stop.store(true, Ordering::Release);
     assert_eq!(seal_exit(&actor, false, false), ExitDecision::Hold);

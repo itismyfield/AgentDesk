@@ -646,6 +646,9 @@ class LoopGuard(unittest.TestCase):
                 ok, line, manifest = vistool.vistool(repo, repo / "partition.json", "LOW", out_dir=Path(tmp) / "out",
                                                      apply=True, log=lambda *a, **k: None)
             status = subprocess.run(git[:3] + ["status", "--porcelain"], capture_output=True, text=True).stdout
+            listed = (manifest.get("test_cfg_list") or {}).get("file")
+            if listed:
+                manifest["test_cfg_items"] = json.loads((Path(tmp) / "out" / listed).read_text())["items"]
             return ok, line, calls, status, (Path(tmp) / "out" / "vistool-LOW.patch").exists(), manifest
 
     def test_unrepaired_lower_visibility_error_fails_closed(self):
@@ -723,6 +726,20 @@ class LoopGuard(unittest.TestCase):
         ok, line, *_, manifest = self.scripted([([thing("restricted")], []), ([], [])])
         self.assertEqual((ok, [e["after"] for e in manifest["final_edits"]]), (True, ["pub(crate) struct Thing {"]))
 
+    def test_e0616_path_is_read_by_the_side_that_reported_it(self):
+        # Lower names its own `core::core::Point`; upper names the outer one `probe_lower::core::Point`.
+        def nested(repo):
+            with open(repo / "src/core.rs", "a") as f:
+                f.write("\npub(crate) mod core {\n    pub(crate) struct Point {\n        pub(crate) x: u32,\n    }\n}\n")
+
+        field = lambda path: {"level": "error", "code": {"code": "E0616"}, "children": [], "spans": [],
+                              "message": f"field `x` of struct `{path}` is private"}
+        for local, path, after in ((True, "core::core::Point", "        pub x: u32,"),
+                                   (False, "probe_lower::core::Point", "    pub x: u32,")):
+            first = ([field(path)], []) if local else ([], [field(path)])
+            ok, line, *_, manifest = self.scripted([first, ([], [])], nested)
+            self.assertEqual((ok, [e["after"] for e in manifest["final_edits"]]), (True, [after]), line)
+
     def test_upper_test_use_of_a_gated_lower_item_is_test_cfg(self):
         # A method in a `#[cfg(test)] impl` (one shares its name with an ungated method) and a fn under
         # `cfg(all(test, unix))`: lower builds none of them, so the shadow line and the list must count them.
@@ -744,6 +761,41 @@ class LoopGuard(unittest.TestCase):
         gone = leak("crate-private", "Gone", "src/core.rs", "pub(crate) struct Token;")
         ok, line, *_ = self.scripted([([gone], [])])
         self.assertEqual((ok, line.split(" crate=")[0]), (False, "VISTOOL_FAIL lower_probe_broken"))
+
+    def test_free_fn_in_a_nested_gated_mod_inherits_the_parent_gate(self):
+        # mkrxcfg-1 review P2-2: the fn has no gate of its own, only the `#[cfg(test)] mod` around it. Without
+        # restricted_defs' block-range check it would be a gate-free restricted namesake and go glob_hidden.
+        at = []
+
+        def gated(repo):
+            core = repo / "src/core.rs"
+            text = core.read_text() + "\n#[cfg(test)]\npub(crate) mod fixtures {\n    pub(crate) mod deep {\n" \
+                                      "        pub(crate) fn seeded() {}\n    }\n}\n"
+            core.write_text(text)
+            at.append(text.split("\n").index("        pub(crate) fn seeded() {}") + 1)
+
+        use = {"level": "error", "code": {"code": "E0425"}, "_test": True, "children": [],
+               "message": "cannot find function `seeded` in module `crate::core::fixtures::deep`",
+               "spans": [{"is_primary": True, "file_name": "src/app.rs", "line_start": 30, "line_end": 30}]}
+        ok, line, *_, manifest = self.scripted([([], [use])], gated)
+        self.assertTrue(ok and " test_cfg=1 " in line, (line, manifest["residue"]))
+        self.assertEqual([(e["name"], e["definition"]) for e in manifest["test_cfg_items"]],
+                         [("seeded", f"src/core.rs:{at[0]}")])
+
+    def test_parent_gate_kinds_decide_test_cfg_or_glob_hidden(self):
+        # Only a gate that holds under `test` alone hides the nested fn from a dependency build.
+        cases = [("#[cfg(test)]", "test_cfg"), ("#[cfg(all(test, unix))]", "test_cfg"),
+                 ("#[cfg(any(test, all(unix, test)))]", "test_cfg"), ("#[cfg(any(test, unix))]", "glob_hidden"),
+                 ("#[cfg(not(test))]", "glob_hidden"), ("#[cfg(any(not(test), unix))]", "glob_hidden"),
+                 ('#[cfg(any(test, feature = "test-support"))]', "glob_hidden"),
+                 ('#[cfg(all(any(test, feature = "test-support"), unix))]', "glob_hidden")]
+        layout = SimpleNamespace(x_files={"src/a.rs"}, test_only=set())
+        use = {"level": "error", "code": {"code": "E0425"}, "_test": True, "children": [], "spans": [],
+               "message": "cannot find function `seeded` in module `crate::a::fixtures`"}
+        for gate, want in cases:
+            src = [gate, "pub(crate) mod fixtures {", "    pub(crate) fn seeded() {}", "}"]
+            got = vistool.classify_residue(use, vistool.restricted_defs(layout, lambda rel: src))
+            self.assertEqual(got, want, gate)
 
 
 class TestCfgList(unittest.TestCase):
@@ -864,6 +916,68 @@ class RealMode(unittest.TestCase):
         with self.assertRaises(vistool.VisFail) as caught:
             probe.accept({"residue": dict({k: {"count": 0} for k in vistool.RESIDUES}, test_cfg={"count": 2})})
         self.assertEqual((caught.exception.reason, caught.exception.detail), ("residue", "test_cfg=2"))
+
+
+# cargo stand-in: per `-p` package, print each spec diagnostic until its file holds the widened text.
+FAKE_CARGO = """import json, sys
+from pathlib import Path
+ws, spec = Path.cwd(), json.loads(Path(sys.argv[0]).with_suffix(".json").read_text())
+member, lib = spec["libs"][sys.argv[sys.argv.index("-p") + 1]]
+out = [d for rel, done, d in spec["diags"].get(member, []) if done not in (ws / rel).read_text()]
+for d in out:
+    print(json.dumps({"reason": "compiler-message", "manifest_path": str(ws / member / "Cargo.toml"),
+                      "target": {"src_path": str(ws / lib)}, "message": d}))
+sys.exit(101 if out else 0)
+"""
+STRUCT = "pub(crate) struct {} {{\n    pub(crate) id: u32,\n}}\n"
+# The lower lib path leaves its member dir (`../upper/src/low/lib.rs`), like adk-runtime's `../../src`.
+OUTSIDE = {"lower/Cargo.toml": '[package]\nname = "lower"\nversion = "0.1.0"\nedition = "2024"\n\n'
+                               '[lib]\npath = "../upper/src/low/lib.rs"\n',
+           "upper/src/low/lib.rs": "pub(crate) mod a;\npub(crate) mod b;\npub(crate) mod lower;\n",
+           # A module named like the crate: `lower::b::Context` from upper is b.rs, not this one.
+           "upper/src/low/lower.rs": "pub(crate) mod b {\n    pub(crate) struct Context(pub(crate) u32, u16,);\n}\n",
+           "upper/src/low/a.rs": STRUCT.format("Context") + STRUCT.format("Config"),
+           "upper/src/low/b.rs": STRUCT.format("Context")}
+
+
+def diag(code, message, at=None):
+    note = [{"message": "defined here", "spans": [{"file_name": at, "line_start": 4, "line_end": 4}]}] if at else []
+    return {"level": "error", "code": {"code": code}, "message": message, "children": note,
+            "spans": [{"is_primary": True, "file_name": "upper/src/lib.rs", "line_start": 3, "line_end": 3,
+                       "column_start": 5}]}
+
+
+class RealOutsideMember(unittest.TestCase):
+    def test_lower_lib_outside_its_member_dir(self):
+        a, b, inner = "upper/src/low/a.rs", "upper/src/low/b.rs", "upper/src/low/lower.rs"
+        cases = [
+            # RED before: the resolver sided a.rs by member dir (upper), so it was cut_residue with 0 edits.
+            ("upper", a, "pub struct Config", diag("E0603", "struct `Config` is private", a),
+             "VISTOOL_OK", [(a, "pub struct Config {")]),
+            # RED before: its src_path is outside lower/, so run_check dropped it and the run was cargo_failed.
+            ("lower", a, "never", diag("E0425", "cannot find value `gone` in this scope", a),
+             "VISTOOL_FAIL lower_probe_broken", []),
+            # RED before: same-named `Context` structs left this E0616 (no definition span) unresolved, and
+            # read as module path `lower::b` it picked lower.rs's struct.
+            ("upper", b, "pub id", diag("E0616", "field `id` of struct `lower::b::Context<u8>` is private"),
+             "VISTOOL_OK", [(b, "    pub id: u32,")]),
+            # RED before: rewriting the tuple fields dropped the trailing comma (non_vis_edit).
+            ("upper", inner, "pub u32", diag("E0616", "field `0` of struct `lower::lower::b::Context` is private"),
+             "VISTOOL_OK", [(inner, "    pub(crate) struct Context(pub u32, u16,);")]),
+        ]
+        for member, rel, done, d, want_line, want_edits in cases:
+            with self.subTest(d["message"]), tempfile.TemporaryDirectory() as tmp:
+                repo, _ = real_repo(Path(tmp), OUTSIDE)
+                # Keep the diagnostic stub distinct from the runner cargo shim.
+                cargo = Path(tmp) / "fake-cargo"
+                cargo.write_text(f"#!{sys.executable}\n{FAKE_CARGO}")
+                cargo.chmod(0o755)
+                cargo.with_suffix(".json").write_text(json.dumps({"diags": {member: [[rel, done, d]]}, "libs": {
+                    "lower": ["lower", "upper/src/low/lib.rs"], "upper": ["upper", "upper/src/lib.rs"]}}))
+                ok, line, manifest = vistool_real.real(repo, "lower", "upper", out_dir=Path(tmp) / "out",
+                                                       cargo=str(cargo), log=lambda *a, **k: None)
+                self.assertTrue(line.startswith(want_line + " "), (line, manifest.get("fail")))
+                self.assertEqual([(e["file"], e["after"]) for e in manifest["final_edits"]], want_edits)
 
 
 # Wrappers and incremental settings of the caller (CI's global RUSTC_WRAPPER=sccache, cargo-shim's

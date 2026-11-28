@@ -103,11 +103,11 @@ mod login_tests {
             return;
         }
         let (_temp, root, _) = crate::config::test_instance::environment::login_fixture_for_tests();
-        let output = crate::config::test_instance::tests::command(&root)
+        let output = crate::config::test_instance::test_support::command(&root)
             .args(["--exact", selector, "--nocapture"])
             .env(CASE, "1")
             .output()
             .unwrap();
-        crate::config::test_instance::tests::assert_single_test_passed(&output, selector);
+        crate::config::test_instance::test_support::assert_single_test_passed(&output, selector);
     }
 }

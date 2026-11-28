@@ -1,33 +1,32 @@
 pub(crate) mod agent_channels;
-pub mod agent_identity;
-pub mod agent_protocol;
-pub mod agent_recovery;
+pub use adk_runtime::services::agent_identity;
+pub use adk_runtime::services::agent_protocol;
+pub use adk_runtime::services::agent_recovery;
 pub mod agents;
-pub(crate) mod agy_acp;
-pub mod analytics;
+pub(crate) use adk_runtime::services::agy_acp;
+pub use adk_runtime::services::analytics;
 pub mod api_friction;
 pub mod auto_queue;
 pub mod automation_candidate_contract;
 pub mod automation_candidate_materializer;
 pub mod campaign_execution;
-pub(crate) mod channel_roles;
-pub mod claude;
-pub(crate) mod claude_command;
-pub mod claude_compact_context;
-pub mod claude_compact_trigger;
-pub mod claude_tui;
-pub mod cluster;
-pub mod codex;
+pub(crate) use adk_runtime::services::channel_roles;
+pub use adk_runtime::services::claude;
+pub(crate) use adk_runtime::services::claude_command;
+pub use adk_runtime::services::claude_compact_context;
+pub use adk_runtime::services::claude_compact_trigger;
+pub use adk_runtime::services::claude_tui;
+pub use adk_runtime::services::cluster;
+pub use adk_runtime::services::codex;
 pub mod codex_tmux_wrapper;
-pub mod codex_tui;
+pub use adk_runtime::services::codex_tui;
 // Storage primitives remain dormant until the input actor is wired.
-pub mod cswap;
-pub(crate) mod dcserver_singleton;
+pub use adk_runtime::services::cswap;
+pub(crate) use adk_runtime::services::dcserver_singleton;
 pub mod decision_gate;
 pub mod discord;
 pub mod discord_config_audit;
-#[allow(dead_code)]
-pub(crate) mod tui_input;
+pub(crate) use adk_runtime::services::tui_input;
 // #1693: `discord_delivery` moved to `dispatches::discord_delivery`. The
 // flat path is preserved as a re-export so existing import sites and
 // tests keep working without churn.
@@ -35,8 +34,8 @@ pub(crate) mod tui_input;
 pub(crate) use dispatches::discord_delivery;
 pub(crate) mod calendar_sync;
 pub mod discord_dm_reply_store;
-pub mod disk_monitor;
-pub mod dispatch_gate;
+pub use adk_runtime::services::disk_monitor;
+pub use adk_runtime::services::dispatch_gate;
 pub mod dispatch_watchdog;
 pub mod dispatched_sessions;
 pub mod dispatches;
@@ -44,12 +43,12 @@ pub mod dispatches_followup;
 pub(crate) mod engine_runtime;
 pub(crate) mod escalation_cooldown;
 pub mod explicit_auth_route;
-pub mod git;
+pub use adk_runtime::services::git;
 pub mod github_issue_creation;
 pub(crate) mod hang_forensics;
 pub mod health_diagnostics;
-pub(crate) mod herdr_admission;
-pub(crate) mod herdr_launch;
+pub(crate) use adk_runtime::services::herdr_admission;
+pub(crate) use adk_runtime::services::herdr_launch;
 pub(crate) mod imsg_reply;
 pub mod issue_announcements;
 pub mod kakao;
@@ -58,12 +57,9 @@ pub mod kanban;
 pub mod kanban_cards;
 pub mod maintenance;
 pub(crate) mod manual_steer;
-pub mod mcp_config;
-pub mod memory;
-// #3034: 1 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during message_outbox dead-code cleanup.
-#[allow(dead_code)]
-pub mod message_outbox;
+pub use adk_runtime::services::mcp_config;
+pub use adk_runtime::services::memory;
+pub use adk_runtime::services::message_outbox;
 pub(crate) mod message_outbox_circuit_authority;
 #[cfg(test)]
 mod message_outbox_circuit_authority_tests;
@@ -71,52 +67,53 @@ pub mod message_outbox_recovery;
 pub(crate) mod message_outbox_recovery_support;
 #[cfg(test)]
 mod message_outbox_recovery_tests;
-pub mod monitoring_store;
-pub mod observability;
+pub use adk_runtime::services::monitoring_store;
+#[cfg(not(test))]
+pub use adk_runtime::services::observability;
+#[cfg(test)]
+pub mod observability {
+    pub use adk_runtime::services::observability::*;
+
+    #[path = "env_runtime_lock_tests.rs"]
+    mod test_support;
+}
 pub mod onboarding;
-pub mod opencode;
-pub(crate) mod org_catalog;
-pub(crate) mod pane_readiness;
+pub use adk_runtime::services::opencode;
+pub(crate) use adk_runtime::services::org_catalog;
+pub(crate) use adk_runtime::services::pane_readiness;
 // #3034: 1 residual dead-code items; scoped here so the lint stays
 // live on clean sibling modules. Remove during operator_connectors dead-code cleanup.
 #[allow(dead_code)]
 pub mod operator_connectors;
-pub mod pipeline_override;
-pub mod pipeline_routes;
-pub mod platform;
+pub use adk_runtime::services::pipeline_override;
+pub use adk_runtime::services::pipeline_routes;
+pub use adk_runtime::services::platform;
 // #3034: 2 residual dead-code items; scoped here so the lint stays
 // live on clean sibling modules. Remove during pr_summary dead-code cleanup.
-pub(crate) mod legacy_body_census;
+pub(crate) use adk_runtime::services::legacy_body_census;
 #[allow(dead_code)]
 pub mod pr_summary;
-pub mod process;
-pub(crate) mod process_boot;
-// #3034: residual dead code here is a dormant recovery-priming constructor;
-// scoped allow retained pending provider recovery cleanup. The old #2662/#2668
-// envelope/dev-role dedup stubs were retired by #3744.
-#[allow(dead_code)]
-pub mod provider;
-pub mod provider_auth;
-pub mod provider_auth_profile;
-pub mod provider_cli;
+pub use adk_runtime::services::process;
+pub(crate) use adk_runtime::services::process_boot;
+pub use adk_runtime::services::provider;
+pub use adk_runtime::services::provider_auth;
+pub use adk_runtime::services::provider_auth_profile;
+pub use adk_runtime::services::provider_cli;
 pub(crate) mod provider_error_transcript;
 pub mod provider_exec;
-// #3034: 1 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during provider_hosting dead-code cleanup.
-#[allow(dead_code)]
-pub mod provider_hosting;
-pub(crate) mod provider_output_guard;
+pub use adk_runtime::services::provider_hosting;
+pub(crate) use adk_runtime::services::provider_output_guard;
 pub mod provider_runtime;
-pub(crate) mod provider_teardown;
+pub(crate) use adk_runtime::services::provider_teardown;
 pub mod queue;
 pub mod qwen;
 pub mod qwen_tmux_wrapper;
 // Scheduling contracts remain unavailable to runtime callers until activation.
 #[cfg(test)]
 pub(crate) mod recovery_defer;
-pub(crate) mod release_source;
-pub mod remote_stub;
-pub(crate) mod resident_loops;
+pub(crate) use adk_runtime::services::release_source;
+pub use adk_runtime::services::remote_stub;
+pub(crate) use adk_runtime::services::resident_loops;
 pub mod retrospectives;
 pub mod review_decision;
 pub mod routines;
@@ -126,61 +123,43 @@ pub(crate) mod scheduling;
 pub mod service_error;
 pub mod session_activity;
 pub(crate) mod session_selector_validity;
-pub mod stream_json_cli;
-// #3034: 1 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during session_backend dead-code cleanup.
-#[allow(dead_code)]
-pub mod session_backend;
-pub mod session_forwarding;
-// Consumer-free until call sites move onto the host boundary.
-#[allow(dead_code, unused_imports)]
-pub mod session_host;
+pub use adk_runtime::services::session_backend;
+pub use adk_runtime::services::session_forwarding;
+pub use adk_runtime::services::session_host;
+pub use adk_runtime::services::stream_json_cli;
 pub mod session_resume;
-pub mod settings;
+pub use adk_runtime::services::settings;
 pub mod slo;
 pub(crate) mod stale_turn_reconciler;
-pub(crate) mod task_completion_v1;
-// #3034: 1 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during termination_audit dead-code cleanup.
-pub(crate) mod terminal_status_formatting;
-#[allow(dead_code)]
-pub mod termination_audit;
-pub mod tmux_common;
-pub mod tmux_diagnostics;
+pub(crate) use adk_runtime::services::task_completion_v1;
+pub(crate) use adk_runtime::services::terminal_status_formatting;
+pub use adk_runtime::services::termination_audit;
+pub use adk_runtime::services::tmux_common;
+pub use adk_runtime::services::tmux_diagnostics;
 pub(crate) mod tmux_turn_liveness;
 pub mod tmux_wrapper;
 pub mod tool_output_guard;
 // Output track: the shadow and the dormant writer store, each behind an off-by-default flag.
-#[allow(dead_code)]
 pub(crate) mod tui_o {
-    pub(crate) mod alarm;
-    pub(crate) mod channel_policy;
-    pub(crate) mod cutover;
-    pub(crate) mod exact_episode;
-    pub(crate) mod exact_pg;
-    pub(crate) mod exact_submission;
-    #[cfg(all(test, unix))]
-    mod gates_m1;
-    pub(crate) mod ownership;
-    pub(crate) mod repost;
-    pub(crate) mod shadow;
-    pub(crate) mod store;
-    pub(crate) mod topology;
-    pub(crate) mod turn_mode;
-    pub(crate) mod writer;
+    pub(crate) mod cutover {
+        pub(crate) use adk_runtime::services::tui_o::cutover::*;
+        #[cfg(all(test, unix))]
+        mod child_funnel_tests;
+    }
+    pub(crate) use adk_runtime::services::tui_o::{
+        alarm, channel_policy, exact_episode, exact_pg, exact_submission, ownership, repost,
+        shadow, store, topology, turn_mode, writer,
+    };
 }
-// #3034: 4 residual dead-code items; scoped here so the lint stays
-// live on clean sibling modules. Remove during tui_prompt_dedupe dead-code cleanup.
-pub(crate) mod tui_prompt_control;
-#[allow(dead_code)]
-pub(crate) mod tui_prompt_dedupe;
-pub(crate) mod tui_turn_state;
+pub(crate) use adk_runtime::services::tui_prompt_control;
+pub(crate) use adk_runtime::services::tui_prompt_dedupe;
+pub(crate) use adk_runtime::services::tui_turn_state;
 pub mod turn_cancel_finalizer;
 pub mod turn_cancel_queue_guard;
-pub(crate) mod turn_host;
+pub(crate) use adk_runtime::services::turn_host;
 pub mod turn_lifecycle;
 pub mod turn_orchestrator;
-pub(crate) mod turn_summary_line;
+pub(crate) use adk_runtime::services::turn_summary_line;
 
 #[cfg(test)]
 mod krx_claude_tests;
@@ -195,4 +174,4 @@ mod krx_db_unix_tests;
 #[cfg(test)]
 mod provider_output_guard_tests;
 
-pub(crate) mod session_identity_metadata;
+pub(crate) use adk_runtime::services::session_identity_metadata;

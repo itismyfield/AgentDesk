@@ -20,18 +20,18 @@ use binding_events::codex::{Claim, ClaimEvidence, Decision, Fold, VerifiedProof}
 use std::{io, path::Path};
 
 mod observation;
-pub(crate) mod provenance;
+pub mod provenance;
 
 pub(super) use observation::CanonicalObservation;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct VerifiedSourceSnapshot {
+pub struct VerifiedSourceSnapshot {
     context: BindingContext,
     execution: provenance::ExecutionProofRef,
 }
 
 impl VerifiedSourceSnapshot {
-    pub(crate) fn capture(authority: &TmuxSourceAuthority<'_>) -> io::Result<Self> {
+    pub fn capture(authority: &TmuxSourceAuthority<'_>) -> io::Result<Self> {
         let context = current_context(authority)?
             .ok_or_else(|| invalid("Codex current context unavailable"))?;
         let proof = binding_events::codex::read_ownership(&context)?
@@ -57,15 +57,15 @@ impl VerifiedSourceSnapshot {
         Ok(Self { context, execution })
     }
 
-    pub(crate) fn context(&self) -> &BindingContext {
+    pub fn context(&self) -> &BindingContext {
         &self.context
     }
 
-    pub(crate) fn execution(&self) -> &provenance::ExecutionProofRef {
+    pub fn execution(&self) -> &provenance::ExecutionProofRef {
         &self.execution
     }
 
-    pub(crate) fn recheck(&self, authority: &TmuxSourceAuthority<'_>) -> io::Result<()> {
+    pub fn recheck(&self, authority: &TmuxSourceAuthority<'_>) -> io::Result<()> {
         (Self::capture(authority)? == *self)
             .then_some(())
             .ok_or_else(|| invalid("Codex captured source changed"))
@@ -73,7 +73,7 @@ impl VerifiedSourceSnapshot {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DeliveryPermission {
+pub enum DeliveryPermission {
     Allowed,
     Cancelled,
     Unknown,
@@ -91,31 +91,31 @@ enum SourceReadDecision {
     Unavailable,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static BEFORE_COMMIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = Default::default();
     static PERMISSIONS: std::cell::RefCell<std::collections::HashMap<String, DeliveryPermission>> = Default::default();
 }
-#[cfg(test)]
-pub(crate) fn set_permission_for_tests(context: &BindingContext, permission: DeliveryPermission) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_permission_for_tests(context: &BindingContext, permission: DeliveryPermission) {
     PERMISSIONS.with(|values| {
         values
             .borrow_mut()
             .insert(context.execution_nonce.clone(), permission);
     });
 }
-#[cfg(test)]
-pub(crate) fn clear_permissions_for_tests() {
+#[cfg(any(test, feature = "test-support"))]
+pub fn clear_permissions_for_tests() {
     PERMISSIONS.with(|values| values.borrow_mut().clear());
     BEFORE_COMMIT.with(|action| action.borrow_mut().take());
 }
 
-#[cfg(test)]
-pub(crate) fn before_commit_for_tests(action: impl FnOnce() + 'static) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn before_commit_for_tests(action: impl FnOnce() + 'static) {
     BEFORE_COMMIT.with(|slot| *slot.borrow_mut() = Some(Box::new(action)));
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn before_commit() {
     BEFORE_COMMIT.with(|action| {
         if let Some(action) = action.borrow_mut().take() {
@@ -125,7 +125,7 @@ fn before_commit() {
 }
 
 pub(super) fn permission(context: &BindingContext) -> DeliveryPermission {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(value) =
         PERMISSIONS.with(|values| values.borrow().get(&context.execution_nonce).copied())
     {
@@ -318,7 +318,7 @@ fn commit(
             Err(error) => Decision::Rejected(format!("{error:?}")),
         }
     };
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     before_commit();
     // A path hint cannot split a retry of the same opened native descriptor.
     let persisted_claim = match (&previous, &decision) {
@@ -348,7 +348,7 @@ fn commit(
     )
 }
 
-pub(super) fn proof_for_binding(
+pub fn proof_for_binding(
     authority: &TmuxSourceAuthority<'_>,
     context: &BindingContext,
     binding: &TuiRuntimeBinding,
@@ -373,7 +373,7 @@ pub(super) fn proof_for_binding(
     Ok(proof)
 }
 
-pub(super) fn publication_allowed(
+pub fn publication_allowed(
     authority: &TmuxSourceAuthority<'_>,
     binding: &TuiRuntimeBinding,
 ) -> bool {
@@ -381,7 +381,7 @@ pub(super) fn publication_allowed(
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn proof_for_binding_for_test(
+pub fn proof_for_binding_for_test(
     authority: &TmuxSourceAuthority<'_>,
     context: &BindingContext,
     binding: &TuiRuntimeBinding,
@@ -390,7 +390,7 @@ pub(crate) fn proof_for_binding_for_test(
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn publication_allowed_for_test(
+pub fn publication_allowed_for_test(
     authority: &TmuxSourceAuthority<'_>,
     binding: &TuiRuntimeBinding,
 ) -> bool {
@@ -542,7 +542,7 @@ pub(super) fn publish_proof(
 
 /// Records the source a successful resume spawn executed as that execution's ExplicitResume proof;
 /// the published native cursor then starts at the resume point instead of replaying history.
-pub(crate) fn record_executed_resume(
+pub fn record_executed_resume(
     context: &BindingContext,
     selected_session_id: &str,
     selected_rollout_path: &Path,
@@ -600,7 +600,7 @@ fn executed_resume(
             .and_then(|source| source_id(&source))
     };
     let source = descriptor(&probe)?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     before_commit();
     let same = |claim: &Claim| {
         (descriptor(claim)? == source)
@@ -624,7 +624,7 @@ fn executed_resume(
     )
 }
 
-pub(crate) fn observe_verified_codex_hook(
+pub fn observe_verified_codex_hook(
     payload_session: Option<&str>,
     payload: &serde_json::Value,
     hook: &HookSignal,
@@ -740,7 +740,7 @@ pub(crate) fn resolve_under_authority(authority: &TmuxSourceAuthority<'_>) -> In
     }
 }
 
-pub(crate) fn resolve_registered_claims() {
+pub fn resolve_registered_claims() {
     let sessions = {
         let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         state.channel_by_tmux.keys().cloned().collect::<Vec<_>>()
@@ -752,13 +752,13 @@ pub(crate) fn resolve_registered_claims() {
     }
 }
 
-pub(crate) fn codex_verified_discovered_channel(tmux: &str) -> Option<u64> {
+pub fn codex_verified_discovered_channel(tmux: &str) -> Option<u64> {
     tc::with_tmux_source_authority(tmux, |authority| {
         current_context(authority).ok().flatten()?.channel_id
     })
 }
 
-pub(crate) fn channel_allowed_under_source_authority(
+pub fn channel_allowed_under_source_authority(
     authority: &TmuxSourceAuthority<'_>,
     channel: u64,
 ) -> bool {
@@ -779,7 +779,7 @@ pub(crate) fn channel_allowed_under_source_authority(
     }
 }
 
-pub(crate) fn recover_discovered_codex_binding(tmux: &str, channel: u64) -> bool {
+pub fn recover_discovered_codex_binding(tmux: &str, channel: u64) -> bool {
     tc::with_tmux_source_authority(tmux, |authority| {
         recover_discovered_under_authority(authority, channel)
     })

@@ -1,5 +1,6 @@
 use super::owner_input::OwnerTurn;
 use super::*;
+use crate::db::turns::TerminalOutcome;
 use crate::services::claude::herdr_turn::retry_probe::CauseRead;
 use crate::services::claude_tui::busy_inject::Screen;
 use crate::services::discord::inflight::row_removed;
@@ -29,6 +30,9 @@ pub(in crate::services::discord) fn confirmed(refusal: &HerdrRefusal) -> Option<
     }
 }
 type Shared = Arc<crate::services::discord::SharedData>;
+
+/// A start whose recorded execution this owner can never recover: nothing was sent.
+pub(super) const RECOVERY_REFUSED: &str = "NotSent(\"hosted_recovery_refused\")";
 
 #[derive(Clone, Default)]
 pub(super) struct MissingRecovery(Arc<std::sync::atomic::AtomicBool>);
@@ -120,6 +124,28 @@ impl Failure {
         channel: poise::serenity_prelude::ChannelId,
         detail: String,
     ) -> Result<Option<bool>, String> {
+        self.dispose(shared, channel, detail, TerminalOutcome::Completed)
+            .await
+    }
+
+    /// As `discard`, for an input refused before any provider write: its origin is owed `Failed`.
+    pub(super) async fn fail(
+        self,
+        shared: Option<Shared>,
+        channel: poise::serenity_prelude::ChannelId,
+        detail: String,
+    ) -> Result<Option<bool>, String> {
+        self.dispose(shared, channel, detail, TerminalOutcome::Failed)
+            .await
+    }
+
+    async fn dispose(
+        self,
+        shared: Option<Shared>,
+        channel: poise::serenity_prelude::ChannelId,
+        detail: String,
+        outcome: TerminalOutcome,
+    ) -> Result<Option<bool>, String> {
         let notice = self.notice.clone();
         let mut notice = notice.lock().await;
         let anchor = poise::serenity_prelude::MessageId::new(self.front.1.message_id);
@@ -133,8 +159,12 @@ impl Failure {
                 {
                     return Ok(None);
                 }
-                owner
-                    .complete_claimed_locally((&self.front, self.number), self.members.len() - 1)?;
+                let claimed = (&self.front, self.number);
+                let followers = self.members.len() - 1;
+                match outcome {
+                    TerminalOutcome::Failed => owner.fail_claimed_locally(claimed, followers)?,
+                    _ => owner.complete_claimed_locally(claimed, followers)?,
+                }
                 Ok(Some(true))
             })
             .await?;
@@ -383,6 +413,9 @@ impl Failure {
             .load(std::sync::atomic::Ordering::Acquire)
             || turn.cancel.native_stop.receipt_sink().stopped_before_key();
         let unsent = !self.recovery.repaired() && !bound && error.starts_with("NotSent(");
+        if self.herdr_seed_stopped(&turn.cancel) {
+            return Err(error);
+        }
         // A refusal typed by a cause a later look may clear waits; it counts no failed start.
         if unsent
             && !stopped
@@ -416,6 +449,25 @@ impl Failure {
     }
 }
 impl Failure {
+    /// A Herdr user stop before the reserve cancels the claimed restart greeting instead of its
+    /// retry or failure; another front, or no stop, keeps its failure path.
+    fn herdr_seed_stopped(&self, cancel: &crate::services::provider::CancelToken) -> bool {
+        let stop = cancel.herdr_interrupt_state();
+        if !stop.is_some_and(|s| s.user_stop.load(std::sync::atomic::Ordering::Acquire)) {
+            return false;
+        }
+        let (front, number) = (self.front.clone(), self.number);
+        let authority =
+            crate::services::turn_orchestrator::SeedStopAuthority::Claimed { front, number };
+        let cancelled = self.mailbox.v2_request(move |slot| {
+            let owner = slot.as_mut().ok_or("V2 not adopted")?;
+            owner.cancel_seed_not_sent(authority)
+        });
+        tokio::runtime::Handle::current()
+            .block_on(cancelled)
+            .is_ok()
+    }
+
     /// The exact claim waits as `cause`; `read` then watches that cause for the drive.
     fn wait_for_retry(&self, channel: u64, cause: RetryWaitCause, read: Option<CauseRead>) {
         let (front, number) = (self.front.clone(), self.number);
@@ -577,3 +629,7 @@ mod tests;
 #[cfg(test)]
 #[path = "start_failure_missing_tests.rs"]
 mod missing_tests;
+
+#[cfg(all(test, unix))]
+#[path = "start_failure_seed_tests.rs"]
+mod seed_tests;

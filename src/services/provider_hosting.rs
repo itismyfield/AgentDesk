@@ -90,9 +90,8 @@ static PROVIDER_RUNTIME_MODE_BY_CHANNEL: LazyLock<RwLock<BTreeMap<(String, u64),
     LazyLock::new(|| RwLock::new(BTreeMap::new()));
 
 /// Serializes tests that install the process-wide hosting config.
-#[cfg(test)]
-pub(crate) static TEST_CONFIG_LOCK: LazyLock<std::sync::Mutex<()>> =
-    LazyLock::new(Default::default);
+#[cfg(any(test, feature = "test-support"))]
+pub static TEST_CONFIG_LOCK: LazyLock<std::sync::Mutex<()>> = LazyLock::new(Default::default);
 
 pub fn install_provider_hosting_config(config: &Config) {
     let mut values = BTreeMap::new();
@@ -342,7 +341,7 @@ fn channel_runtime_mode_explicit(channel: &crate::config::AgentChannel) -> Optio
 }
 
 /// Match the installed resolver precedence so hook publication agrees with driver selection.
-pub(crate) fn channel_effective_tui_request(
+pub fn channel_effective_tui_request(
     config: &Config,
     channel: &crate::config::AgentChannel,
     provider_id: &str,

@@ -157,8 +157,8 @@ fn settle_hook_prompt_id(prompt: &ObservedTuiPrompt, announced: bool) {
 }
 
 /// Ages the content, uuid and prompt-id records while preserving other keys' ages.
-#[cfg(test)]
-pub(crate) fn age_observed_prompt_records_for_tests(
+#[cfg(any(test, feature = "test-support"))]
+pub fn age_observed_prompt_records_for_tests(
     provider: &str,
     tmux_session_name: &str,
     by: Duration,

@@ -28,7 +28,7 @@ impl Scope {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct AttemptId {
+pub struct AttemptId {
     scope: Scope,
     token: u64,
 }
@@ -49,7 +49,7 @@ impl AttemptId {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Phase {
+pub enum Phase {
     MaySpawn,
     Bound { nonce: String },
     Done,
@@ -136,7 +136,7 @@ impl Registry {
 }
 
 /// Dispatch is synchronous; this guard cannot move its calling-thread identity to another thread.
-pub(crate) struct AttemptGuard {
+pub struct AttemptGuard {
     observed: Option<(AttemptId, bool)>,
     context: u64,
     _same_thread: PhantomData<Rc<()>>,
@@ -166,7 +166,7 @@ impl AttemptGuard {
 }
 
 /// Every exact-pane dispatch takes its ticket, even when it later resumes or is refused.
-pub(crate) fn begin(channel: Option<u64>, pane: Option<&str>) -> AttemptGuard {
+pub fn begin(channel: Option<u64>, pane: Option<&str>) -> AttemptGuard {
     let Some((channel, pane)) = channel.zip(pane).filter(|(c, p)| *c != 0 && !p.is_empty()) else {
         return AttemptGuard::new(None);
     };
@@ -211,7 +211,7 @@ pub(crate) fn begin(channel: Option<u64>, pane: Option<&str>) -> AttemptGuard {
 }
 
 /// The calling attempt is never inferred from the newest registry entry.
-pub(crate) fn current(channel: u64, pane: &str) -> Option<AttemptId> {
+pub fn current(channel: u64, pane: &str) -> Option<AttemptId> {
     let scope = Scope::new(channel, pane)?;
     CURRENT.with_borrow(|state| {
         state
@@ -224,7 +224,7 @@ pub(crate) fn current(channel: u64, pane: &str) -> Option<AttemptId> {
     })
 }
 
-pub(crate) fn take_ticket(id: &AttemptId) -> Option<String> {
+pub fn take_ticket(id: &AttemptId) -> Option<String> {
     tc::with_tmux_source_authority(id.pane(), |authority| {
         if !id.matches(authority) {
             return None;
@@ -274,10 +274,7 @@ pub(crate) fn bound_under(
     true
 }
 
-pub(crate) fn phase_under(
-    id: &AttemptId,
-    authority: &tc::TmuxSourceAuthority<'_>,
-) -> Option<Phase> {
+pub fn phase_under(id: &AttemptId, authority: &tc::TmuxSourceAuthority<'_>) -> Option<Phase> {
     if !id.matches(authority) {
         return None;
     }
@@ -395,7 +392,7 @@ impl Drop for AttemptGuard {
 }
 
 /// Caller holds this pane's source authority, so dispatch cannot race the snapshot.
-pub(crate) fn generation(channel: u64, authority: &tc::TmuxSourceAuthority<'_>) -> u64 {
+pub fn generation(channel: u64, authority: &tc::TmuxSourceAuthority<'_>) -> u64 {
     let Some(scope) = Scope::new(channel, authority.session()) else {
         return 0;
     };
@@ -407,7 +404,7 @@ pub(crate) fn generation(channel: u64, authority: &tc::TmuxSourceAuthority<'_>) 
 }
 
 /// Bound streams cannot spawn again; only MaySpawn blocks a clear's ticket installation.
-pub(crate) fn install_ticket(
+pub fn install_ticket(
     channel: u64,
     authority: &tc::TmuxSourceAuthority<'_>,
     epoch: u64,
@@ -439,8 +436,8 @@ pub(crate) fn install_ticket(
     true
 }
 
-#[cfg(test)]
-pub(crate) fn ticket(channel: u64, pane: &str) -> Option<String> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn ticket(channel: u64, pane: &str) -> Option<String> {
     let scope = Scope::new(channel, pane)?;
     REGISTRY
         .lock()
@@ -464,8 +461,8 @@ pub(crate) fn claim_for_tests(id: &AttemptId) -> Option<String> {
         .map(|ticket| ticket.0.clone())
 }
 
-#[cfg(test)]
-pub(crate) fn reset_for_tests() {
+#[cfg(any(test, feature = "test-support"))]
+pub fn reset_for_tests() {
     let mut registry = REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
     registry.scopes.clear();
     registry.untracked = 0;

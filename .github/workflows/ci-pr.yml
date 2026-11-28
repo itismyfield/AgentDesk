@@ -267,6 +267,7 @@ jobs:
               - 'src/config/**'
               - 'src/domain/file_sync.rs'
               - 'src/domain/intake_consent.rs'
+              - 'src/domain/retry_wait.rs'
               # domain/mod.rs re-exports the unix-only adk-base intake_consent behind cfg(unix).
               - 'src/domain/mod.rs'
               - 'src/db/**'
@@ -275,6 +276,7 @@ jobs:
               - 'src/github/**'
               - 'src/kanban/**'
               - 'src/krx_config_tests/**'
+              - 'src/launch/**'
               - 'src/runtime_layout/**'
               - 'src/server/**'
               - 'src/supervisor/**'
@@ -311,6 +313,8 @@ jobs:
               - 'src/services/replay_evidence/root_issuer.rs'
               - 'src/services/session_host/**'
               - 'src/services/session_resume/background.rs'
+              - 'src/services/session_resume/host_rebind_tests.rs'
+              - 'src/services/stale_turn_reconciler/root_lookup_tests.rs'
               # The Herdr close owner is unix-gated production code.
               - 'src/services/termination_audit/**'
               - 'src/services/tmux_common/runtime_hint_fence.rs'
@@ -344,6 +348,7 @@ jobs:
               - 'src/services/discord/health.rs'
               - 'src/services/discord/health/**'
               - 'src/services/discord/host_defer_gate.rs'
+              - 'src/services/discord/host_key_derivation/**'
               - 'src/services/discord/host_liveness.rs'
               - 'src/services/discord/host_teardown_gate/**'
               - 'src/services/discord/idle_relay_drift.rs'
@@ -398,6 +403,7 @@ jobs:
               - 'src/services/discord/session_runtime/**'
               - 'src/services/discord/settings/**'
               - 'src/services/discord/shared_data.rs'
+              - 'src/services/discord/stall_recovery.rs'
               - 'src/services/discord/status_panel_orphan_store_tests.rs'
               - 'src/services/discord/status_panel_singleton_store.rs'
               - 'src/services/discord/task_notification_delivery/**'
@@ -1163,7 +1169,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py c19a273c124eb7869a0e5dc489b99379974b9632d35224ccb613a6af00f78d6f
-          pin scripts/check-ci-runner-hardening.sh 363f3ec3b2e5f4c177865cad23a59e1344ecb3168a5e05015dd741fc7f97e7fe
+          pin scripts/check-ci-runner-hardening.sh b28938a2ae94c441cfb2d62f73240b231ca05c671eb016bf3fef168878e50b2a
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required checks
@@ -1269,7 +1275,8 @@ jobs:
           python3 scripts/ci/lib-test-artifact.py prepare-nextest
           --source "$RUNNER_TEMP/nextest" --directory "$RUNNER_TEMP/lib-test-artifact"
 
-      # The ids file and this exact list must match; run_test_lane fails a missing, extra or unexecuted id.
+      # Each ids file and its exact list must match; run_test_lane fails a missing, extra or unexecuted id.
+      # One lane per lib binary: run_test_lane cross-checks a single libtest summary.
       - name: Begin runner memory step
         continue-on-error: true
         shell: bash
@@ -1288,7 +1295,6 @@ jobs:
           --expected-ids scripts/ci/pg15_required_ids.txt --
           env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run --require-artifact --
           cargo test --lib -- --exact
-          db::postgres::tests::postgres_json_extract_0058_up_and_down_preserve_array_path_behavior
           dispatch::dispatch_cancel::pg_observability_tests::cancel_run_lookup_ignores_malformed_legacy_context
           krx_db_tests::run_owner_guard_pg_tests::cancel_rereads_dispatch_claimed_mid_cancel_pg
           krx_db_tests::run_owner_guard_pg_tests::concurrent_phase_gate_saves_serialize_on_dispatch_row_pg
@@ -1308,6 +1314,12 @@ jobs:
           services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_counts_surviving_associated_dispatch_pg
           services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_ignores_unrelated_malformed_context_pg
           services::auto_queue::cancel_run::malformed_context_pg_tests::public_end_ignores_unrelated_malformed_context_pg
+
+          python3 scripts/run_test_lane.py --lane pg --max-summaries 4
+          --expected-ids scripts/ci/pg15_required_runtime_ids.txt --
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run --require-artifact --
+          cargo test -p adk-runtime --lib -- --exact
+          db::postgres::tests::postgres_json_extract_0058_up_and_down_preserve_array_path_behavior
 
       - name: End runner memory step
         if: always()
@@ -1453,7 +1465,7 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p target/clippy-observation
-          cargo clippy --workspace --all-targets --all-features --message-format=json -- -W clippy::all | tee target/clippy-observation/diagnostics.jsonl
+          cargo clippy --workspace --all-targets --features adk-base/test-support --message-format=json -- -W clippy::all | tee target/clippy-observation/diagnostics.jsonl
           ${{ runner.environment == 'self-hosted' && 'ADK_CARGO_SLOT_HELD=1 ' || '' }}python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json --baseline scripts/clippy_warning_baseline.json --base-ref "$CLIPPY_BASE_REF"
 
       - name: End runner memory step

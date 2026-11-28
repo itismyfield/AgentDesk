@@ -303,7 +303,7 @@ fn rehydrate(rig: &Rig, session: &str) {
         relay_last_offset: None,
     };
     register_tmux_runtime_binding(&rig.name, binding);
-    crate::services::claude_tui::readiness::tests::pre_source(&rig.name, &rig.transcript());
+    crate::services::claude_tui::readiness::test_support::pre_source(&rig.name, &rig.transcript());
 }
 
 /// A's idle handoff settles before its AI turn ends; B uses that pane's binding while the
@@ -1470,7 +1470,7 @@ impl AttachedOwner {
         .unwrap();
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(self.rig.transcript(), &path).unwrap();
-        crate::services::claude_tui::readiness::tests::pre_source(&self.rig.name, &path);
+        crate::services::claude_tui::readiness::test_support::pre_source(&self.rig.name, &path);
         let context = crate::config::runtime_root()
             .unwrap()
             .join("runtime/binding_contexts/claude")
@@ -1483,7 +1483,7 @@ impl AttachedOwner {
             "export AGENTDESK_BINDING_CONTEXT='{}'\ncd '{}'\nexec 'claude' '--session-id' '{session}'\n",
             context.display(), project.display(),
         )).unwrap();
-        crate::services::claude_tui::readiness::tests::pre_source(&self.rig.name, &path);
+        crate::services::claude_tui::readiness::test_support::pre_source(&self.rig.name, &path);
         (session, path)
     }
 
@@ -1910,7 +1910,7 @@ fn pending_observer_becomes_readable(via_hook: bool) {
         last_offset: 0,
         relay_last_offset: None,
     };
-    let proposal = Proposal::for_binding(
+    let proposal = Proposal::for_binding_for_test(
         Some(owner.rig.channel),
         &owner.rig.name,
         &missing,
@@ -1972,7 +1972,7 @@ fn pending_observer_becomes_readable(via_hook: bool) {
     .unwrap();
     std::os::unix::fs::symlink(owner.rig.transcript(), &path).unwrap();
     if via_hook {
-        let hook = HookSignal::from_payload("stop", &json!({"transcript_path":path}));
+        let hook = HookSignal::from_payload_for_test("stop", &json!({"transcript_path":path}));
         let adopted = {
             let _entered = owner.rig.runtime.enter();
             dedupe::adopt_claude_continuation_explained(&command_session, &session, &hook).unwrap()
@@ -2111,7 +2111,7 @@ fn a_verified_hook_adds_no_wake_for_an_already_readable_observer() {
     };
     // The source predates this hook and the drive's first wake.
     dedupe::register_tmux_runtime_binding(&owner.rig.name, existing.clone());
-    crate::services::claude_tui::readiness::tests::pre_source(&owner.rig.name, &path);
+    crate::services::claude_tui::readiness::test_support::pre_source(&owner.rig.name, &path);
     let records = || binding_events::records_strict(channel).unwrap().unwrap();
     let before = records();
     assert!(
@@ -2155,7 +2155,7 @@ fn a_verified_hook_adds_no_wake_for_an_already_readable_observer() {
                 counted.fetch_add(1, Ordering::SeqCst);
             }),
         );
-    let hook = HookSignal::from_payload("stop", &json!({"transcript_path":path}));
+    let hook = HookSignal::from_payload_for_test("stop", &json!({"transcript_path":path}));
     let adopted = {
         let _entered = owner.rig.runtime.enter();
         dedupe::adopt_claude_continuation_explained(&command, &session, &hook).unwrap()

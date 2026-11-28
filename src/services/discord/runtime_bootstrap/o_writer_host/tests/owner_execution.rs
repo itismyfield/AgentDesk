@@ -589,7 +589,7 @@ async fn routing_owner_rest_publishes_only_a_prepared_local_client_pg() {
         sqlx::query("UPDATE worker_nodes SET capabilities=jsonb_set(capabilities,'{routing_owner}',$1) WHERE instance_id='mac-a'")
             .bind(published["routing_owner"].clone()).execute(&f.pool).await.unwrap();
         assert_eq!(
-            f.observe(&id, &context).await.target(),
+            f.observe(&id, &context).await.target_for_test(),
             Target::Selected(expected),
             "rest must follow the local identity probe, not token presence (ready={ready})"
         );

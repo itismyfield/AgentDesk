@@ -78,7 +78,7 @@ impl MonitoringStore {
     /// Sweep entries whose `last_refresh` is older than `ttl` and return the
     /// channels whose entry set changed (including channels emptied by the
     /// sweep, which are also removed from the store).
-    pub(crate) fn sweep_expired_affected(&mut self, ttl: Duration) -> Vec<u64> {
+    pub fn sweep_expired_affected(&mut self, ttl: Duration) -> Vec<u64> {
         let now = Utc::now();
         let mut affected_channels = Vec::new();
         let channel_ids = self.entries.keys().copied().collect::<Vec<_>>();
@@ -117,13 +117,13 @@ impl MonitoringStore {
         self.rendered.get(&channel_id).copied()
     }
 
-    pub(crate) fn next_render_version(&mut self, channel_id: u64) -> u64 {
+    pub fn next_render_version(&mut self, channel_id: u64) -> u64 {
         let version = self.render_versions.entry(channel_id).or_insert(0);
         *version = version.saturating_add(1);
         *version
     }
 
-    pub(crate) fn is_latest_render_version(&self, channel_id: u64, version: u64) -> bool {
+    pub fn is_latest_render_version(&self, channel_id: u64, version: u64) -> bool {
         self.render_versions
             .get(&channel_id)
             .copied()

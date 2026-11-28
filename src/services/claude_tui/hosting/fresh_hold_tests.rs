@@ -127,7 +127,7 @@ fn p2_actual_warm_session_died_then_recreate_fresh_reuses_token() {
         relay_last_offset: None,
     };
     tui_prompt_dedupe::register_tmux_runtime_binding(session, binding(&old));
-    crate::services::claude_tui::readiness::tests::pre_source(session, &old);
+    crate::services::claude_tui::readiness::test_support::pre_source(session, &old);
     let tmux = ScriptedTmux::new(&view("", false));
     tmux.set_dead(false);
     tmux.die_on_enter();
@@ -158,7 +158,7 @@ fn p2_actual_warm_session_died_then_recreate_fresh_reuses_token() {
             frame,
             sender.clone(),
             Some(token.clone()),
-            &crate::services::claude_tui::hosting::FollowupHost::legacy_tmux(session),
+            &crate::services::claude_tui::hosting::FollowupHost::legacy_tmux_for_test(session),
             None,
         )
     });
@@ -190,7 +190,7 @@ fn p2_actual_warm_session_died_then_recreate_fresh_reuses_token() {
         )
         .unwrap();
     tui_prompt_dedupe::register_tmux_runtime_binding(session, binding(&new));
-    crate::services::claude_tui::readiness::tests::pre_source(session, &new);
+    crate::services::claude_tui::readiness::test_support::pre_source(session, &new);
     tmux.set_dead(false);
     tmux.on_enter(&new, &format!("{}\n{{\"type\":\"system\",\"subtype\":\"stop_hook_summary\"}}",
         serde_json::json!({"type":"user","uuid":"recreated-a","sessionId":sid,"message":{"role":"user","content":frame}})));

@@ -52,9 +52,9 @@ const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 // Watcher timings for the daemon-snapshot tests mounted in the root test host.
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) const DEBOUNCE_FOR_TEST: Duration = DEBOUNCE;
+pub const DEBOUNCE_FOR_TEST: Duration = DEBOUNCE;
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) const POLL_INTERVAL_FOR_TEST: Duration = POLL_INTERVAL;
+pub const POLL_INTERVAL_FOR_TEST: Duration = POLL_INTERVAL;
 
 /// Outcome of a single reload attempt. Returned by [`reload_from_path`] so the
 /// watcher, an on-demand trigger, and tests can all share the same core path.
@@ -96,7 +96,7 @@ pub(crate) fn graceful_fallback_config(path_display: &str, reason: String) -> Co
     Config::default()
 }
 
-pub(crate) fn subscribe() -> tokio::sync::watch::Receiver<Option<Arc<Config>>> {
+pub fn subscribe() -> tokio::sync::watch::Receiver<Option<Arc<Config>>> {
     LIVE_UPDATES
         .get_or_init(|| tokio::sync::watch::channel(None).0)
         .subscribe()
@@ -305,22 +305,22 @@ pub fn start(path: PathBuf, enabled: bool) -> Option<ConfigHotReloadGuard> {
     })
 }
 
-#[cfg(test)]
-pub(crate) struct TestLiveGuard {
+#[cfg(any(test, feature = "test-support"))]
+pub struct TestLiveGuard {
     previous: Option<Arc<Config>>,
     _lock: Option<crate::config::test_env_lock::SharedTestEnvLockGuard>,
     before_restore: Option<Box<dyn FnOnce() + Send + Sync>>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl TestLiveGuard {
-    pub(crate) fn on_before_restore(&mut self, observer: impl FnOnce() + Send + Sync + 'static) {
+    pub fn on_before_restore(&mut self, observer: impl FnOnce() + Send + Sync + 'static) {
         assert!(self.before_restore.is_none());
         self.before_restore = Some(Box::new(observer));
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for TestLiveGuard {
     fn drop(&mut self) {
         crate::config::test_env_lock::assert_shared_test_env_lock_held();
@@ -337,8 +337,8 @@ impl Drop for TestLiveGuard {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn test_live_guard(
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_live_guard(
     lock: crate::config::test_env_lock::SharedTestEnvLockGuard,
 ) -> TestLiveGuard {
     let previous = current();
@@ -350,8 +350,8 @@ pub(crate) fn test_live_guard(
 }
 
 /// Capture LIVE while an enclosing fixture keeps the environment lock.
-#[cfg(test)]
-pub(crate) fn test_live_guard_after_shared_test_env_lock() -> TestLiveGuard {
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_live_guard_after_shared_test_env_lock() -> TestLiveGuard {
     crate::config::test_env_lock::assert_shared_test_env_lock_held();
     TestLiveGuard {
         previous: current(),

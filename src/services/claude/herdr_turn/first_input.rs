@@ -2,17 +2,26 @@
 use super::*;
 use crate::services::claude_tui::guarded_outcome::{self, SubmissionError};
 
-pub(crate) struct Submitted {
-    attached: Attached,
-    transcript: String,
-    before: u64,
-    started_at: chrono::DateTime<chrono::Utc>,
+mod submitted {
+    use super::Attached;
+
+    pub struct Submitted {
+        pub(super) attached: Attached,
+        pub(super) transcript: String,
+        pub(super) before: u64,
+        pub(super) started_at: chrono::DateTime<chrono::Utc>,
+    }
 }
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use submitted::Submitted;
+#[cfg(any(test, feature = "test-support"))]
+pub use submitted::Submitted;
 
 #[cfg(any(test, feature = "test-support"))]
 impl Submitted {
     /// The transcript length before the write, for tests outside this module.
-    pub(crate) fn before_for_test(&self) -> u64 {
+    pub fn before_for_test(&self) -> u64 {
         self.before
     }
 }
@@ -20,7 +29,7 @@ impl Submitted {
 #[cfg(any(test, feature = "test-support"))]
 impl Attached {
     /// An attached source built field by field, for tests outside `herdr_turn`.
-    pub(crate) fn for_test(
+    pub fn for_test(
         nonce: String,
         session_id: String,
         transcript: PathBuf,
@@ -40,21 +49,27 @@ impl Attached {
         }
     }
 
-    pub(crate) fn nonce_for_test(&self) -> &str {
+    pub fn nonce_for_test(&self) -> &str {
         &self.nonce
     }
 
-    pub(crate) fn session_id_for_test(&self) -> &str {
+    pub fn session_id_for_test(&self) -> &str {
         &self.session_id
     }
 
-    pub(crate) fn target_for_test(&self) -> &HerdrTarget {
+    pub fn target_for_test(&self) -> &HerdrTarget {
         &self.target
     }
 }
 
 /// Posts the hold's one notice row; keyed by execution and hold, so a repeat returns the row.
-pub(crate) type Notice = dyn Fn(&str) -> Result<i64, String> + Send + Sync;
+mod notice {
+    pub type Notice = dyn Fn(&str) -> Result<i64, String> + Send + Sync;
+}
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use notice::Notice;
+#[cfg(any(test, feature = "test-support"))]
+pub use notice::Notice;
 
 pub(super) fn submit(
     turn: &HerdrTurn<'_>,
@@ -80,8 +95,8 @@ pub(super) fn pending_handover(
 
 /// A test's Pending turn handed to the owner hook on this thread: the snapshot `record` the turn
 /// read, the execution `attached` its attach returned, and the execution `target` the hook names.
-#[cfg(all(test, unix))]
-pub(crate) fn owned_pending_prompt_for_tests(
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub fn owned_pending_prompt_for_tests(
     turn: &HerdrTurn<'_>,
     (record, attached, target): (&HostedExecution, &HostedExecution, &HostedExecution),
     (session_id, transcript): (&str, PathBuf),
@@ -169,7 +184,7 @@ pub(super) fn submit_owned(
 
 /// The direct submit, for tests outside this module.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn submit_for_test(
+pub fn submit_for_test(
     turn: &HerdrTurn<'_>,
     attached: Attached,
     sender: &Sender<StreamMessage>,
@@ -179,7 +194,7 @@ pub(crate) fn submit_for_test(
 
 /// The owned submit, for tests outside this module.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn submit_owned_for_test(
+pub fn submit_owned_for_test(
     turn: &HerdrTurn<'_>,
     hook: crate::services::claude_tui::owner_input::LaunchHook,
     lineage: (
@@ -194,7 +209,7 @@ pub(crate) fn submit_owned_for_test(
 
 /// The gated content write, for tests outside this module.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn write_for_test(
+pub fn write_for_test(
     logical: &str,
     cancel: Option<&CancelToken>,
     attached: Attached,
@@ -207,7 +222,7 @@ pub(crate) fn write_for_test(
 
 /// The v2 hold record a write leaves before its first key, for tests outside this module.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn held_record_for_test(
+pub fn held_record_for_test(
     logical: &str,
     attached: &Attached,
     prompt: &str,
@@ -219,7 +234,7 @@ pub(crate) fn held_record_for_test(
 
 /// The hold's final outcome write, for tests outside this module.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn record_outcome_for_test(record: hold_record::HoldRecord, run: &InputRun) {
+pub fn record_outcome_for_test(record: hold_record::HoldRecord, run: &InputRun) {
     record_outcome(record, run)
 }
 
@@ -257,7 +272,7 @@ fn write(
     };
     let (kept, failed) = (std::cell::Cell::new(false), std::cell::RefCell::new(None));
     let seen = std::cell::RefCell::new(None);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     before_start::test_input_boundary(cancel);
     let start = || {
         let mut start = HerdrTurnStart::at_end_of(&attached.nonce, path, Some(started_at));
@@ -662,7 +677,7 @@ pub(super) fn observe(
     Ok(())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(super) fn observe_cold_for_tests(
     turn: &HerdrTurn<'_>,
     attached: Attached,
@@ -683,9 +698,11 @@ fn c132_early_cancel_never_binds_or_announces_runtime() {
     regression_tests::c132_early_cancel_never_binds_or_announces_runtime();
 }
 
-#[cfg(test)]
-pub(crate) mod regression_tests {
+#[cfg(any(test, feature = "test-support"))]
+pub mod regression_tests {
     use super::*;
+
+    #[cfg(test)]
     pub(super) fn c132_early_cancel_never_binds_or_announces_runtime() {
         use crate::services::session_host::herdr_socket_rig_tests::{HerdrRig, KEY, NODE, SESSION};
         let root = tempfile::tempdir().unwrap();
@@ -759,7 +776,7 @@ pub(crate) mod regression_tests {
         drop(root_guard);
     }
 
-    pub(crate) fn regression_attached(
+    pub fn regression_attached(
         rig: &crate::services::session_host::herdr_socket_rig_tests::HerdrRig,
         logical: &str,
         transcript: &Path,
@@ -801,7 +818,7 @@ pub(crate) mod regression_tests {
                 baseline_event_seq: None,
             },
         };
-        crate::services::claude_tui::readiness::tests::pre_source(logical, transcript);
+        crate::services::claude_tui::readiness::test_support::pre_source(logical, transcript);
         (
             owner,
             Attached {

@@ -15,8 +15,8 @@ repository is already clippy-clean.
 - `just test-postgres`: every lib test against an explicit
   `POSTGRES_TEST_DATABASE_URL_BASE` server.
 - `just lint-strict`: target end state, `cargo clippy --workspace --all-targets
-  --all-features -- -D warnings`. This is intentionally not wired into required
-  CI yet.
+  --features adk-base/test-support -- -D warnings`. Required CI uses the staged
+  command.
 
 ## Current Staging
 
@@ -25,7 +25,7 @@ individual lints, `dbg_macro`, `todo`, `unimplemented`, `await_holding_lock`,
 `drop_non_drop`, `mistyped_literal_suffixes`, `large_enum_variant`,
 `result_large_err`, `too_many_arguments` and `type_complexity`.
 The authoritative staged command is
-`cargo clippy --workspace --all-targets --all-features -- -W clippy::all`.
+`cargo clippy --workspace --all-targets --features adk-base/test-support -- -W clippy::all`.
 The trailing group level lowers the Cargo levels of group-member denies;
 the four structural complexity lints remain warnings.
 
@@ -55,17 +55,19 @@ The warning-total gate uses `scripts/clippy_warning_baseline.json`: **290**
 diagnostics, measured locally on WSL at
 `6330b17f93a7852c42580e65df8f0c90752a1765` after reducing the previous 342-warning
 ceiling. The observation records its local WSL source, commit SHA and diagnostics
-digest; it does not claim a CI run or uploaded artifact. The environment remains
-Rust 1.94.1, x86_64 Linux and the staged argv above; local Mac totals cannot
-substitute for it. Main and PR CI measure again and reject warning growth or
+digest. It used Rust 1.94.1 on x86_64 Linux and enabled all workspace features.
+The staged command now selects the same feature set explicitly. Main and PR CI
+measure again in that Linux environment and reject warning growth or
 invalid/mismatched observations. PR CI observes the merge ref with main, so the
 combined change needs a fresh observation when it lands. The existing required
 `Lint` mirror owns PR enforcement; no required context is added.
 
 Lower the baseline with a valid observation when warning debt decreases.
 Admission compares the committed PR base (main uses its first parent) and
-rejects baseline increases or environment changes. A toolchain/environment
-upgrade requires a separately reviewed rollout. Existing suppression-occurrence
+rejects baseline increases. The checker accepts the explicit feature selection
+rollout when `command_rollout_from` matches the base command and the other
+environment fields match. Further environment changes require a separately
+reviewed rollout. Existing suppression-occurrence
 ratchets remain separate from warning totals. B3 (`lint-strict` required CI) remains
 deferred until warning debt is zero under the authoritative environment.
 
@@ -115,7 +117,7 @@ Nightly macOS lib tests are paused due to hosted-runner memory pressure (#6082).
 The macOS-only `herdr_loaded_image_macos_` tests currently run outside CI.
 `scripts/ci/herdr_loaded_image_macos_ids.txt` lists them and a static test pins it
 to the macOS source inventory. A local Mac run checks that exactly those ran:
-`python3 scripts/run_test_lane.py --lane macos-loaded-image --expected-ids scripts/ci/herdr_loaded_image_macos_ids.txt -- env -u AGENTDESK_ROOT_DIR cargo test --lib herdr_loaded_image_macos_ -- --test-threads=1`.
+`python3 scripts/run_test_lane.py --lane macos-loaded-image --expected-ids scripts/ci/herdr_loaded_image_macos_ids.txt -- env -u AGENTDESK_ROOT_DIR cargo test -p adk-runtime --lib herdr_loaded_image_macos_ -- --test-threads=1`.
 
 A broader sweep was attempted with:
 
@@ -186,8 +188,8 @@ execution. GNU is not MSVC; the PR's native Windows lane is still required.
 
 ## Strict Clippy Debt
 
-`cargo clippy --workspace --all-targets --all-features -- -D warnings` currently
-fails with existing warnings, mostly in tests and relay/Discord code:
+`cargo clippy --workspace --all-targets --features adk-base/test-support -- -D warnings`
+currently fails with existing warnings, mostly in tests and relay/Discord code:
 
 - unused imports/variables/assignments in doctor, dispatch outbox, onboarding,
   pipeline, route tests, and server tests

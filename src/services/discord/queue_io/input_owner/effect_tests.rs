@@ -42,7 +42,7 @@ fn cold_claude_first_prompt_is_one_owner_attempt() {
             "source_message_ids":[id],"queued_generation":1,"text":frame}))
         .unwrap();
     let transcript = f.root.path().join("not-created.jsonl");
-    crate::services::claude_tui::readiness::tests::pre_source(name, &transcript);
+    crate::services::claude_tui::readiness::test_support::pre_source(name, &transcript);
     let ticket = Arc::new(std::sync::Mutex::new(None));
     let completion = runtime.block_on(async {
         let dir = crate::services::discord::runtime_store::discord_pending_queue_root()
@@ -159,8 +159,10 @@ fn an_owned_paste_beside_an_unparkable_draft_notices_its_original_once() {
         let nonce = busy_inject::fresh_nonce();
         let leaf = BusyClaude {
             probe_guard: None,
-            operation: crate::services::claude_tui::host_input::BusyOperation::new(
-                crate::services::claude_tui::host_input::InputTarget::legacy_tmux(&session),
+            operation: crate::services::claude_tui::host_input::BusyOperation::new_for_test(
+                crate::services::claude_tui::host_input::InputTarget::legacy_tmux_for_test(
+                    &session,
+                ),
                 crate::services::platform::tmux::session_identity_tests::managed_fixture_program(
                     dir.path().join("tmux"),
                 ),

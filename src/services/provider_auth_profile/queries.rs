@@ -8,13 +8,13 @@ use crate::services::org_catalog::{
 };
 use std::collections::HashMap;
 
-pub(crate) fn provider_auth_catalog() -> HashMap<String, ProviderAuthProfileDef> {
+pub fn provider_auth_catalog() -> HashMap<String, ProviderAuthProfileDef> {
     load_runtime_auth_catalog()
         .map(|snapshot| snapshot.profiles)
         .unwrap_or_default()
 }
 
-pub(crate) fn provider_auth_primary_profiles() -> PrimaryProfileMap {
+pub fn provider_auth_primary_profiles() -> PrimaryProfileMap {
     load_runtime_auth_catalog()
         .map(|snapshot| snapshot.primary_profiles)
         .unwrap_or_default()
@@ -26,7 +26,7 @@ pub(crate) fn provider_auth_fallback_policies() -> HashMap<String, FallbackPolic
         .unwrap_or_default()
 }
 
-pub(crate) fn list_profile_bindings() -> Vec<ProfileBinding> {
+pub fn list_profile_bindings() -> Vec<ProfileBinding> {
     load_runtime_auth_catalog()
         .map(list_profile_bindings_from_snapshot)
         .unwrap_or_default()

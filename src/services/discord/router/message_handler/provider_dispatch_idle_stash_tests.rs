@@ -57,7 +57,7 @@ fn managed_request(
             relay_last_offset: None,
         },
     );
-    crate::services::claude_tui::readiness::tests::pre_source(session, transcript);
+    crate::services::claude_tui::readiness::test_support::pre_source(session, transcript);
     (row, cap)
 }
 
@@ -726,7 +726,7 @@ fn warm_host_recovery_and_busy_wait_reach_managed_idle_submission() {
                 PROMPT,
                 sender,
                 Some(token),
-                &FollowupHost::legacy_tmux(name),
+                &FollowupHost::legacy_tmux_for_test(name),
                 Some(id),
             )
         })

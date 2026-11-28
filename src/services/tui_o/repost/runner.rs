@@ -32,11 +32,11 @@ pub(crate) const GRANT_TTL: Duration = Duration::from_secs(180);
 
 /// The O side's proof that an approval is current: the key's latest disposition is this
 /// rejection's Authorized, the id matches and is unconsumed, and key and payload are the same.
-pub(crate) trait ApprovalCheck {
+pub trait ApprovalCheck {
     fn current(&self, approval_id: &str, approved: &ApprovedRejected) -> Result<(), String>;
 }
 
-pub(crate) enum DispatchIntent<'a> {
+pub enum DispatchIntent<'a> {
     Auto(Box<NotFoundEvidence>),
     OperatorResume {
         approval_id: String,
@@ -48,7 +48,7 @@ pub(crate) enum DispatchIntent<'a> {
 
 /// What the O consumer does with an admission; each variant has exactly one step.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum TurnStep {
+pub enum TurnStep {
     Dispatch,
     Legacy,
     Wait,
@@ -56,7 +56,7 @@ pub(crate) enum TurnStep {
     Stopped,
 }
 
-pub(crate) fn turn_step<L>(admission: &Admission<L>) -> TurnStep {
+pub fn turn_step<L>(admission: &Admission<L>) -> TurnStep {
     match admission {
         Admission::Granted { .. } => TurnStep::Dispatch,
         Admission::LegacyOff => TurnStep::Legacy,
@@ -72,9 +72,17 @@ pub(crate) fn turn_step<L>(admission: &Admission<L>) -> TurnStep {
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct TickReport {
+pub struct TickReport {
+    #[cfg(any(test, feature = "test-support"))]
+    /// Fresh absence evidence, one per piece, for a turn to judge.
+    pub ready: Vec<NotFoundEvidence>,
+    #[cfg(not(any(test, feature = "test-support")))]
     /// Fresh absence evidence, one per piece, for a turn to judge.
     pub(crate) ready: Vec<NotFoundEvidence>,
+    #[cfg(any(test, feature = "test-support"))]
+    /// What recording each probed success returned, by message id.
+    pub recorded: Vec<(u64, ReceiptOutcome)>,
+    #[cfg(not(any(test, feature = "test-support")))]
     /// What recording each probed success returned, by message id.
     pub(crate) recorded: Vec<(u64, ReceiptOutcome)>,
     /// Pieces left as they were, with why.
@@ -82,11 +90,11 @@ pub(crate) struct TickReport {
 }
 
 #[derive(Debug)]
-pub(crate) enum Tick {
+pub enum Tick {
     Ran(TickReport),
 }
 
-pub(crate) struct Runner {
+pub struct Runner {
     pool: PgPool,
     sender_id: u64,
     run: RunScope,
@@ -94,7 +102,7 @@ pub(crate) struct Runner {
 }
 
 impl Runner {
-    pub(crate) fn new(pool: PgPool, sender_id: u64, run: RunScope) -> Self {
+    pub fn new(pool: PgPool, sender_id: u64, run: RunScope) -> Self {
         Self {
             pool,
             sender_id,
@@ -135,6 +143,17 @@ impl Runner {
             receipts.insert(id, owner.clone());
         }
         Some(receipts)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn tick_for_test(
+        &mut self,
+        channel: u64,
+        reader: &impl ProbeRead,
+        proof_ids: &[u64],
+        settled_at: Instant,
+    ) -> Result<Tick, LedgerError> {
+        self.tick(channel, reader, proof_ids, settled_at).await
     }
 
     /// One pass over the channel's admitted pieces: expired slots settled, probes advanced, found
@@ -213,7 +232,7 @@ impl Runner {
 
     /// The pre-grant checks in order, then the grant. Only a committed grant becomes a permit;
     /// every other answer sends nothing, and a refusal after the grant still keeps the slot.
-    pub(crate) async fn try_next_dispatch<W: RepostWriter>(
+    pub async fn try_next_dispatch<W: RepostWriter>(
         &mut self,
         writer: &mut W,
         intent: DispatchIntent<'_>,
@@ -300,18 +319,18 @@ impl Runner {
 }
 
 /// What a channel writer lends its re-post turn beyond one dispatch.
-pub(crate) trait TurnWriter: RepostWriter + Send {
+pub trait TurnWriter: RepostWriter + Send {
     fn channel(&self) -> u64;
     fn ledger(&mut self) -> &LedgerState;
     /// Whether a re-post request may still leave; read by every dispatch's wire guard.
     fn set_live(&self, live: bool);
 }
 
-pub(crate) type Turned<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+pub type Turned<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// The re-post side of one channel's writer, run only from that writer's actor turn, so it never
 /// sends beside the writer's own posts.
-pub(crate) trait RepostHook<W>: Send {
+pub trait RepostHook<W>: Send {
     /// One turn, serialized with the channel's original posts.
     fn turn<'a>(&'a mut self, writer: &'a mut W) -> Turned<'a, ()>;
     /// A fresh original may go only for an unadmitted key with a durable intent.
@@ -325,7 +344,7 @@ pub(crate) type OpenTransport<T> = Box<dyn FnMut() -> Option<Arc<T>> + Send>;
 
 /// One channel's re-post turn: admits uncertain on originals, probes them and sends at most one
 /// granted re-post per turn.
-pub(crate) struct ChannelTurn<T> {
+pub struct ChannelTurn<T> {
     runner: Runner,
     open: OpenTransport<T>,
     io: Option<Arc<T>>,
@@ -337,12 +356,7 @@ pub(crate) struct ChannelTurn<T> {
 }
 
 impl<T: BoundedTransport + ProbeRead + Send + Sync + 'static> ChannelTurn<T> {
-    pub(crate) fn new(
-        runner: Runner,
-        open: OpenTransport<T>,
-        channel: u64,
-        sidecar: PathBuf,
-    ) -> Self {
+    pub fn new(runner: Runner, open: OpenTransport<T>, channel: u64, sidecar: PathBuf) -> Self {
         Self {
             runner,
             open,
@@ -567,31 +581,29 @@ where
 }
 
 // Test seams for the re-post turn tests mounted in the discord-layer test host.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Runner {
-    pub(in crate::services) fn probes_mut(
-        &mut self,
-    ) -> &mut BTreeMap<PieceKey, (EvidenceScope, ProbeSession)> {
+    pub fn probes_mut(&mut self) -> &mut BTreeMap<PieceKey, (EvidenceScope, ProbeSession)> {
         &mut self.probes
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl<T: BoundedTransport + ProbeRead + Send + Sync + 'static> ChannelTurn<T> {
-    pub(in crate::services) fn runner_mut(&mut self) -> &mut Runner {
+    pub fn runner_mut(&mut self) -> &mut Runner {
         &mut self.runner
     }
 
-    pub(in crate::services) fn sidecar_mut(&mut self) -> &mut PathBuf {
+    pub fn sidecar_mut(&mut self) -> &mut PathBuf {
         &mut self.sidecar
     }
 
-    pub(in crate::services) fn log_slot(&mut self) -> &mut Option<ProvenanceLog> {
+    pub fn log_slot(&mut self) -> &mut Option<ProvenanceLog> {
         &mut self.log
     }
 
     /// Opens and activates the sidecar as a turn would, then fails its writes after `cut`.
-    pub(in crate::services) fn fail_log_after(&mut self, frontier: u64, cut: Option<usize>) {
+    pub fn fail_log_after(&mut self, frontier: u64, cut: Option<usize>) {
         self.log(frontier).expect("sidecar opens").fail_after = cut;
     }
 }

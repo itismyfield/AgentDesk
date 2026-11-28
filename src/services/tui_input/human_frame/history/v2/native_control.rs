@@ -10,15 +10,15 @@ use crate::services::discord::runtime_store::{
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Intent {
-    pub(crate) namespace: String,
-    pub(crate) ticket: Ticket,
-    pub(crate) disposition: Disposition,
-    pub(crate) row: Option<Value>,
+pub struct Intent {
+    pub namespace: String,
+    pub ticket: Ticket,
+    pub disposition: Disposition,
+    pub row: Option<Value>,
 }
 
 impl Intent {
-    pub(crate) fn owns_row(&self, row: &Value) -> bool {
+    pub fn owns_row(&self, row: &Value) -> bool {
         let Some(source) = &self.ticket.source else {
             return false;
         };
@@ -35,7 +35,7 @@ impl Intent {
             && row["hosted_execution_nonce"] == source.target["execution_nonce"]
     }
 
-    pub(crate) fn runtime_matches(&self, row: &Value) -> bool {
+    pub fn runtime_matches(&self, row: &Value) -> bool {
         self.owns_row(row)
             && self.row.as_ref().is_some_and(|saved| {
                 saved["started_at"] == row["started_at"]
@@ -43,7 +43,7 @@ impl Intent {
             })
     }
 
-    pub(crate) fn validates(&self, namespace: &str, ticket: &Ticket, outcome: &Outcome) -> bool {
+    pub fn validates(&self, namespace: &str, ticket: &Ticket, outcome: &Outcome) -> bool {
         self.namespace == namespace
             && self.ticket == *ticket
             && ticket.source.as_ref().is_some_and(|source| {
@@ -66,15 +66,16 @@ impl Intent {
 }
 
 impl Registry {
-    pub(crate) fn same_control_registry(&self, other: &Self) -> bool {
+    pub fn same_control_registry(&self, other: &Self) -> bool {
         self.path == other.path
     }
-    pub(crate) fn try_native_settlement(
+    pub fn try_native_settlement(
         &self,
         namespace: &str,
         ticket: &Ticket,
     ) -> Result<Settlement, String> {
-        self.try_control_transaction(|snapshot| {
+        self.try_with_transaction_cache(|cache, _| {
+            let snapshot = cache.state().ok_or("history cache unavailable")?;
             let (registration, _) = snapshot
                 .locate(namespace, &ticket.key)
                 .ok_or("native registration missing")?;
@@ -86,44 +87,52 @@ impl Registry {
             if current.ticket != *ticket {
                 return Err("native settlement ticket mismatch".into());
             }
+            // A different process may have renamed this file without confirming the directory.
+            self.confirm_native_durability()?;
             Ok(current.clone())
         })
     }
-    pub(crate) fn try_ack_native_cleanup(
+    pub fn try_ack_native_cleanup(
         &self,
         namespace: &str,
         ticket: &Ticket,
         outcome: &Outcome,
     ) -> Result<bool, String> {
-        self.try_control_transaction(|snapshot| {
-            let (registration, _) = snapshot
-                .locate(namespace, &ticket.key)
-                .ok_or("native registration missing")?;
-            registration
-                .native_settlement
-                .as_ref()
-                .ok_or("native ticket missing")?
-                .validate(registration)?;
-            let current = settlement_mut(snapshot, namespace, &ticket.key)?;
-            if current.ticket != *ticket
-                || current.outcome.as_ref() != Some(outcome)
-                || (outcome.disposition == Disposition::WithdrawnNotExecuted
-                    && !current.withdrawal_notice)
-            {
-                return Err("native cleanup admission missing".into());
-            }
-            let first = !current.cleanup_complete;
-            current.cleanup_complete = true;
-            snapshot.version = 3;
-            Ok(first)
-        })
+        self.try_control_transaction_checked(
+            |snapshot| {
+                let (registration, _) = snapshot
+                    .locate(namespace, &ticket.key)
+                    .ok_or("native registration missing")?;
+                let current = registration
+                    .native_settlement
+                    .as_ref()
+                    .ok_or("native ticket missing")?;
+                current.validate(registration)?;
+                if current.ticket != *ticket
+                    || current.outcome.as_ref() != Some(outcome)
+                    || (outcome.disposition == Disposition::WithdrawnNotExecuted
+                        && !current.withdrawal_notice)
+                {
+                    return Err("native cleanup admission missing".into());
+                }
+                Ok(())
+            },
+            |snapshot, ()| {
+                let current = settlement_mut(snapshot, namespace, &ticket.key)?;
+                let first = !current.cleanup_complete;
+                current.cleanup_complete = true;
+                snapshot.version = 3;
+                Ok(first)
+            },
+        )
     }
-    pub(crate) fn try_native_boot_record(
+    pub fn try_native_boot_record(
         &self,
         namespace: &str,
         ticket: &Ticket,
     ) -> Result<RestoredRecord, String> {
-        self.try_control_transaction(|snapshot| {
+        self.try_with_transaction_cache(|cache, _| {
+            let snapshot = cache.state().ok_or("history cache unavailable")?;
             let (registration, entry) = snapshot
                 .locate(namespace, &ticket.key)
                 .ok_or("native registration missing")?;
@@ -135,6 +144,7 @@ impl Registry {
             if settlement.ticket != *ticket {
                 return Err("native boot record ticket changed".into());
             }
+            self.confirm_native_durability()?;
             Ok(RestoredRecord {
                 namespace: namespace.into(),
                 settlement,
@@ -144,30 +154,37 @@ impl Registry {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn try_native_not_sent_for_test(
+        &self,
+        namespace: &str,
+        ticket: &Ticket,
+    ) -> Result<(), String> {
+        self.try_native_not_sent(namespace, ticket)
+    }
+
     pub(crate) fn try_native_not_sent(
         &self,
         namespace: &str,
         ticket: &Ticket,
     ) -> Result<(), String> {
-        self.try_control_transaction(|state| mark_not_sent(state, namespace, ticket))
+        self.try_control_transaction_checked(
+            |state| check_not_sent(state, namespace, ticket),
+            |state, ()| mark_not_sent(state, namespace, ticket),
+        )
     }
 
     /// The same no-key record, waiting for the registry lock; only off the async workers.
-    pub(crate) fn native_not_sent_blocking(
-        &self,
-        namespace: &str,
-        ticket: &Ticket,
-    ) -> Result<(), String> {
-        self.transaction(|state| mark_not_sent(state, namespace, ticket))
+    pub fn native_not_sent_blocking(&self, namespace: &str, ticket: &Ticket) -> Result<(), String> {
+        self.transaction_checked(
+            |state| check_not_sent(state, namespace, ticket),
+            |state| mark_not_sent(state, namespace, ticket),
+        )
     }
 
     /// The no-key record outlasts a brief registry contention by awaiting between tries, so it
     /// never parks a worker; past the bound the busy refusal stands.
-    pub(crate) async fn native_not_sent(
-        &self,
-        namespace: &str,
-        ticket: &Ticket,
-    ) -> Result<(), String> {
+    pub async fn native_not_sent(&self, namespace: &str, ticket: &Ticket) -> Result<(), String> {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(1500);
         loop {
             match self.try_native_not_sent(namespace, ticket) {
@@ -182,7 +199,7 @@ impl Registry {
         }
     }
 
-    pub(crate) fn try_native_control(
+    pub fn try_native_control(
         &self,
         namespace: &str,
         ticket: &Ticket,
@@ -195,72 +212,129 @@ impl Registry {
         ) {
             return Err("native control disposition invalid".into());
         }
-        self.try_control_transaction(|state| {
-            let (registration, _) = state
-                .locate(namespace, &ticket.key)
-                .ok_or("native control registration missing")?;
-            let current = registration
-                .native_settlement
-                .as_ref()
-                .ok_or("native control ticket missing")?;
-            current.validate(registration)?;
-            let mut expected = ticket.clone();
-            if expected.source.is_none() {
-                expected.source =
-                    merge_source(&expected.key, None, current.ticket.source.as_ref())?;
-            }
-            if current.ticket != expected
-                || expected.owning_episode.is_none()
-                || expected.source.is_none()
-                || current.extra.get("any_key") != Some(&Value::Bool(true))
-                || current.extra.get("not_sent") == Some(&Value::Bool(true))
-            {
-                return Err("native control ownership/key evidence missing".into());
-            }
-            let intent = Intent {
-                namespace: namespace.into(),
-                ticket: expected,
-                disposition,
-                row,
-            };
-            merge_source(&intent.ticket.key, None, intent.ticket.source.as_ref())?;
-            let native = settlement_mut(state, namespace, &ticket.key)?;
-            if let Some(saved) = native.extra.get("control_intent") {
-                let saved: Intent =
-                    serde_json::from_value(saved.clone()).map_err(|e| e.to_string())?;
-                if saved.namespace != namespace
-                    || saved.ticket != intent.ticket
-                    || saved.row.as_ref().is_some_and(|row| !saved.owns_row(row))
+        self.try_control_transaction_checked(
+            |state| {
+                let (registration, _) = state
+                    .locate(namespace, &ticket.key)
+                    .ok_or("native control registration missing")?;
+                let current = registration
+                    .native_settlement
+                    .as_ref()
+                    .ok_or("native control ticket missing")?;
+                current.validate(registration)?;
+                let mut expected = ticket.clone();
+                if expected.source.is_none() {
+                    expected.source =
+                        merge_source(&expected.key, None, current.ticket.source.as_ref())?;
+                }
+                if current.ticket != expected
+                    || expected.owning_episode.is_none()
+                    || expected.source.is_none()
+                    || current.extra.get("any_key") != Some(&Value::Bool(true))
+                    || current.extra.get("not_sent") == Some(&Value::Bool(true))
                 {
-                    return Err("native control intent changed".into());
+                    return Err("native control ownership/key evidence missing".into());
                 }
-            } else {
-                if intent.row.as_ref().is_some_and(|row| !intent.owns_row(row)) {
-                    return Err("native control row belongs to another execution".into());
+                let intent = Intent {
+                    namespace: namespace.into(),
+                    ticket: expected,
+                    disposition,
+                    row,
+                };
+                merge_source(&intent.ticket.key, None, intent.ticket.source.as_ref())?;
+                let control_intent = if let Some(saved) = current.extra.get("control_intent") {
+                    let saved: Intent =
+                        serde_json::from_value(saved.clone()).map_err(|e| e.to_string())?;
+                    if saved.namespace != namespace
+                        || saved.ticket != intent.ticket
+                        || saved.row.as_ref().is_some_and(|row| !saved.owns_row(row))
+                    {
+                        return Err("native control intent changed".into());
+                    }
+                    None
+                } else {
+                    if intent.row.as_ref().is_some_and(|row| !intent.owns_row(row)) {
+                        return Err("native control row belongs to another execution".into());
+                    }
+                    Some(serde_json::to_value(&intent).map_err(|e| e.to_string())?)
+                };
+                let outcome = if current.outcome.is_none() {
+                    Some(Outcome {
+                        disposition: intent.disposition.clone(),
+                        range: None,
+                        extra: serde_json::Map::from_iter([(
+                            "control_proof".into(),
+                            serde_json::to_value(&intent).map_err(|e| e.to_string())?,
+                        )]),
+                    })
+                } else {
+                    None
+                };
+                Ok((control_intent, outcome))
+            },
+            |state, (control_intent, outcome)| {
+                let native = settlement_mut(state, namespace, &ticket.key)?;
+                if let Some(control_intent) = control_intent {
+                    native.extra.insert("control_intent".into(), control_intent);
                 }
-                native.extra.insert(
-                    "control_intent".into(),
-                    serde_json::to_value(&intent).map_err(|e| e.to_string())?,
-                );
+                if let Some(outcome) = outcome {
+                    native.outcome = Some(outcome);
+                }
+                state.version = 3;
+                Ok(())
+            },
+        )
+    }
+
+    /// A rejected check leaves the decoded history and its generation reusable.
+    pub(in crate::services::tui_input::human_frame::history::v2) fn try_control_transaction_checked<
+        T,
+        C,
+    >(
+        &self,
+        check: impl FnOnce(&Snapshot) -> Result<C, String>,
+        apply: impl FnOnce(&mut Snapshot, C) -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.try_with_transaction_cache(|cached, pending| {
+            let checked = check(cached.state().ok_or("history cache unavailable")?)?;
+            let context = AtomicWriteContext::new("injected_frames_v2");
+            let state = cached.state_mut().ok_or("history cache unavailable")?;
+            let encoded = apply(state, checked).and_then(|result| {
+                if self.encode_fault.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err("history encoding failed".to_string());
+                }
+                Ok((result, state.encode()?))
+            });
+            let (result, candidate) = match encoded {
+                Ok(value) => value,
+                Err(error) => {
+                    cached.clear();
+                    return Err(error);
+                }
+            };
+            if cached.raw() == Some(candidate.as_str()) {
+                self.confirm_native_durability()?;
+                return Ok(result);
             }
-            if native.outcome.is_none() {
-                native.outcome = Some(Outcome {
-                    disposition: intent.disposition.clone(),
-                    range: None,
-                    extra: serde_json::Map::from_iter([(
-                        "control_proof".into(),
-                        serde_json::to_value(&intent).map_err(|e| e.to_string())?,
-                    )]),
-                });
+            match durable_publish::critical_publish_status(&self.path, &candidate, context) {
+                Ok(FlushStatus::Flushed) => {
+                    cached.published(candidate)?;
+                    Ok(result)
+                }
+                status => {
+                    let old = cached.take_raw();
+                    if status.is_ok() {
+                        *pending = old.map(|raw| (raw, candidate));
+                    }
+                    Err("history publication unconfirmed; preserve registration".into())
+                }
             }
-            state.version = 3;
-            Ok(())
         })
     }
 
-    pub(in crate::services::tui_input::human_frame::history::v2) fn try_control_transaction<T>(
+    fn try_with_transaction_cache<T>(
         &self,
-        apply: impl FnOnce(&mut Snapshot) -> Result<T, String>,
+        apply: impl FnOnce(&mut read_stamp::Cache, &mut PendingPublication) -> Result<T, String>,
     ) -> Result<T, String> {
         let mut cached = try_mutex(&self.cached, CACHE_BUSY)?;
         std::fs::create_dir_all(self.path.parent().ok_or("history parent missing")?)
@@ -273,84 +347,44 @@ impl Registry {
             .open(self.path.with_extension("lock"))
             .map_err(|e| e.to_string())?;
         lock.try_lock().map_err(|_| HISTORY_BUSY)?;
-        let raw = match std::fs::read_to_string(&self.path) {
-            Ok(raw) => raw,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => migration::MISSING.into(),
-            Err(e) => return Err(e.to_string()),
-        };
-        let context = || AtomicWriteContext::new("injected_frames_v2");
         let mut pending = try_mutex(&self.pending, PUBLICATION_BUSY)?;
-        if let Some((old, candidate)) = pending.as_ref() {
-            if raw == *candidate {
-                if durable_publish::retry_published_status(&self.path, context())
-                    != FlushStatus::Flushed
-                {
-                    return Err("native control candidate durability unconfirmed".into());
-                }
-            } else if raw != *old {
-                return Err(
-                    "history changed after an unconfirmed publication; preserve both".into(),
-                );
-            }
-            *pending = None;
+        self.refresh_transaction_cache(
+            &mut cached,
+            &mut pending,
+            "native control candidate durability unconfirmed",
+        )?;
+        apply(&mut cached, &mut pending)
+    }
+
+    fn confirm_native_durability(&self) -> Result<(), String> {
+        let context = AtomicWriteContext::new("injected_frames_v2");
+        if durable_publish::retry_published_status(&self.path, context) != FlushStatus::Flushed {
+            return Err("native control durability unconfirmed".into());
         }
-        if cached.raw() != Some(raw.as_str()) {
-            cached.replace(raw.clone(), migration::restore(&raw)?);
-        }
-        let state = cached.state_mut().ok_or("history cache unavailable")?;
-        let encoded = apply(state).and_then(|result| {
-            if self.encode_fault.load(std::sync::atomic::Ordering::SeqCst) {
-                return Err("history encoding failed".to_string());
-            }
-            Ok((result, state.encode()?))
-        });
-        let (result, candidate) = match encoded {
-            Ok(value) => value,
-            Err(error) => {
-                cached.clear();
-                return Err(error);
-            }
-        };
-        if candidate == raw {
-            if durable_publish::retry_published_status(&self.path, context())
-                != FlushStatus::Flushed
-            {
-                return Err("native control durability unconfirmed".into());
-            }
-            return Ok(result);
-        }
-        match durable_publish::critical_publish_status(&self.path, &candidate, context()) {
-            Ok(FlushStatus::Flushed) => {
-                cached.published(candidate)?;
-                Ok(result)
-            }
-            status => {
-                cached.clear();
-                if status.is_ok() {
-                    *pending = Some((raw, candidate));
-                }
-                Err("history publication unconfirmed; preserve registration".into())
-            }
-        }
+        Ok(())
     }
 }
 
-fn mark_not_sent(state: &mut Snapshot, namespace: &str, ticket: &Ticket) -> Result<(), String> {
+fn check_not_sent(state: &Snapshot, namespace: &str, ticket: &Ticket) -> Result<(), String> {
     let (registration, _) = state
         .locate(namespace, &ticket.key)
         .ok_or("native no-key registration missing")?;
-    registration
+    let native = registration
         .native_settlement
         .as_ref()
-        .ok_or("native no-key ticket missing")?
-        .validate(registration)?;
-    let native = settlement_mut(state, namespace, &ticket.key)?;
+        .ok_or("native no-key ticket missing")?;
+    native.validate(registration)?;
     if !native.matches_key_witness(ticket)
         || native.outcome.is_some()
         || native.extra.get("any_key") == Some(&Value::Bool(true))
     {
         return Err("native no-key witness superseded".into());
     }
+    Ok(())
+}
+
+fn mark_not_sent(state: &mut Snapshot, namespace: &str, ticket: &Ticket) -> Result<(), String> {
+    let native = settlement_mut(state, namespace, &ticket.key)?;
     native.extra.insert("not_sent".into(), Value::Bool(true));
     state.version = 3;
     Ok(())

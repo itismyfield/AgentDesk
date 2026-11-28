@@ -71,7 +71,7 @@ pub struct TurnCancellationDetails {
 
 impl TurnCancellationDetails {
     #[allow(clippy::too_many_arguments)]
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new(
         reason: &str,
         surface: &str,
@@ -220,6 +220,11 @@ impl TurnEvent {
             }
             Self::ContextCompacted(_) => Self::CONTEXT_COMPACTED_META,
         }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn details_json_for_test(&self) -> Value {
+        self.details_json()
     }
 
     pub(crate) fn details_json(&self) -> Value {

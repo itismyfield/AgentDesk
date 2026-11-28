@@ -1,6 +1,7 @@
 import { Drawer as VaulDrawer } from "vaul";
 import { X } from "lucide-react";
 import type { ReactNode } from "react";
+import { useI18n } from "../../../i18n";
 import { getOverlayAccessibleTitle } from "./accessibility";
 import { useReturnFocus } from "./useReturnFocus";
 
@@ -16,6 +17,7 @@ export interface BottomSheetProps {
   closeOnBackdrop?: boolean;
   closeOnEsc?: boolean;
   ariaLabel?: string;
+  closeLabel?: string;
   closeButtonClassName?: string;
 }
 
@@ -27,8 +29,10 @@ export function BottomSheet({
   closeOnBackdrop = true,
   closeOnEsc = true,
   ariaLabel,
+  closeLabel,
   closeButtonClassName,
 }: BottomSheetProps) {
+  const { t } = useI18n();
   const accessibleTitle = getOverlayAccessibleTitle(
     title,
     ariaLabel,
@@ -64,7 +68,7 @@ export function BottomSheet({
             if (!closeOnBackdrop) event.preventDefault();
           }}
           onCloseAutoFocus={returnFocus}
-          className="fixed inset-x-0 bottom-0 z-[80] mx-auto flex max-h-[min(90dvh,720px)] w-full max-w-2xl flex-col rounded-t-xl border-t bg-[var(--th-card-bg,_#0f172a)] text-[var(--th-text,_#e2e8f0)] shadow-lg outline-none"
+          className="fixed inset-x-0 bottom-0 z-[80] mx-auto flex max-h-[min(90dvh,720px)] w-full max-w-2xl flex-col rounded-t-xl border-t bg-[var(--th-card-bg,_var(--bg-2))] text-[var(--th-text,_var(--fg))] shadow-lg outline-none"
           style={{
             borderColor: "var(--th-border, rgba(148,163,184,0.18))",
             paddingBottom: "env(safe-area-inset-bottom)",
@@ -87,9 +91,9 @@ export function BottomSheet({
               <VaulDrawer.Close asChild>
                 <button
                   type="button"
-                  className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border text-[var(--th-text-muted,_#94a3b8)] hover:bg-white/5 ${closeButtonClassName ?? ""}`}
+                  className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border text-[var(--th-text-muted,_#94a3b8)] hover:bg-[var(--th-overlay-light)] hover:text-[var(--th-text)] transition-colors ${closeButtonClassName ?? ""}`}
                   style={{ borderColor: "var(--th-border, rgba(148,163,184,0.16))" }}
-                  aria-label="Close"
+                  aria-label={closeLabel ?? t({ ko: "닫기", en: "Close", ja: "閉じる", zh: "关闭" })}
                 >
                   <X size={14} />
                 </button>

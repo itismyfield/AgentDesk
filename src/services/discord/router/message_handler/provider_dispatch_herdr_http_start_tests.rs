@@ -15,7 +15,7 @@ mod native_work;
 #[path = "provider_dispatch_herdr_http_start_tests/thread_ingress_tests.rs"]
 mod thread_ingress;
 
-async fn app(fx: &Fixture, intake: &Intake) -> Router {
+pub(super) async fn app(fx: &Fixture, intake: &Intake) -> Router {
     let exists: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agents WHERE id='busy-entry')")
             .fetch_one(&fx.pool)
@@ -69,7 +69,7 @@ async fn call(app: &Router, endpoint: &str, origin: &str) -> (StatusCode, Value)
     call_source(app, endpoint, origin, "imessage").await
 }
 
-async fn call_source(
+pub(super) async fn call_source(
     app: &Router,
     endpoint: &str,
     origin: &str,
@@ -736,7 +736,7 @@ fn external_herdr_http_driver_rechecks_idle_after_its_new_reservation_pg() {
         }))).unwrap();
         if !owned || seen.swap(true, Ordering::SeqCst) { return; }
         let (path, native, reserved) = (path.clone(), native.clone(), reserved.clone());
-        crate::services::claude_tui::readiness::tests::clear_tests::after_next_reserve(move || {
+        crate::services::claude_tui::readiness::test_support::after_next_reserve(move || {
             append(&path, &[
                 json!({"type":"user","uuid":uuid(),"sessionId":native,"message":{"role":"user","content":"native turn wins"}}),
                 json!({"type":"assistant","uuid":uuid(),"sessionId":native,"message":{"id":uuid(),"role":"assistant","content":[{"type":"text","text":"working"}]}}),

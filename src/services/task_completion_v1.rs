@@ -58,7 +58,7 @@ pub(crate) struct TaskId(String);
 pub(crate) struct ToolUseId(String);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(crate) struct TaskCompletionV1 {
+pub struct TaskCompletionV1 {
     #[serde(rename = "type")]
     frame_type: &'static str,
     subtype: &'static str,
@@ -71,7 +71,7 @@ pub(crate) struct TaskCompletionV1 {
 }
 
 impl TaskCompletionV1 {
-    pub(crate) fn codex_background_completed() -> Self {
+    pub fn codex_background_completed() -> Self {
         Self {
             frame_type: TYPE_LITERAL,
             subtype: SUBTYPE_LITERAL,
@@ -84,13 +84,13 @@ impl TaskCompletionV1 {
         }
     }
 
-    pub(crate) fn encode_canonical(&self) -> Result<String, serde_json::Error> {
+    pub fn encode_canonical(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TaskCompletionV1Rejection {
+pub enum TaskCompletionV1Rejection {
     MalformedJson,
     DuplicateField,
     UnknownField,
@@ -102,7 +102,7 @@ pub(crate) enum TaskCompletionV1Rejection {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum TaskCompletionV1Admission {
+pub enum TaskCompletionV1Admission {
     Legacy,
     TypedCandidate(TaskCompletionV1),
     Rejected(TaskCompletionV1Rejection),
@@ -373,7 +373,7 @@ impl<'de> Visitor<'de> for AdmissionVisitor<'_> {
     }
 }
 
-pub(crate) fn admit_raw(line: &str) -> TaskCompletionV1Admission {
+pub fn admit_raw(line: &str) -> TaskCompletionV1Admission {
     let mut probe = AdmissionProbe::default();
     let mut deserializer = serde_json::Deserializer::from_str(line);
     let parsed = deserializer.deserialize_any(AdmissionVisitor { probe: &mut probe });

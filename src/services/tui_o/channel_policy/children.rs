@@ -28,10 +28,10 @@ struct ChildEntry {
 
 /// A resolved child of an O parent, as every snapshot clone reads it.
 #[derive(Clone, Debug)]
-pub(crate) struct Child {
+pub struct Child {
     pub(crate) parent: u64,
     pub(crate) kind: RuntimeHandoffKind,
-    pub(crate) candidate: Candidate,
+    pub candidate: Candidate,
 }
 
 #[cfg(test)]
@@ -72,7 +72,7 @@ impl ChildEntry {
 
 /// A known child whose relationship is unresolved, conflicting or unreadable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ChildHeld;
+pub struct ChildHeld;
 
 impl ChildEntry {
     /// `None` once the child resolved under a parent O does not select.
@@ -347,6 +347,13 @@ pub(super) fn seeded_from_store(
 }
 
 impl BootChannels {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn init_scope_view_for_test(
+        &self,
+    ) -> Arc<crate::services::session_host::surface_policy::InitScope> {
+        self.init_scope_view()
+    }
+
     pub(crate) fn init_scope_view(
         &self,
     ) -> Arc<crate::services::session_host::surface_policy::InitScope> {
@@ -362,13 +369,13 @@ impl BootChannels {
             .clone()
     }
 
-    #[cfg(test)]
-    pub(crate) fn record_child_fixture(&self, init: &Initialized) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn record_child_fixture(&self, init: &Initialized) {
         self.children.record(self, init, Adoption::Committed);
     }
 
-    #[cfg(all(test, unix))]
-    pub(crate) fn child_fixture_held(&self, channel: u64) -> Option<bool> {
+    #[cfg(all(any(test, feature = "test-support"), unix))]
+    pub fn child_fixture_held(&self, channel: u64) -> Option<bool> {
         self.children
             .entries
             .lock()
@@ -379,7 +386,7 @@ impl BootChannels {
     }
 
     /// Called once per shared view before provider dispatch; recorded relationships need no REST.
-    pub(crate) fn refresh_child_records(&self) {
+    pub fn refresh_child_records(&self) {
         if self
             .children
             .entries
@@ -393,12 +400,12 @@ impl BootChannels {
             .refresh_records(self, crate::config::runtime_root().as_deref());
     }
 
-    pub(crate) fn configured_binding(&self, channel: u64) -> bool {
+    pub fn configured_binding(&self, channel: u64) -> bool {
         self.bindings.contains(&channel)
     }
 
     /// What the shared view holds for `channel`: `None` leaves it to boot membership.
-    pub(crate) fn child(&self, channel: u64) -> Option<Result<Child, ChildHeld>> {
+    pub fn child(&self, channel: u64) -> Option<Result<Child, ChildHeld>> {
         let entries = self
             .children
             .entries
@@ -417,6 +424,16 @@ impl BootChannels {
         entries.get(&channel)?.unresolved_late().cloned()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn resolve_child_for_test(
+        &self,
+        channel: u64,
+        surface: VerifiedSurface,
+        fresh: bool,
+    ) -> bool {
+        self.resolve_child(channel, surface, fresh)
+    }
+
     /// Records a relationship Discord itself returned; `fresh` when no Legacy turn ever ran there.
     pub(crate) fn resolve_child(
         &self,
@@ -429,7 +446,7 @@ impl BootChannels {
 
     /// Reserves each unconfigured thread a boot read left open whose hinted parent O selects. The
     /// hint only picks the reservation; the parent is bound by a later checked read.
-    pub(crate) fn reserve_boot_children(&self, threads: &[(u64, u64)]) {
+    pub fn reserve_boot_children(&self, threads: &[(u64, u64)]) {
         for &(channel, hinted) in threads {
             if !self.configured_binding(channel) && self.channels.contains(&hinted) {
                 self.children.reserve(channel);
@@ -453,7 +470,7 @@ impl BootChannels {
     }
 
     /// Boot membership plus every known child, held ones included so no reader drops them.
-    pub(crate) fn output_channels(&self) -> std::collections::BTreeSet<u64> {
+    pub fn output_channels(&self) -> std::collections::BTreeSet<u64> {
         let entries = self
             .children
             .entries
@@ -473,7 +490,7 @@ impl BootChannels {
     }
 
     /// The channel whose boot policy governs `channel`: a child's parent, or the channel itself.
-    pub(crate) fn policy_channel(&self, channel: u64) -> u64 {
+    pub fn policy_channel(&self, channel: u64) -> u64 {
         match self.child(channel) {
             Some(Ok(child)) => child.parent,
             _ => channel,

@@ -38,7 +38,7 @@ pub(super) fn runtime_config_keys() -> impl Iterator<Item = &'static str> {
     RUNTIME_KEYS.iter().map(|&(key, _)| key)
 }
 
-pub(crate) fn is_runtime_config_key(key: &str) -> bool {
+pub fn is_runtime_config_key(key: &str) -> bool {
     runtime_config_keys().any(|known| known == key)
 }
 

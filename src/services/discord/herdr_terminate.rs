@@ -254,8 +254,11 @@ pub(super) async fn retire_confirmed(
 }
 
 #[cfg(test)]
-type SettlementWindowProbe =
-    Box<dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send>;
+use crate::services::dispatched_sessions::herdr_probe_tests::SettlementWindowProbe;
+#[cfg(test)]
+pub(crate) use crate::services::dispatched_sessions::herdr_probe_tests::{
+    probe_before_released, probe_before_selection,
+};
 #[cfg(test)]
 type ProbeSlot = std::cell::RefCell<Option<SettlementWindowProbe>>;
 #[cfg(test)]
@@ -266,8 +269,6 @@ thread_local! {
     static AFTER_FENCE: ProbeSlot = const { std::cell::RefCell::new(None) };
     static AFTER_CLOSE: ProbeSlot = const { std::cell::RefCell::new(None) };
     static BEFORE_POSTLUDE: ProbeSlot = const { std::cell::RefCell::new(None) };
-    static BEFORE_SELECTION: ProbeSlot = const { std::cell::RefCell::new(None) };
-    static BEFORE_RELEASED: ProbeSlot = const { std::cell::RefCell::new(None) };
 }
 /// Runs once between the hold release and the captured-turn settlement on this thread.
 #[cfg(test)]
@@ -298,25 +299,6 @@ pub(crate) fn probe_after_close(probe: SettlementWindowProbe) {
 #[cfg(test)]
 pub(crate) fn probe_before_postlude(probe: SettlementWindowProbe) {
     BEFORE_POSTLUDE.with(|slot| *slot.borrow_mut() = Some(probe));
-}
-/// Runs once when a forced HTTP branch is about to pick its execution, after the request's own
-/// session read.
-#[cfg(test)]
-pub(crate) fn probe_before_selection(probe: SettlementWindowProbe) {
-    BEFORE_SELECTION.with(|slot| *slot.borrow_mut() = Some(probe));
-}
-#[cfg(test)]
-pub(crate) async fn run_before_selection_probe() {
-    run_probe(&BEFORE_SELECTION).await;
-}
-/// Runs once when a postlude's released step starts, after the exclusion was dropped.
-#[cfg(test)]
-pub(crate) fn probe_before_released(probe: SettlementWindowProbe) {
-    BEFORE_RELEASED.with(|slot| *slot.borrow_mut() = Some(probe));
-}
-#[cfg(test)]
-pub(crate) async fn run_before_released_probe() {
-    run_probe(&BEFORE_RELEASED).await;
 }
 #[cfg(test)]
 async fn run_probe(slot: &'static std::thread::LocalKey<ProbeSlot>) {

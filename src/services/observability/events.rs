@@ -19,7 +19,7 @@ mod capture_tests;
 #[cfg(test)]
 mod overflow_tests;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_capture;
+pub mod test_capture;
 
 use serde::Serialize;
 use serde_json::Value;
@@ -182,7 +182,7 @@ impl EventLog {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn clear(&self) {
         if let Ok(mut inner) = self.inner.lock() {
             inner.buffer.clear();
@@ -194,19 +194,19 @@ impl EventLog {
     }
 }
 
-static GLOBAL_EVENT_LOG: OnceLock<Arc<EventLog>> = OnceLock::new();
+pub static GLOBAL_EVENT_LOG: OnceLock<Arc<EventLog>> = OnceLock::new();
 static FLUSHER_STARTED: OnceLock<()> = OnceLock::new();
 
 // Test seams for the capture stress tests mounted in the services test host.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn install_global_for_test(log: Arc<EventLog>) -> Result<(), Arc<EventLog>> {
+pub fn install_global_for_test(log: Arc<EventLog>) -> Result<(), Arc<EventLog>> {
     GLOBAL_EVENT_LOG.set(log)
 }
 
 #[cfg(any(test, feature = "test-support"))]
 impl EventLog {
     /// Holds the buffer lock (poisoned or not), so a panic while held poisons it as a failed append would.
-    pub(crate) fn hold_lock_for_test(&self) -> impl Sized + '_ {
+    pub fn hold_lock_for_test(&self) -> impl Sized + '_ {
         self.inner.lock()
     }
 }

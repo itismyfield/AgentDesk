@@ -1,6 +1,6 @@
 import { useId, type ReactNode } from "react";
 import { ArrowLeft, X } from "lucide-react";
-import type { Agent, Department } from "../../types";
+import type { Agent } from "../../types";
 import { localeName } from "../../i18n";
 import { Button } from "../../kit/free/button-clean";
 import { IconButton } from "../../kit/free/icon-button-clean";
@@ -18,7 +18,6 @@ interface AgentInfoCardProps {
   isKo: boolean;
   locale: string;
   tr: Translator;
-  departments: Department[];
   onClose: () => void;
   onAgentUpdated?: () => void;
   /** Label of the phone back button; the agents page says "back to list". */
@@ -36,7 +35,6 @@ export default function AgentInfoCard({
   isKo,
   locale,
   tr,
-  departments,
   onClose,
   onAgentUpdated,
   backLabel,
@@ -79,7 +77,6 @@ export default function AgentInfoCard({
         isKo={isKo}
         locale={locale}
         tr={tr}
-        departments={departments}
         onAgentUpdated={onAgentUpdated}
         actions={actions}
         titleId={titleId}

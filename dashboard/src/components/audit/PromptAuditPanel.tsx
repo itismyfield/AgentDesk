@@ -69,7 +69,7 @@ function PromptSourceInspector({ sections, labels, treeItems, selectedNode, onSe
   const canonRows = sections.map((section, index) => ({ section, label: labels[index] })).filter(({ section }) => section.source === "canon_file");
 
   return (
-    <aside aria-label={tr("출처 요약", "Source summary")} data-testid="audit-source-summary" className="w-full xl:w-[288px] xl:shrink-0">
+    <aside aria-label={tr("출처 요약", "Source summary")} data-testid="audit-source-summary" className="w-full min-[1440px]:w-[288px] min-[1440px]:shrink-0">
       <KitCard>
         <div className="px-4 py-3.5 text-sm leading-5 font-semibold text-[var(--fg)]">{tr("출처 요약", "Source summary")}</div>
         {treeItems.length > 0 ? (
@@ -232,7 +232,7 @@ export function PromptAuditDetail({ onOpenAnchors, ...detail }: AuditDetailProps
   if (phone) return <div className="flex min-w-0 flex-col gap-3" data-testid="audit-prompt-detail" data-state={state}>{mainContent}</div>;
 
   return (
-    <div className="flex min-w-0 flex-col gap-5 xl:flex-row xl:items-start" data-testid="audit-prompt-detail" data-state={state}>
+    <div className="flex min-w-0 flex-col gap-5 min-[1440px]:flex-row min-[1440px]:items-start" data-testid="audit-prompt-detail" data-state={state}>
       <div className="flex min-w-0 flex-1 flex-col gap-3">{mainContent}</div>
       {data ? <PromptSourceInspector sections={sections} labels={labels} treeItems={treeItems} selectedNode={selectedNode} onSelectNode={jumpToNode} origin={data.origin} maskedCount={data.masked_count} isKo={isKo} tr={tr} /> : null}
     </div>

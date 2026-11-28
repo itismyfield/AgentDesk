@@ -202,9 +202,9 @@ fn owner_outcome(cases: &[(Case, u64)]) {
             }
             tui_prompt_dedupe::clear_tmux_runtime_binding(&logical);
             if !matches!(case, Case::Recorded | Case::Continuing) {
-                readiness::tests::lose_resume_record(NONCE);
+                readiness::test_support::lose_resume_record(NONCE);
             }
-            readiness::tests::daemon_restart(&logical);
+            readiness::test_support::daemon_restart(&logical);
             attach();
             if case == Case::Continuing {
                 // This ledger belongs to the restarted daemon; the earlier Stop's latch is gone.
@@ -274,7 +274,7 @@ fn owner_outcome(cases: &[(Case, u64)]) {
         let moved = moves.then(|| {
             let (path, native, logical) = (path.clone(), native.clone(), logical.clone());
             let (context, asked, said) = (context.clone(), asked.clone(), said.clone());
-            readiness::tests::after_first_look(&logical.clone(), move || {
+            readiness::test_support::after_first_look(&logical.clone(), move || {
                 use std::io::Write;
                 if case == MovedFenced {
                     readiness::note_hook(
@@ -393,7 +393,7 @@ fn owner_outcome(cases: &[(Case, u64)]) {
                     _ => (mailbox, registry),
                 };
                 // The own turn ends after the restart's first look: its Stop proves the source.
-                readiness::tests::daemon_restart(&logical);
+                readiness::test_support::daemon_restart(&logical);
                 assert!(readiness::observe(&logical, Some(&path)).is_none());
                 let at = chrono::Utc::now();
                 rows(&[
@@ -693,7 +693,7 @@ fn held_front_wakes_once_cleared(dialog: Option<&str>, proven: bool) {
             relay_last_offset: None,
         },
     );
-    readiness::tests::daemon_restart(&logical);
+    readiness::test_support::daemon_restart(&logical);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .on_thread_start(rig.thread_installer(NODE, KEY, rig.socket(), SESSION))

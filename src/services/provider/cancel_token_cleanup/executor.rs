@@ -14,7 +14,7 @@ use std::sync::atomic::Ordering;
 
 /// Cleanup intent for a managed tmux turn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TmuxCleanupIntent {
+pub enum TmuxCleanupIntent {
     PreserveSession,
     /// A PID-only escalation; it must not consume the tmux-name claim.
     PidOnly,
@@ -23,16 +23,16 @@ pub(crate) enum TmuxCleanupIntent {
 
 /// One authorized cleanup request. Callers must not compose PID and tmux kills.
 #[derive(Clone, Debug)]
-pub(crate) struct CleanupRequest {
-    pub(crate) cancel_source: String,
-    pub(crate) intent: TmuxCleanupIntent,
-    pub(crate) termination_reason: Option<&'static str>,
-    pub(crate) hard_stop_target: Option<CapturedProcess>,
+pub struct CleanupRequest {
+    pub cancel_source: String,
+    pub intent: TmuxCleanupIntent,
+    pub termination_reason: Option<&'static str>,
+    pub hard_stop_target: Option<CapturedProcess>,
 }
 
 /// The binding a stop decided on; a destructive cleanup kills only while the token still names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ExpectedBinding<'a> {
+pub enum ExpectedBinding<'a> {
     /// The stop's own target: its `.host_kind` marker must still admit tmux.
     Decided(Option<&'a str>),
     /// A force-kill verdict's session, whose host, marker included, that verdict already read.
@@ -60,7 +60,7 @@ fn host_refusal(name: Option<&str>, expected: Option<ExpectedBinding<'_>>) -> Op
 
 /// Observable result of a cleanup request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct CleanupOutcome {
+pub struct CleanupOutcome {
     pub(crate) authorization: KillAuthorizationState,
     pub(crate) pid_killed: bool,
     pub(crate) retry_pid_cleanup: bool,
@@ -68,11 +68,11 @@ pub(crate) struct CleanupOutcome {
     pub(crate) duplicate: bool,
     pub(crate) termination_recorded: bool,
     /// No claim was taken: the binding is not a confirmed legacy tmux one.
-    pub(crate) host_refused: bool,
+    pub host_refused: bool,
 }
 
 impl CleanupOutcome {
-    pub(crate) fn termination_confirmed(self) -> bool {
+    pub fn termination_confirmed(self) -> bool {
         self.termination_recorded
     }
 }
@@ -85,7 +85,7 @@ impl CancelToken {
 
     /// Records a forced stop ahead of its cancel, so the turn never ends on a plain cancel;
     /// a stale generation or a refused or moved host records nothing.
-    pub(crate) fn intend_termination(&self, expected: Option<ExpectedBinding<'_>>) {
+    pub fn intend_termination(&self, expected: Option<ExpectedBinding<'_>>) {
         let binding = self
             .tmux_binding
             .lock()
@@ -101,13 +101,13 @@ impl CancelToken {
     }
 
     /// Execute all token-owned destructive cleanup behind one generation fence.
-    pub(crate) fn request_cleanup(&self, request: CleanupRequest) -> CleanupOutcome {
+    pub fn request_cleanup(&self, request: CleanupRequest) -> CleanupOutcome {
         self.request_cleanup_inner(request, None)
     }
 
     /// As [`Self::request_cleanup`], with no PID or tmux kill unless the binding still
     /// names `expected`, the target a stop decided on.
-    pub(crate) fn request_cleanup_expecting(
+    pub fn request_cleanup_expecting(
         &self,
         request: CleanupRequest,
         expected: ExpectedBinding<'_>,
@@ -449,14 +449,14 @@ thread_local! {
     static REAL_PID_KILL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn real_pid_kill_enabled_for_test() -> bool {
     REAL_PID_KILL.with(std::cell::Cell::get)
 }
 
 /// Runs `test` with this thread's PID kills sent for real instead of counted.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn with_real_pid_kill<T>(test: impl FnOnce() -> T) -> T {
+pub fn with_real_pid_kill<T>(test: impl FnOnce() -> T) -> T {
     struct Restore;
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -470,17 +470,17 @@ pub(crate) fn with_real_pid_kill<T>(test: impl FnOnce() -> T) -> T {
 
 /// The intents this thread has requested since the last call.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn take_requested_intents_for_test() -> Vec<TmuxCleanupIntent> {
+pub fn take_requested_intents_for_test() -> Vec<TmuxCleanupIntent> {
     REQUESTED_INTENTS.with(|intents| std::mem::take(&mut *intents.borrow_mut()))
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn pid_kill_dispatches_for_test() -> usize {
+pub fn pid_kill_dispatches_for_test() -> usize {
     PID_KILL_DISPATCHES.load(Ordering::Relaxed)
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn tmux_kill_dispatches_for_test() -> usize {
+pub fn tmux_kill_dispatches_for_test() -> usize {
     TMUX_KILL_DISPATCHES.load(Ordering::Relaxed)
 }
 
@@ -497,8 +497,8 @@ static PID_DISPATCH_BARRIERS: std::sync::Mutex<
     )>,
 > = std::sync::Mutex::new(None);
 
-#[cfg(test)]
-pub(crate) fn with_executor_dispatch_seam(test: impl FnOnce()) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn with_executor_dispatch_seam(test: impl FnOnce()) {
     use std::sync::{Mutex, OnceLock};
 
     static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();

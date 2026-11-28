@@ -37,7 +37,7 @@ struct SymlinkIdentity {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(unix, derive(serde::Serialize))]
-pub(crate) struct FileToken {
+pub struct FileToken {
     logical_path: PathBuf,
     resolved_path: PathBuf,
     identity: FileIdentity,
@@ -59,7 +59,7 @@ impl FileToken {
         Ok(Sha256::digest(bytes).into())
     }
 
-    pub(crate) fn digest(&self) -> [u8; 32] {
+    pub fn digest(&self) -> [u8; 32] {
         self.hash
     }
 
@@ -128,7 +128,7 @@ impl FileToken {
     }
 }
 
-pub(crate) fn directory_identity(path: &Path) -> Result<(u64, u64), Unverified> {
+pub fn directory_identity(path: &Path) -> Result<(u64, u64), Unverified> {
     let metadata = std::fs::metadata(path).map_err(|_| Unverified::File)?;
     if !metadata.is_dir() {
         return Err(Unverified::File);
@@ -142,7 +142,7 @@ pub(crate) fn read(path: &Path) -> Result<FileSnapshot, Unverified> {
 }
 
 /// Executable images are hashed incrementally; their bytes are never retained as config text.
-pub(crate) fn image(path: &Path) -> Result<FileToken, Unverified> {
+pub fn image(path: &Path) -> Result<FileToken, Unverified> {
     snapshot(path, None, false, || {}).map(|snapshot| snapshot.token)
 }
 

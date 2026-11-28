@@ -2,19 +2,19 @@
 
 use super::*;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static AFTER_APPEND: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = Default::default();
     static CORRUPT_SEQ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-#[cfg(test)]
-pub(crate) fn after_companion_for_tests(action: impl FnOnce() + 'static) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn after_companion_for_tests(action: impl FnOnce() + 'static) {
     AFTER_APPEND.with(|slot| *slot.borrow_mut() = Some(Box::new(action)));
 }
 
-#[cfg(test)]
-pub(crate) fn corrupt_companion_candidate_for_tests() {
+#[cfg(any(test, feature = "test-support"))]
+pub fn corrupt_companion_candidate_for_tests() {
     CORRUPT_SEQ.with(|slot| slot.set(true));
 }
 
@@ -63,7 +63,7 @@ pub(super) fn settle(
         if committed != Committed::Appended {
             return Ok(());
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(action) = AFTER_APPEND.with(|slot| slot.borrow_mut().take()) {
             action();
         }
@@ -151,7 +151,7 @@ fn plan_companion(
     if ownership.pending_seq != Some(pending.seq) || ownership.claim != pending.claim {
         return Ok(keep());
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let ownership = {
         let mut ownership = ownership;
         if CORRUPT_SEQ.with(|slot| slot.replace(false)) {

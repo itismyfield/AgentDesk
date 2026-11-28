@@ -43,7 +43,7 @@ static PROCESS: LazyLock<Settings> = LazyLock::new(|| {
     )
 });
 
-pub(crate) fn requested(channel: &str) -> bool {
+pub fn requested(channel: &str) -> bool {
     #[cfg(any(test, feature = "test-support"))]
     if test_activation::active(channel) {
         return true;
@@ -53,7 +53,7 @@ pub(crate) fn requested(channel: &str) -> bool {
 
 /// The activation supplier of tests: producers turn on only for the channels a guard names.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_activation {
+pub mod test_activation {
     static ACTIVE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
     pub(crate) fn active(channel: &str) -> bool {
@@ -61,9 +61,9 @@ pub(crate) mod test_activation {
         super::Settings::parse(true, Some(&channels)).selected(channel)
     }
 
-    pub(crate) struct Activated(String);
+    pub struct Activated(String);
 
-    pub(crate) fn activate(channel: u64) -> Activated {
+    pub fn activate(channel: u64) -> Activated {
         ACTIVE.lock().unwrap().push(channel.to_string());
         Activated(channel.to_string())
     }
@@ -75,11 +75,11 @@ pub(crate) mod test_activation {
     }
 }
 
-pub(crate) fn production_requested(channel: &str) -> bool {
+pub fn production_requested(channel: &str) -> bool {
     PROCESS.selected(channel)
 }
 
-pub(crate) fn supported(provider: &str, driver: &str, runtime: &str) -> bool {
+pub fn supported(provider: &str, driver: &str, runtime: &str) -> bool {
     runtime == "owned_direct"
         && driver == "legacy-prompt"
         && ProviderKind::from_str(provider).is_some_and(|p| {
@@ -133,14 +133,14 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static READS: LazyLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> =
     LazyLock::new(Default::default);
-#[cfg(test)]
-pub(crate) fn record_read(key: &str) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn record_read(key: &str) {
     *READS.lock().unwrap().entry(key.into()).or_default() += 1;
 }
-#[cfg(test)]
-pub(crate) fn reads(key: &str) -> u64 {
+#[cfg(any(test, feature = "test-support"))]
+pub fn reads(key: &str) -> u64 {
     *READS.lock().unwrap().get(key).unwrap_or(&0)
 }

@@ -1,10 +1,10 @@
 //! Busy input's host boundary; the owner keeps framing, notices and settlement.
-mod herdr;
+pub mod herdr;
 mod tmux;
-pub(crate) use herdr::observe as observe_herdr;
+pub use herdr::observe as observe_herdr;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use herdr::{Context, Source};
-pub(crate) use tmux::{cause, loads};
+pub use herdr::{Context, Source};
+pub use tmux::{cause, loads};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,9 +14,9 @@ use crate::services::claude_tui::busy_inject::{self, Request, Screen, Veto};
 use crate::services::provider::CancelToken;
 use crate::services::session_host::HerdrTarget;
 
-pub(crate) type BusyProbe = Box<dyn FnMut() -> Screen + Send>;
+pub type BusyProbe = Box<dyn FnMut() -> Screen + Send>;
 
-pub(crate) enum BusyOutcome {
+pub enum BusyOutcome {
     NotSent {
         reason: String,
         waits: bool,
@@ -28,9 +28,9 @@ pub(crate) enum BusyOutcome {
     Stopped,
 }
 
-pub(crate) struct BusyReport {
-    pub(crate) outcome: BusyOutcome,
-    pub(crate) draft_unproven: bool,
+pub struct BusyReport {
+    pub outcome: BusyOutcome,
+    pub draft_unproven: bool,
 }
 
 impl BusyReport {
@@ -61,13 +61,13 @@ impl BusyReport {
 type BusySubmit = Box<dyn Fn(&Request<'_>) -> BusyReport + Send>;
 
 /// One already-resolved host's busy transaction, ending at Enter without a resend.
-pub(crate) struct BusyOperation {
+pub struct BusyOperation {
     submit: BusySubmit,
     host_tag: Option<&'static str>,
 }
 
 impl BusyOperation {
-    pub(crate) fn for_session(
+    pub fn for_session(
         session: &str,
         herdr: Option<(HerdrTarget, String)>,
         program: PathBuf,
@@ -79,6 +79,18 @@ impl BusyOperation {
             || (InputTarget::Tmux(session.into()), None),
             |(target, writer)| (InputTarget::Herdr(target), Some(writer)),
         );
+        Self::new(target, program, timing, declared, cancel, writer)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new_for_test(
+        target: InputTarget,
+        program: PathBuf,
+        timing: &'static busy_inject::Timing,
+        declared: bool,
+        cancel: Arc<CancelToken>,
+        writer: Option<String>,
+    ) -> Result<Self, String> {
         Self::new(target, program, timing, declared, cancel, writer)
     }
 
@@ -119,19 +131,19 @@ impl BusyOperation {
         Ok(Self { submit, host_tag })
     }
 
-    pub(crate) fn submit(&self, request: &Request<'_>) -> BusyReport {
-        #[cfg(test)]
+    pub fn submit(&self, request: &Request<'_>) -> BusyReport {
+        #[cfg(any(test, feature = "test-support"))]
         observe(request.nonce);
         (self.submit)(request)
     }
 
-    pub(crate) fn host_tag(&self) -> Option<&'static str> {
+    pub fn host_tag(&self) -> Option<&'static str> {
         self.host_tag
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum BusyState {
+pub enum BusyState {
     Legacy,
     Idle,
     Held,
@@ -140,7 +152,7 @@ pub(crate) enum BusyState {
 
 /// The immutable target read for this front and the source its later key must still name.
 #[derive(Clone)]
-pub(crate) struct BusyObservation {
+pub struct BusyObservation {
     context: Option<Arc<herdr::Context>>,
     state: BusyState,
     source: Option<herdr::Source>,
@@ -149,17 +161,17 @@ pub(crate) struct BusyObservation {
 #[cfg(any(test, feature = "test-support"))]
 impl BusyObservation {
     /// The Herdr read this observation captured, for tests outside this module.
-    pub(crate) fn context_for_test(&self) -> Option<&herdr::Context> {
+    pub fn context_for_test(&self) -> Option<&herdr::Context> {
         self.context.as_deref()
     }
 
-    pub(crate) fn admits_for_test(&self, request: &Request<'_>) -> bool {
+    pub fn admits_for_test(&self, request: &Request<'_>) -> bool {
         self.admits(request)
     }
 }
 
 impl BusyObservation {
-    pub(crate) fn only(state: BusyState) -> Self {
+    pub fn only(state: BusyState) -> Self {
         Self {
             context: None,
             state,
@@ -167,27 +179,27 @@ impl BusyObservation {
         }
     }
 
-    pub(crate) fn state(&self) -> BusyState {
+    pub fn state(&self) -> BusyState {
         self.state
     }
 
-    pub(crate) fn transcript(&self) -> Option<&Path> {
+    pub fn transcript(&self) -> Option<&Path> {
         self.source.as_ref().map(|source| source.id.path.as_path())
     }
 
-    pub(crate) fn session_id(&self) -> Option<&str> {
+    pub fn session_id(&self) -> Option<&str> {
         self.source
             .as_ref()
             .map(|source| source.id.session_id.as_str())
     }
 
-    pub(crate) fn target(&self) -> Option<serde_json::Value> {
+    pub fn target(&self) -> Option<serde_json::Value> {
         self.context
             .as_ref()
             .map(|context| context.attempt_target.clone())
     }
 
-    pub(crate) fn source(&self) -> Option<serde_json::Value> {
+    pub fn source(&self) -> Option<serde_json::Value> {
         self.source.as_ref().map(|source| {
             serde_json::json!({
                 "kind":"existing", "session_id":source.id.session_id,
@@ -197,13 +209,13 @@ impl BusyObservation {
         })
     }
 
-    pub(crate) fn herdr(&self) -> Option<(HerdrTarget, String)> {
+    pub fn herdr(&self) -> Option<(HerdrTarget, String)> {
         self.context
             .as_ref()
             .map(|context| (context.target.clone(), context.writer.clone()))
     }
 
-    pub(crate) fn probe(&self) -> BusyProbe {
+    pub fn probe(&self) -> BusyProbe {
         let context = self.context.clone();
         Box::new(
             move || match context.as_ref().map(|context| context.read()) {
@@ -213,7 +225,7 @@ impl BusyObservation {
         )
     }
 
-    pub(crate) fn prepare_busy(
+    pub fn prepare_busy(
         &self,
         program: PathBuf,
         timing: &'static busy_inject::Timing,
@@ -278,18 +290,18 @@ impl Refused {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static OBSERVED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, usize>>> =
     std::sync::LazyLock::new(Default::default);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn observe(nonce: &str) {
     let mut observed = OBSERVED.lock().unwrap_or_else(|error| error.into_inner());
     *observed.entry(nonce.into()).or_default() += 1;
 }
 
-#[cfg(test)]
-pub(crate) fn observed(nonce: &str) -> usize {
+#[cfg(any(test, feature = "test-support"))]
+pub fn observed(nonce: &str) -> usize {
     OBSERVED
         .lock()
         .unwrap_or_else(|error| error.into_inner())

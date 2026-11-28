@@ -5,7 +5,7 @@ use super::*;
 mod submitted {
     use crate::services::session_host::HerdrTarget;
 
-    pub(crate) struct Submitted {
+    pub struct Submitted {
         pub(super) target: HerdrTarget,
         pub(super) logged: tokio::sync::watch::Receiver<u64>,
     }
@@ -13,7 +13,7 @@ mod submitted {
 #[cfg(not(any(test, feature = "test-support")))]
 pub(super) use submitted::Submitted;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use submitted::Submitted;
+pub use submitted::Submitted;
 
 pub(super) fn submit(
     turn: &CodexHerdrTurn<'_>,
@@ -184,7 +184,7 @@ fn write(
             crate::services::claude_tui::owner_input::vetoed("hold_unavailable");
         }
     })?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     crate::services::provider::herdr_before_start::test_input_boundary(cancel);
     let mut denied = false;
     let run = observed_input(
@@ -303,13 +303,13 @@ pub(super) fn observe(
 
 #[cfg(any(test, feature = "test-support"))]
 impl Submitted {
-    pub(crate) fn logged_for_test(&self) -> &tokio::sync::watch::Receiver<u64> {
+    pub fn logged_for_test(&self) -> &tokio::sync::watch::Receiver<u64> {
         &self.logged
     }
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn submit_for_test(
+pub fn submit_for_test(
     turn: &CodexHerdrTurn<'_>,
     runtime: &Handle,
     nonce: &str,
@@ -318,7 +318,7 @@ pub(crate) fn submit_for_test(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn submit_owned_for_test(
+pub fn submit_owned_for_test(
     turn: &CodexHerdrTurn<'_>,
     hook: crate::services::claude_tui::owner_input::LaunchHook,
     lineage: crate::services::claude_tui::owner_input::Lineage,
@@ -329,4 +329,4 @@ pub(crate) fn submit_owned_for_test(
 
 #[cfg(any(test, feature = "test-support"))]
 #[path = "first_input/pending_lookup_probe_tests.rs"]
-pub(crate) mod pending_lookup_probe;
+pub mod pending_lookup_probe;

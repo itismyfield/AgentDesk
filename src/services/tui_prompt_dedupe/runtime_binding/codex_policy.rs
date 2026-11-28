@@ -6,10 +6,10 @@ use super::*;
 use crate::services::tmux_common::{self as tc, TmuxSourceAuthority};
 use crate::services::tui_prompt_dedupe::binding_context::{self, BindingContext, SpawnNonceMarker};
 
-pub(crate) mod clear_relaunch;
+pub mod clear_relaunch;
 mod disposition_cache;
 mod hold_detail;
-pub(crate) use hold_detail::codex_verified_hold_detail;
+pub use hold_detail::codex_verified_hold_detail;
 
 #[derive(Clone)]
 pub(super) struct PinnedIncarnation(BindingContext);
@@ -111,17 +111,17 @@ fn judge_observed(
     SourcePolicyState::Legacy
 }
 
-pub(crate) fn codex_verified_requires_proof_under_source_authority(
+pub fn codex_verified_requires_proof_under_source_authority(
     authority: &TmuxSourceAuthority<'_>,
 ) -> bool {
     !matches!(disposition(authority), SourcePolicyState::Legacy)
 }
 
-pub(crate) fn codex_verified_requires_proof(tmux: &str) -> bool {
+pub fn codex_verified_requires_proof(tmux: &str) -> bool {
     tc::with_tmux_source_authority(tmux, codex_verified_requires_proof_under_source_authority)
 }
 
-pub(crate) fn codex_verified_source_allowed_under_source_authority(
+pub fn codex_verified_source_allowed_under_source_authority(
     authority: &TmuxSourceAuthority<'_>,
     path: &str,
     session_id: Option<&str>,
@@ -149,17 +149,13 @@ pub(crate) fn codex_verified_source_allowed_under_source_authority(
     codex_verified::consumer_allowed(authority, &binding)
 }
 
-pub(crate) fn codex_verified_source_allowed(
-    tmux: &str,
-    path: &str,
-    session_id: Option<&str>,
-) -> bool {
+pub fn codex_verified_source_allowed(tmux: &str, path: &str, session_id: Option<&str>) -> bool {
     tc::with_tmux_source_authority(tmux, |a| {
         codex_verified_source_allowed_under_source_authority(a, path, session_id)
     })
 }
 
-pub(crate) fn codex_verified_input_blocked(tmux: &str) -> bool {
+pub fn codex_verified_input_blocked(tmux: &str) -> bool {
     tc::with_tmux_source_authority(tmux, |authority| match disposition(authority) {
         SourcePolicyState::Legacy => false,
         SourcePolicyState::VerifiedUnavailable => true,
@@ -175,7 +171,7 @@ pub(crate) fn codex_verified_input_blocked(tmux: &str) -> bool {
     })
 }
 
-pub(crate) fn codex_verified_hold_reason(tmux: &str) -> &'static str {
+pub fn codex_verified_hold_reason(tmux: &str) -> &'static str {
     tc::with_tmux_source_authority(tmux, |authority| {
         if clear_relaunch::open_under(authority) {
             return "cleared_awaiting_launch";
@@ -210,13 +206,13 @@ pub(crate) fn codex_verified_hold_reason(tmux: &str) -> &'static str {
     })
 }
 
-pub(crate) fn codex_verified_channel_requires_proof(channel: u64) -> bool {
+pub fn codex_verified_channel_requires_proof(channel: u64) -> bool {
     verified_panes(channel)
         .into_iter()
         .any(|tmux| codex_verified_requires_proof(&tmux))
 }
 
-pub(crate) fn codex_verified_channel_delivery_allowed(channel: u64) -> bool {
+pub fn codex_verified_channel_delivery_allowed(channel: u64) -> bool {
     let panes = verified_panes(channel);
     panes
         .into_iter()
@@ -225,7 +221,7 @@ pub(crate) fn codex_verified_channel_delivery_allowed(channel: u64) -> bool {
 
 /// Whether each of `events` may bind its source; a pane's policy is judged once for all its events,
 /// under one hold of its source authority.
-pub(crate) fn codex_verified_events_allowed(events: &[&binding_events::BindingEvent]) -> Vec<bool> {
+pub fn codex_verified_events_allowed(events: &[&binding_events::BindingEvent]) -> Vec<bool> {
     let mut allowed = vec![true; events.len()];
     let mut panes: Vec<&str> = (events.iter())
         .filter(|event| event.provider == "codex")
@@ -316,12 +312,9 @@ mod provenance_tests;
 #[path = "codex_policy/observation_tests.rs"]
 mod observation_tests;
 
-pub(crate) fn codex_verified_o_source_allowed(
-    channel: u64,
-    source: &binding_events::SourceId,
-) -> bool {
-    #[cfg(all(test, unix))]
-    crate::services::tui_o::writer::tests::restart_policy_call(channel);
+pub fn codex_verified_o_source_allowed(channel: u64, source: &binding_events::SourceId) -> bool {
+    #[cfg(all(any(test, feature = "test-support"), unix))]
+    crate::services::tui_o::writer::test_support::restart_policy_call(channel);
     // O's cursor keeps the dev it first stored; the proof reads the file's dev now.
     let same = crate::services::tui_o::shadow::capture::same_file;
     verified_panes(channel).into_iter().all(|tmux| {

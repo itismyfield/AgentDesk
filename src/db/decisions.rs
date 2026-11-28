@@ -4,15 +4,15 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-pub(crate) mod requests;
+pub mod requests;
 
 /// The input source only the Decision service uses; a request that names it proves nothing.
-pub(crate) const SOURCE: &str = "decision";
+pub const SOURCE: &str = "decision";
 /// The tag of every ticket an event's original is admitted under.
-pub(crate) const TICKET_TAG: &str = "dcsn";
+pub const TICKET_TAG: &str = "dcsn";
 
 /// The event an origin of the form `decision:<uuid>[:opinion:<message id>]` names.
-pub(crate) fn event_of_origin(origin: &str) -> Option<Uuid> {
+pub fn event_of_origin(origin: &str) -> Option<Uuid> {
     let rest = origin.strip_prefix("decision:")?;
     let (event, tail) = rest.split_at_checked(36)?;
     let opinion = tail.strip_prefix(":opinion:").is_some_and(|message| {
@@ -24,7 +24,7 @@ pub(crate) fn event_of_origin(origin: &str) -> Option<Uuid> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum EventKind {
+pub enum EventKind {
     Selection,
     Opinion,
 }
@@ -45,21 +45,21 @@ impl DecisionProvenance {
         self.kind
     }
 
-    pub(crate) fn origin(&self) -> &str {
+    pub fn origin(&self) -> &str {
         &self.origin
     }
 
     /// The requester's logical channel; the session on it is resolved when the input is delivered.
-    pub(crate) fn channel_id(&self) -> u64 {
+    pub fn channel_id(&self) -> u64 {
         self.channel_id
     }
 
-    pub(crate) fn actor_id(&self) -> u64 {
+    pub fn actor_id(&self) -> u64 {
         self.actor_id
     }
 
     /// Whether `text` is byte for byte the text this event approved.
-    pub(crate) fn approves(&self, text: &str) -> bool {
+    pub fn approves(&self, text: &str) -> bool {
         hex::encode(Sha256::digest(text.as_bytes())) == self.text_sha256
     }
 }
@@ -79,7 +79,7 @@ impl DecisionProvenance {
     }
 }
 
-pub(crate) async fn load_event(
+pub async fn load_event(
     pool: &PgPool,
     event_id: Uuid,
 ) -> Result<Option<DecisionProvenance>, sqlx::Error> {
@@ -109,7 +109,7 @@ pub(crate) async fn load_event(
 /// The workflow states. `Closing` is the fence a failure writes before its original is removed;
 /// it and the three ends after it never become runnable again.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AttemptState {
+pub enum AttemptState {
     NotStarted,
     Resolving,
     NormalWait,
@@ -148,7 +148,7 @@ impl AttemptState {
         }
     }
 
-    pub(crate) fn parse(state: &str) -> Option<Self> {
+    pub fn parse(state: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|known| known.as_str() == state)
     }
 }
@@ -163,21 +163,25 @@ fn holder() -> Option<&'static str> {
 
 /// One run of a node: its identity and its start on the database clock.
 #[derive(Clone, Debug)]
-pub(crate) struct Run {
+pub struct Run {
     holder: &'static str,
-    pub(crate) boot: chrono::DateTime<chrono::Utc>,
+    boot: chrono::DateTime<chrono::Utc>,
 }
 
 impl Run {
     /// This process's run as node `instance`, started at `boot`; the first name given stays.
-    pub(crate) fn of(instance: &str, boot: chrono::DateTime<chrono::Utc>) -> Self {
+    pub fn of(instance: &str, boot: chrono::DateTime<chrono::Utc>) -> Self {
         let holder = HOLDER.get_or_init(|| instance.to_string()).as_str();
         Self { holder, boot }
+    }
+
+    pub fn boot(&self) -> chrono::DateTime<chrono::Utc> {
+        self.boot
     }
 }
 
 /// Starts the event's workflow. Only the caller whose update moved `not_started` may deliver.
-pub(crate) async fn reserve_first_attempt(
+pub async fn reserve_first_attempt(
     pool: &PgPool,
     event_id: Uuid,
     ticket: &str,
@@ -197,7 +201,7 @@ pub(crate) async fn reserve_first_attempt(
 }
 
 /// Moves the workflow from `from` to `to`. Normalizing is entered at most once per event.
-pub(crate) async fn advance(
+pub async fn advance(
     pool: &PgPool,
     event_id: Uuid,
     (from, to): (AttemptState, AttemptState),
@@ -226,7 +230,7 @@ pub(crate) async fn advance(
 
 /// The journal a write is taken under: one update from a waiting row, before any key is sent.
 /// A closed or already journaled event refuses it, so its original is never written.
-pub(crate) async fn begin_write(pool: &PgPool, event_id: Uuid) -> Result<bool, sqlx::Error> {
+pub async fn begin_write(pool: &PgPool, event_id: Uuid) -> Result<bool, sqlx::Error> {
     let moved = sqlx::query(
         "UPDATE decision_delivery_attempts
          SET state = 'may_have_sent', holder_instance_id = COALESCE($2, holder_instance_id),
@@ -242,11 +246,7 @@ pub(crate) async fn begin_write(pool: &PgPool, event_id: Uuid) -> Result<bool, s
 
 /// The closing fence: an event that journaled no write stops being runnable, with its reason.
 /// The removal of its original follows, and survives a crash between the two.
-pub(crate) async fn close(
-    pool: &PgPool,
-    event_id: Uuid,
-    reason: &str,
-) -> Result<bool, sqlx::Error> {
+pub async fn close(pool: &PgPool, event_id: Uuid, reason: &str) -> Result<bool, sqlx::Error> {
     let moved = sqlx::query(
         "UPDATE decision_delivery_attempts
          SET state = 'closing', detail = $2,
@@ -264,7 +264,7 @@ pub(crate) async fn close(
 
 /// Moves a row only while its holder's run is over for `run`: the same node moved it before this
 /// start, or its node is no longer listed online. A live holder keeps its attempt.
-pub(crate) async fn end_abandoned(
+pub async fn end_abandoned(
     pool: &PgPool,
     event_id: Uuid,
     (from, to): (AttemptState, AttemptState),
@@ -292,10 +292,7 @@ pub(crate) async fn end_abandoned(
     Ok(moved.rows_affected() == 1)
 }
 
-pub(crate) async fn state_of(
-    pool: &PgPool,
-    event_id: Uuid,
-) -> Result<Option<AttemptState>, sqlx::Error> {
+pub async fn state_of(pool: &PgPool, event_id: Uuid) -> Result<Option<AttemptState>, sqlx::Error> {
     let state: Option<String> =
         sqlx::query_scalar("SELECT state FROM decision_delivery_attempts WHERE event_id = $1")
             .bind(event_id)
@@ -306,19 +303,19 @@ pub(crate) async fn state_of(
 
 /// A started workflow that has not reached its end.
 #[derive(Clone, Debug)]
-pub(crate) struct Unsettled {
-    pub(crate) event_id: Uuid,
-    pub(crate) origin: String,
-    pub(crate) agent_id: String,
-    pub(crate) channel_id: u64,
-    pub(crate) state: AttemptState,
+pub struct Unsettled {
+    pub event_id: Uuid,
+    pub origin: String,
+    pub agent_id: String,
+    pub channel_id: u64,
+    pub state: AttemptState,
     /// The run that last moved it is over; `end_abandoned` checks that again when it ends it.
-    pub(crate) stale: bool,
+    pub stale: bool,
 }
 
 /// The unsettled workflows of `channel`, or of every channel, oldest event first. A row reads as
 /// stale only to `run`, by the rule of `end_abandoned`; its age alone never makes it so.
-pub(crate) async fn unsettled(
+pub async fn unsettled(
     pool: &PgPool,
     channel: Option<u64>,
     run: Option<&Run>,
@@ -357,7 +354,7 @@ pub(crate) async fn unsettled(
 
 /// The origin and channel of every event that reached its end among those reserved under
 /// `tickets`: what an owner still holding one of these originals has left to remove.
-pub(crate) async fn closed_under(
+pub async fn closed_under(
     pool: &PgPool,
     tickets: &[String],
 ) -> Result<Vec<(String, u64)>, sqlx::Error> {
@@ -375,10 +372,10 @@ pub(crate) async fn closed_under(
 }
 
 /// The database clock now: a run that starts here wrote none of the rows moved before it.
-pub(crate) async fn clock(pool: &PgPool) -> Result<chrono::DateTime<chrono::Utc>, sqlx::Error> {
+pub async fn clock(pool: &PgPool) -> Result<chrono::DateTime<chrono::Utc>, sqlx::Error> {
     sqlx::query_scalar("SELECT NOW()").fetch_one(pool).await
 }
 
 #[cfg(any(test, feature = "test-support"))]
 #[path = "decisions_support_tests.rs"]
-pub(crate) mod test_support;
+pub mod test_support;

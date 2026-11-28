@@ -12,6 +12,8 @@ mod finalizer_identity;
 mod herdr_turn_evidence;
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) mod herdr_turn_evidence_tests;
+#[cfg(unix)]
+pub(in crate::services::discord) use herdr_turn_evidence::current_bound_nonce;
 pub(in crate::services::discord) use herdr_turn_evidence::{
     herdr_fresh_idle_signal, herdr_turn_held, install_turn_start_sink,
 };
@@ -280,10 +282,11 @@ use self::save_store::{
 // Clear/Abandon cluster re-exports (original visibility mirrored).
 #[cfg(unix)]
 pub(in crate::services::discord) use self::clear_store::clear_admitted_restart_terminal;
+#[cfg(test)]
+pub(crate) use self::clear_store::request_inflight_abandon_if_matches_zero_owned;
 pub(crate) use self::clear_store::{
     GuardedClearOutcome, clear_inflight_state, clear_inflight_state_if_matches,
     clear_inflight_state_if_matches_zero_owned, request_inflight_abandon_if_matches,
-    request_inflight_abandon_if_matches_zero_owned,
 };
 pub(in crate::services::discord) use self::clear_store::{
     ReconcileClearOutcome, archive_inflight_state_if_matches_identity_generation,

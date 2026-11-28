@@ -18,41 +18,53 @@ const PROBE_INTERVAL: Duration = Duration::from_millis(PROBE_TTL_MS as u64 / 4);
 static SNAPSHOT: LazyLock<RwLock<Option<ExecutionProbe>>> = LazyLock::new(|| RwLock::new(None));
 static POLLERS: LazyLock<RwLock<BTreeMap<String, i64>>> =
     LazyLock::new(|| RwLock::new(BTreeMap::new()));
-pub(crate) fn boot_id() -> String {
+pub fn boot_id() -> String {
     crate::services::process_boot::initialize().id.clone()
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct ProviderEvidence {
-    #[serde(default)]
-    pub cli_installed: bool,
-    pub cli_usable: bool,
-    pub version: Option<String>,
-    pub failure: Option<String>,
-    pub credential_profiles: BTreeMap<String, bool>,
-    // Credential metadata is evidence of configuration, not successful remote
-    // authentication or available quota. Neither is fabricated from presence.
-    pub authentication_verified: bool,
-    pub quota_verified: bool,
+mod execution_probe {
+    use super::*;
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub struct ProviderEvidence {
+        #[serde(default)]
+        pub cli_installed: bool,
+        pub cli_usable: bool,
+        pub version: Option<String>,
+        pub failure: Option<String>,
+        pub credential_profiles: BTreeMap<String, bool>,
+        // Credential metadata is evidence of configuration, not successful remote
+        // authentication or available quota. Neither is fabricated from presence.
+        pub authentication_verified: bool,
+        pub quota_verified: bool,
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub struct ExecutionProbe {
+        pub schema: u32,
+        pub boot_id: String,
+        pub observed_at_ms: i64,
+        pub expires_at_ms: i64,
+        pub os: String,
+        pub arch: String,
+        #[serde(serialize_with = "crate::config::RuntimeProfile::serialize_registry")]
+        pub runtime_profile: crate::config::RuntimeProfile,
+        pub release: Value,
+        #[cfg(not(any(test, feature = "test-support")))]
+        pub(crate) providers: BTreeMap<String, ProviderEvidence>,
+        #[cfg(any(test, feature = "test-support"))]
+        pub providers: BTreeMap<String, ProviderEvidence>,
+        pub tools: BTreeMap<String, bool>,
+        pub repositories: BTreeMap<String, bool>,
+        pub backends: Vec<String>,
+        pub disk_free_bytes: Option<u64>,
+    }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct ExecutionProbe {
-    pub schema: u32,
-    pub boot_id: String,
-    pub observed_at_ms: i64,
-    pub expires_at_ms: i64,
-    pub os: String,
-    pub arch: String,
-    #[serde(serialize_with = "crate::config::RuntimeProfile::serialize_registry")]
-    pub runtime_profile: crate::config::RuntimeProfile,
-    pub release: Value,
-    pub providers: BTreeMap<String, ProviderEvidence>,
-    pub tools: BTreeMap<String, bool>,
-    pub repositories: BTreeMap<String, bool>,
-    pub backends: Vec<String>,
-    pub disk_free_bytes: Option<u64>,
-}
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use execution_probe::{ExecutionProbe, ProviderEvidence};
+#[cfg(any(test, feature = "test-support"))]
+pub use execution_probe::{ExecutionProbe, ProviderEvidence};
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub(crate) struct ReadinessReport {
@@ -173,7 +185,7 @@ fn with_forwarding(mut report: ReadinessReport, node: &Value) -> ReadinessReport
     report
 }
 
-pub(crate) fn attach_diagnostics(node: &mut Value) {
+pub fn attach_diagnostics(node: &mut Value) {
     let providers = node
         .pointer("/capabilities/intake_worker/providers")
         .and_then(Value::as_array)
@@ -424,7 +436,7 @@ fn readiness_probe(kind: &ProviderKind) -> Option<crate::services::provider::Pro
     })
 }
 
-#[cfg(all(test, unix))]
-pub(crate) fn collect_for_login_test() -> ExecutionProbe {
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub fn collect_for_login_test() -> ExecutionProbe {
     collect(&Config::default())
 }

@@ -23,9 +23,12 @@ const MEMENTO_CONTEXT_FULL_TOKEN_BUDGET: u64 = 1_000;
 
 #[path = "memento_anchor.rs"]
 mod anchor;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
+#[cfg(not(any(test, feature = "test-support")))]
 pub(crate) use anchor::load_session_anchor_prompt;
-pub(crate) use anchor::{SessionAnchorRequest, load_session_anchor_snapshot};
+#[cfg(any(test, feature = "test-support"))]
+pub use anchor::load_session_anchor_prompt;
+pub use anchor::{SessionAnchorRequest, load_session_anchor_snapshot};
 #[path = "memento_endpoint.rs"]
 mod endpoint;
 #[cfg(all(test, unix))]
@@ -36,7 +39,7 @@ mod scope;
 #[path = "memento_transport.rs"]
 mod transport;
 use endpoint::{mcp_url, normalize_memento_endpoint};
-pub(crate) use scope::{
+pub use scope::{
     resolve_memento_agent_id, resolve_memento_workspace, resolve_memento_workspace_for_channel,
     sanitize_memento_workspace_segment,
 };
@@ -60,7 +63,7 @@ tokio::task_local! {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn with_memento_test_endpoint<T>(
+pub async fn with_memento_test_endpoint<T>(
     endpoint: String,
     run: impl std::future::Future<Output = T>,
 ) -> T {
@@ -79,7 +82,7 @@ pub(crate) async fn with_memento_test_endpoint<T>(
 #[cfg(any(test, feature = "test-support"))]
 impl MementoBackend {
     /// Resolves the workspace under a fixture runtime config with no workspace override.
-    pub(crate) fn resolve_workspace_for_test(
+    pub fn resolve_workspace_for_test(
         &self,
         role_id: &str,
         channel_id: u64,
@@ -100,7 +103,7 @@ struct ToolCallResult {
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct MementoRememberRequest {
+pub struct MementoRememberRequest {
     pub content: String,
     pub topic: String,
     pub kind: String,
@@ -122,14 +125,14 @@ pub(crate) struct MementoRememberRequest {
 }
 
 #[derive(Clone)]
-pub(crate) struct MementoBackend {
+pub struct MementoBackend {
     client: reqwest::Client,
     settings: ResolvedMemorySettings,
     mcp_session: Arc<Mutex<Option<CachedMcpSession>>>,
 }
 
 impl MementoBackend {
-    pub(crate) fn new(settings: ResolvedMemorySettings) -> Self {
+    pub fn new(settings: ResolvedMemorySettings) -> Self {
         Self {
             client: reqwest::Client::new(),
             settings,
@@ -318,10 +321,7 @@ impl MementoBackend {
         self.initialize_session(config).await
     }
 
-    pub(crate) async fn remember(
-        &self,
-        request: MementoRememberRequest,
-    ) -> Result<TokenUsage, String> {
+    pub async fn remember(&self, request: MementoRememberRequest) -> Result<TokenUsage, String> {
         if request.content.trim().is_empty() {
             return Err("memento remember requires non-empty content".to_string());
         }

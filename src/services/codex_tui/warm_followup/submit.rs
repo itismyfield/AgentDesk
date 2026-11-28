@@ -3,7 +3,7 @@ use super::*;
 /// Settles the one submit; `None` goes on to tail the rollout. A draft that stayed
 /// in the composer is killed for a relaunch only on a confirmed tmux session.
 #[cfg(unix)]
-pub(super) fn settle_submit(
+pub fn settle_submit(
     target: &InputTarget,
     tmux_session_name: &str,
     outcome: CodexFollowupPromptSubmitOutcome,
@@ -111,7 +111,7 @@ pub(super) fn settle_submit(
 
 /// Settles one submit for the warm follow-up test mounted in the discord-layer test host.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn settle_submit_for_test(
+pub fn settle_submit_for_test(
     target: &InputTarget,
     tmux_session_name: &str,
     outcome: CodexFollowupPromptSubmitOutcome,
@@ -131,14 +131,80 @@ pub(crate) fn settle_submit_for_test(
     )
 }
 
+/// The clear end and ticket a warm follow-up test installs (KRX-TS): stored under the same pane authority the
+/// production path reads, so upper-crate tests drive the real consumer.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
+    use crate::services::codex_tui::execution_end::attempt;
+    use crate::services::tmux_common as tc;
+    use crate::services::tui_o::store::codex_end::{self, CodexEnd, ContextSnapshot, EndBasis};
+
+    pub fn install_clear_end(channel: u64, pane: &str) -> CodexEnd {
+        use crate::services::tui_o::shadow::SourceId;
+        let root = crate::config::runtime_root().unwrap();
+        let old_nonce = "a".repeat(32);
+        let now = chrono::Utc::now();
+        let provider_root = root.join("codex");
+        let context = ContextSnapshot {
+            schema: 1,
+            provider: "codex".into(),
+            created_at: now,
+            execution_nonce: old_nonce.clone(),
+            tmux_session: pane.to_owned(),
+            channel_id: Some(channel),
+            owner_runtime_root: root.display().to_string(),
+            host: Some("warm-test".into()),
+            expected_native_session_id: None,
+            launch_mode: "fresh".into(),
+            provider_root: Some(provider_root.clone()),
+            first_prompt_digest: None,
+            source_policy: Some("shadow".into()),
+        };
+        let end = CodexEnd {
+            end_id: "warm-clear-end".into(),
+            channel,
+            provider: "codex".into(),
+            tmux_session: pane.to_owned(),
+            execution_nonce: old_nonce,
+            host: "warm-test".into(),
+            owner_runtime_root: root.display().to_string(),
+            provider_root: provider_root.clone(),
+            source: SourceId {
+                session_id: "old-source".into(),
+                path: provider_root.join("old-source.jsonl"),
+                dev: 1,
+                ino: 2,
+            },
+            binding_seq: 1,
+            captured_at: now,
+            ended_at: now,
+            basis: EndBasis::ExplicitClear,
+            context,
+            successor: None,
+        };
+        codex_end::append(&root, &end).unwrap();
+        tc::with_tmux_source_authority(pane, |authority| {
+            let epoch = attempt::generation(channel, authority);
+            assert!(attempt::install_ticket(
+                channel,
+                authority,
+                epoch,
+                &end.end_id
+            ));
+        });
+        end
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
+    use super::test_support::install_clear_end;
     use super::*;
     use crate::services::codex_tui::execution_end::attempt::{self, Phase};
     use crate::services::codex_tui::host_input::spy::{known, resolved};
     use crate::services::session_host::HostKind;
     use crate::services::tmux_common as tc;
-    use crate::services::tui_o::store::codex_end::{self, CodexEnd, ContextSnapshot, EndBasis};
+    use crate::services::tui_o::store::codex_end;
     use std::sync::Arc;
 
     #[derive(Clone, Default)]
@@ -172,7 +238,7 @@ pub(crate) mod tests {
     #[test]
     fn submitted_warm_capture_failure_warns_only_for_fresh_shadow_successor() {
         use crate::services::codex_tui::execution_end::producer::LaunchObservation;
-        use crate::services::provider_teardown::tests::test_support::FakeTmux;
+        use crate::services::provider_teardown::test_support::FakeTmux;
         use crate::services::tui_prompt_dedupe::binding_context::{self, BindingContext};
         let _root = crate::config::TestRuntimeRootGuard::new();
         attempt::reset_for_tests();
@@ -273,62 +339,6 @@ pub(crate) mod tests {
         }
         assert!(codex_end::read(&root, channel).unwrap().is_empty());
         drop(dispatch);
-    }
-
-    pub(crate) fn install_clear_end(channel: u64, pane: &str) -> CodexEnd {
-        use crate::services::tui_o::shadow::SourceId;
-        let root = crate::config::runtime_root().unwrap();
-        let old_nonce = "a".repeat(32);
-        let now = chrono::Utc::now();
-        let provider_root = root.join("codex");
-        let context = ContextSnapshot {
-            schema: 1,
-            provider: "codex".into(),
-            created_at: now,
-            execution_nonce: old_nonce.clone(),
-            tmux_session: pane.to_owned(),
-            channel_id: Some(channel),
-            owner_runtime_root: root.display().to_string(),
-            host: Some("warm-test".into()),
-            expected_native_session_id: None,
-            launch_mode: "fresh".into(),
-            provider_root: Some(provider_root.clone()),
-            first_prompt_digest: None,
-            source_policy: Some("shadow".into()),
-        };
-        let end = CodexEnd {
-            end_id: "warm-clear-end".into(),
-            channel,
-            provider: "codex".into(),
-            tmux_session: pane.to_owned(),
-            execution_nonce: old_nonce,
-            host: "warm-test".into(),
-            owner_runtime_root: root.display().to_string(),
-            provider_root: provider_root.clone(),
-            source: SourceId {
-                session_id: "old-source".into(),
-                path: provider_root.join("old-source.jsonl"),
-                dev: 1,
-                ino: 2,
-            },
-            binding_seq: 1,
-            captured_at: now,
-            ended_at: now,
-            basis: EndBasis::ExplicitClear,
-            context,
-            successor: None,
-        };
-        codex_end::append(&root, &end).unwrap();
-        tc::with_tmux_source_authority(pane, |authority| {
-            let epoch = attempt::generation(channel, authority);
-            assert!(attempt::install_ticket(
-                channel,
-                authority,
-                epoch,
-                &end.end_id
-            ));
-        });
-        end
     }
 
     #[test]

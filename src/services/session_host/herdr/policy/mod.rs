@@ -4,29 +4,29 @@
 
 #[cfg(unix)]
 pub(crate) mod apply;
-pub(crate) mod boot_grants;
+pub mod boot_grants;
 mod cache;
 pub(crate) mod checker;
 #[cfg(unix)]
-pub(crate) mod consent;
-pub(crate) mod diagnostics;
-pub(crate) mod durable;
+pub mod consent;
+pub mod diagnostics;
+pub mod durable;
 #[cfg(unix)]
 pub(crate) mod editor;
-pub(crate) mod file;
-pub(crate) mod grant_store;
-pub(crate) mod peer;
-pub(crate) mod permit;
+pub mod file;
+pub mod grant_store;
+pub mod peer;
+pub mod permit;
 mod types;
 mod witness_codec;
 #[cfg(unix)]
 pub(crate) mod writer_compat;
 
-pub(crate) use cache::{ProofCache, explicit_false};
-pub(crate) use types::{NextRestartProof, StartupProof};
+pub use cache::{ProofCache, explicit_false};
+pub use types::{NextRestartProof, StartupProof};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Unverified {
+pub enum Unverified {
     Peer,
     Unsupported,
     Ambiguous,
@@ -55,16 +55,16 @@ pub(crate) enum Unverified {
 }
 
 /// Supplies a fresh, validated peer observation for the consented endpoint.
-pub(crate) trait PeerSource: Send + Sync {
+pub trait PeerSource: Send + Sync {
     fn snapshot(&self) -> Result<peer::PeerSnapshot, Unverified>;
 }
 
 #[async_trait::async_trait]
-pub(crate) trait ConfigChecker: Send + Sync {
+pub trait ConfigChecker: Send + Sync {
     async fn check(&self, peer: &peer::PeerSnapshot) -> Result<(), Unverified>;
 }
 
-pub(crate) struct LocalChecker;
+pub struct LocalChecker;
 
 #[async_trait::async_trait]
 impl ConfigChecker for LocalChecker {

@@ -19,7 +19,7 @@ pub const MAX_PARTIAL_BYTES: usize = 16 * 1024 * 1024;
 pub fn file_identity(meta: &Metadata) -> (u64, u64) {
     use std::os::unix::fs::MetadataExt;
     let (dev, ino) = (meta.dev(), meta.ino());
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let dev = renumber::dev(dev, ino);
     (dev, ino)
 }
@@ -106,8 +106,8 @@ pub fn same_file(a: &SourceId, b: &SourceId) -> bool {
 }
 
 /// Renumbers chosen files' dev as a reboot would, keyed by their real (dev, ino).
-#[cfg(all(test, unix))]
-pub(crate) mod renumber {
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub mod renumber {
     use std::collections::HashMap;
     use std::path::Path;
     use std::sync::{LazyLock, Mutex};
@@ -121,7 +121,7 @@ pub(crate) mod renumber {
 
     /// Live stats of `path`'s inode report a dev XORed with `shift` until the guard drops. Keep
     /// the inode alive meanwhile, so no other test's new file reuses it.
-    pub(crate) fn shift(path: &Path, shift: u64) -> Guard {
+    pub fn shift(path: &Path, shift: u64) -> Guard {
         use std::os::unix::fs::MetadataExt;
         let meta = std::fs::metadata(path).unwrap();
         let key = (meta.dev(), meta.ino());
@@ -129,7 +129,7 @@ pub(crate) mod renumber {
         Guard(key)
     }
 
-    pub(crate) struct Guard((u64, u64));
+    pub struct Guard((u64, u64));
 
     impl Drop for Guard {
         fn drop(&mut self) {
@@ -160,9 +160,9 @@ fn read_at(mut file: &File, offset: u64, len: u64) -> io::Result<Vec<u8>> {
     file.seek(SeekFrom::Start(offset))?;
     let mut bytes = Vec::new();
     file.take(len).read_to_end(&mut bytes)?;
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     self::io_trace::record_source(file, "source_capture", bytes.len() as u64);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     self::io_trace::record(offset, bytes.len() as u64, false);
     Ok(bytes)
 }
@@ -205,9 +205,9 @@ fn hash_prefix_into(
         },
         &mut hasher,
     )?;
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     self::io_trace::record_source(file, "source_prefix", copied);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     self::io_trace::record(0, copied, true);
     if copied < len {
         return Err(io::ErrorKind::UnexpectedEof.into());
@@ -689,8 +689,8 @@ mod tests {
 
 pub mod observation;
 
-#[cfg(test)]
-pub(crate) mod io_trace {
+#[cfg(any(test, feature = "test-support"))]
+pub mod io_trace {
     use std::cell::RefCell;
     #[cfg(unix)]
     pub(crate) fn record_source(file: &std::fs::File, tag: &'static str, len: u64) {
@@ -736,7 +736,7 @@ pub(crate) mod io_trace {
             (hook.action)();
         }
     }
-    pub(crate) fn take() -> Vec<(u64, u64, bool)> {
+    pub fn take() -> Vec<(u64, u64, bool)> {
         READS.with_borrow_mut(std::mem::take)
     }
 }

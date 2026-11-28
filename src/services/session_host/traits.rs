@@ -6,7 +6,7 @@ use super::model::{
 
 /// Observation and non-destructive input on one hosted session. Synchronous:
 /// callers keep their own `spawn_blocking`, timeouts and fallback values.
-pub(crate) trait InteractiveSessionHost: Send + Sync {
+pub trait InteractiveSessionHost: Send + Sync {
     fn submit(
         &self,
         target: super::submit::AuthorizedHostTarget<'_>,

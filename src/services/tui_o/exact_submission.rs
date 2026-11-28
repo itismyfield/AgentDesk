@@ -17,16 +17,16 @@ thread_local! {
 }
 
 // Installation remains test-only until association and preservation guards are deployed.
-#[cfg(test)]
-pub(crate) struct Installed(Option<Capability>);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
+pub struct Installed(Option<Capability>);
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for Installed {
     fn drop(&mut self) {
         CURRENT.with(|current| *current.borrow_mut() = self.0.take());
     }
 }
-#[cfg(test)]
-pub(crate) fn install(pool: sqlx::PgPool, pin: ExactEpisodePin) -> Installed {
+#[cfg(any(test, feature = "test-support"))]
+pub fn install(pool: sqlx::PgPool, pin: ExactEpisodePin) -> Installed {
     Installed(CURRENT.with(|current| {
         current.replace(Some(Capability {
             pool,
@@ -36,6 +36,11 @@ pub(crate) fn install(pool: sqlx::PgPool, pin: ExactEpisodePin) -> Installed {
             untouched: false,
         }))
     }))
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn logical_key_for_test() -> Option<String> {
+    logical_key()
 }
 
 pub(crate) fn logical_key() -> Option<String> {
@@ -49,6 +54,11 @@ fn append(capability: &Capability, evidence: EpisodeEvidence) -> Result<(), Stri
         .block_on(record_episode_evidence(true, &capability.pool, &metadata))?
         .ok_or_else(|| "strict evidence ACK unavailable".to_owned())?;
     Ok(())
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn begin_input_for_test() -> Result<(), String> {
+    begin_input()
 }
 
 pub(crate) fn begin_input() -> Result<(), String> {
@@ -73,6 +83,11 @@ pub(crate) fn begin_input() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub fn observe_untouched_for_test(untouched: bool) {
+    observe_untouched(untouched)
+}
+
 pub(crate) fn observe_untouched(untouched: bool) {
     CURRENT.with(|current| {
         if let Some(capability) = current.borrow_mut().as_mut() {
@@ -82,7 +97,7 @@ pub(crate) fn observe_untouched(untouched: bool) {
 }
 
 // Every executor exit converges here; error labels never decide whether input was sent.
-pub(crate) fn dispatch<T>(run: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+pub fn dispatch<T>(run: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     let result = run();
     let capability = CURRENT.with(|current| current.borrow().clone());
     let Some(capability) = capability else {
@@ -122,19 +137,19 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-pub(crate) use commit_barrier::{COMMIT_BARRIER, CommitBarrier, before_commit};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
+pub use commit_barrier::{COMMIT_BARRIER, CommitBarrier, before_commit};
+#[cfg(any(test, feature = "test-support"))]
 mod commit_barrier {
     use uuid::Uuid;
-    pub(crate) struct CommitBarrier {
+    pub struct CommitBarrier {
         pub episode: Uuid,
         pub entered: tokio::sync::oneshot::Sender<i32>,
         pub release: tokio::sync::oneshot::Receiver<()>,
     }
-    pub(crate) static COMMIT_BARRIER: std::sync::Mutex<Option<CommitBarrier>> =
+    pub static COMMIT_BARRIER: std::sync::Mutex<Option<CommitBarrier>> =
         std::sync::Mutex::new(None);
-    pub(crate) async fn before_commit(
+    pub async fn before_commit(
         transaction: &mut sqlx::PgConnection,
         payload: &serde_json::Value,
     ) -> Result<(), sqlx::Error> {

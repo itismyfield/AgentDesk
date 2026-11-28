@@ -19,23 +19,23 @@ use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::claude_tui::source_verify::{
     Observation, PinJudgment, SourceHistory, judge_pin, observe_transcript,
 };
-pub(crate) use crate::services::tui_o::shadow::SourceId;
+pub use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::capture::file_identity;
 use herdr_resume::resumes_under_new_execution;
 pub(crate) use herdr_resume::{herdr_resume_launch, logged_by};
-pub(crate) const BINDING_EVENTS_DIR: &str = "binding_events";
-pub(crate) mod claude_fold;
+pub const BINDING_EVENTS_DIR: &str = "binding_events";
+pub mod claude_fold;
 use claude_fold::Waiting;
 pub(crate) use claude_fold::binding_events_judged_since;
 pub(crate) use claude_fold::published_claude_history;
-pub(crate) use claude_fold::unverified_current_source;
-pub(crate) mod codex;
+pub use claude_fold::unverified_current_source;
+pub mod codex;
 mod log_record;
 mod read_cache;
 use log_record::{Logged, LoggedRef};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum BindingCause {
+pub enum BindingCause {
     Startup,
     Resume,
     Clear,
@@ -49,7 +49,7 @@ pub(crate) enum BindingCause {
 /// Codex typed ownership can name the exact Pending a rejection closes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum BindingTarget {
+pub enum BindingTarget {
     Source(SourceId),
     Pending {
         payload_session_id: String,
@@ -66,13 +66,13 @@ pub(crate) enum BindingTarget {
     },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct BindingEvidence {
+pub struct BindingEvidence {
     pub hook_event: Option<String>,
     pub received_at: DateTime<Utc>,
 }
 /// `seq` rises by exactly one per record of a channel, so a gap means a skipped line.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct BindingEvent {
+pub struct BindingEvent {
     pub seq: u64,
     pub channel_id: u64,
     pub provider: String,
@@ -87,13 +87,13 @@ pub(crate) struct BindingEvent {
 }
 /// A binding change whose event could not be persisted; the binding was not published.
 #[derive(Debug)]
-pub(crate) struct BindingPersistError {
+pub struct BindingPersistError {
     pub tmux_session: String,
     pub error: io::Error,
 }
 /// What one hook said about a session switch; `source` is the SessionStart reason.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct HookSignal {
+pub struct HookSignal {
     pub event: String,
     pub source: Option<String>,
     pub transcript_path: Option<String>,
@@ -102,6 +102,11 @@ pub(crate) struct HookSignal {
     pub published_at: Option<DateTime<Utc>>,
 }
 impl HookSignal {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn from_payload_for_test(event: &str, payload: &serde_json::Value) -> Self {
+        Self::from_payload(event, payload)
+    }
+
     pub(crate) fn from_payload(event: &str, payload: &serde_json::Value) -> Self {
         let text = |key: &str| payload.get(key).and_then(|v| v.as_str()).map(str::to_owned);
         Self {
@@ -112,6 +117,11 @@ impl HookSignal {
             published_at: None,
         }
     }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn cause_for_test(&self) -> BindingCause {
+        self.cause()
+    }
+
     /// Only SessionStart names why the session changed.
     pub(crate) fn cause(&self) -> BindingCause {
         if self.event != "session_start" {
@@ -129,14 +139,14 @@ impl HookSignal {
 }
 /// Launch reads the execution's context, but only for the first record of that execution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CauseSource {
+pub enum CauseSource {
     Hook(BindingCause),
     Launch,
     Observed,
 }
 /// A source proposed for one pane of a channel; `replaced` is the binding it would overwrite.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Proposal<'a> {
+pub struct Proposal<'a> {
     pub channel_id: u64,
     pub provider: &'a str,
     pub tmux_session: &'a str,
@@ -147,6 +157,17 @@ pub(crate) struct Proposal<'a> {
     pub hook: Option<&'a HookSignal>,
 }
 impl<'a> Proposal<'a> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_binding_for_test(
+        channel_id: Option<u64>,
+        tmux_session: &'a str,
+        binding: &'a TuiRuntimeBinding,
+        replaced: Option<&'a TuiRuntimeBinding>,
+        cause: CauseSource,
+    ) -> Option<Self> {
+        Self::for_binding(channel_id, tmux_session, binding, replaced, cause)
+    }
+
     /// `None` for runtimes O does not read and for panes without a known channel.
     pub(crate) fn for_binding(
         channel_id: Option<u64>,
@@ -228,19 +249,19 @@ fn lock_logs() -> MutexGuard<'static, HashMap<PathBuf, ChannelLog>> {
     LOGS.lock().unwrap_or_else(|poison| poison.into_inner())
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 fn events_dir() -> io::Result<Option<PathBuf>> {
     let root = crate::config::runtime_root()
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "runtime root unavailable"))?;
     Ok(Some(root.join(BINDING_EVENTS_DIR)))
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 fn fault(_step: &str) -> io::Result<()> {
     Ok(())
 }
 
-pub(crate) fn log_path(channel_id: u64) -> io::Result<Option<PathBuf>> {
+pub fn log_path(channel_id: u64) -> io::Result<Option<PathBuf>> {
     Ok(events_dir()?.map(|dir| dir.join(format!("{channel_id}.log"))))
 }
 
@@ -291,23 +312,20 @@ fn parse_log<T: DeserializeOwned>(path: &Path) -> io::Result<LogRead<T>> {
 
 /// Records of `channel_id` with `seq > after_seq`, in log order. Read-only; a corrupt line fails
 /// the read, since skipping it would hide a binding from the reader.
-pub(crate) fn binding_events_since(
-    channel_id: u64,
-    after_seq: u64,
-) -> io::Result<Vec<BindingEvent>> {
+pub fn binding_events_since(channel_id: u64, after_seq: u64) -> io::Result<Vec<BindingEvent>> {
     let events = binding_events_judged_since(channel_id, after_seq)?;
     Ok(events.into_iter().map(|(event, _)| event).collect())
 }
 
 /// Why a strict read refused a log; `line` counts complete non-empty lines from 1.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Corrupt {
+pub struct Corrupt {
     pub line: u64,
     pub kind: CorruptKind,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum CorruptKind {
+pub enum CorruptKind {
     Unparseable,
     SeqGap {
         expected: u64,
@@ -319,7 +337,7 @@ pub(crate) enum CorruptKind {
 
 /// Every record of `channel_id`, or the first line that is unreadable or out of `seq` order.
 /// A torn tail is not corruption: it was never published and the writer cuts it off on load.
-pub(crate) fn records_strict(channel_id: u64) -> io::Result<Result<Vec<BindingEvent>, Corrupt>> {
+pub fn records_strict(channel_id: u64) -> io::Result<Result<Vec<BindingEvent>, Corrupt>> {
     let Some(path) = log_path(channel_id)? else {
         return Ok(Ok(Vec::new()));
     };
@@ -356,7 +374,7 @@ fn strict_records(bytes: &[u8]) -> Result<Vec<BindingEvent>, Corrupt> {
 }
 
 /// The latest committed `seq` of `channel_id`, updated after every append. Read-only.
-pub(crate) fn subscribe_binding_events(channel_id: u64) -> io::Result<watch::Receiver<u64>> {
+pub fn subscribe_binding_events(channel_id: u64) -> io::Result<watch::Receiver<u64>> {
     let Some(path) = log_path(channel_id)? else {
         return Ok(watch::channel(0).1);
     };
@@ -394,14 +412,14 @@ pub(crate) fn admit_committed_seq<R>(
     Ok((!writer.poisoned && !writer.tainted && writer.last_seq == expected).then(hand_off))
 }
 
-#[cfg(all(test, unix))]
-pub(crate) fn admission_mutex_held_for_tests() -> bool {
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub fn admission_mutex_held_for_tests() -> bool {
     matches!(LOGS.try_lock(), Err(std::sync::TryLockError::WouldBlock))
 }
 
 /// What a commit left in the log for its proposal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Committed {
+pub enum Committed {
     Appended,
     /// The log already says what the proposal says.
     Unchanged,
@@ -422,13 +440,13 @@ enum Planned {
 }
 
 /// Appends what `proposal`'s stat changes for its pane, if anything, as the pane's pin admits it.
-pub(crate) fn record_source(proposal: &Proposal) -> io::Result<Committed> {
+pub fn record_source(proposal: &Proposal) -> io::Result<Committed> {
     commit(proposal, Plan::Stat)
 }
 
 /// How a Pending judgment stands in the log once `record_pending` returns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PendingRecord {
+pub enum PendingRecord {
     Recorded,
     /// A Pending for the same candidate was already logged.
     AlreadyPending,
@@ -436,7 +454,7 @@ pub(crate) enum PendingRecord {
 
 /// A candidate that has no verified transcript yet waits as a Pending, whether or not a file exists.
 /// Only a matching Pending stands in for the record; a current source naming the candidate does not.
-pub(crate) fn record_pending(proposal: &Proposal) -> io::Result<PendingRecord> {
+pub fn record_pending(proposal: &Proposal) -> io::Result<PendingRecord> {
     match commit(proposal, Plan::ForcePending)? {
         Committed::Appended => Ok(PendingRecord::Recorded),
         _ => Ok(PendingRecord::AlreadyPending),
@@ -445,7 +463,7 @@ pub(crate) fn record_pending(proposal: &Proposal) -> io::Result<PendingRecord> {
 
 /// Records exactly `source`, the identity the check read, unless the pane's pin holds another file;
 /// the path is not looked at again.
-pub(crate) fn record_verified(proposal: &Proposal, source: &SourceId) -> io::Result<Committed> {
+pub fn record_verified(proposal: &Proposal, source: &SourceId) -> io::Result<Committed> {
     commit(proposal, Plan::Verified(source))
 }
 
@@ -480,7 +498,7 @@ pub(crate) fn record_rejected(proposal: &Proposal, reason: &str) -> io::Result<b
 }
 
 /// Reads the existing writer's Pending identity without loading, appending, or publishing a record.
-pub(crate) fn pending_seq(channel_id: u64, tmux_session: &str, session: &str) -> Option<u64> {
+pub fn pending_seq(channel_id: u64, tmux_session: &str, session: &str) -> Option<u64> {
     let path = log_path(channel_id).ok().flatten()?;
     let logs = lock_logs();
     let writer = logs.get(&path)?.writer.as_ref()?;
@@ -490,7 +508,7 @@ pub(crate) fn pending_seq(channel_id: u64, tmux_session: &str, session: &str) ->
 }
 
 /// The pane's current source, when a verified record pinned it.
-pub(crate) fn pinned_source(channel_id: u64, tmux_session: &str) -> io::Result<Option<SourceId>> {
+pub fn pinned_source(channel_id: u64, tmux_session: &str) -> io::Result<Option<SourceId>> {
     Ok(pinned_source_at(channel_id, tmux_session)?.map(|(pin, _)| pin))
 }
 
@@ -507,7 +525,7 @@ pub(crate) fn pinned_source_at(
 
 /// The pane's pinned source and its Claude history in execution `nonce`, read from the writer that
 /// records them.
-pub(crate) fn claude_history(
+pub fn claude_history(
     channel_id: u64,
     tmux_session: &str,
     nonce: Option<&str>,
@@ -517,7 +535,7 @@ pub(crate) fn claude_history(
 }
 
 /// `claude_history` with the commit time of the record that pinned the pane's source.
-pub(crate) fn claude_history_at(
+pub fn claude_history_at(
     channel_id: u64,
     tmux_session: &str,
     nonce: Option<&str>,
@@ -1015,20 +1033,20 @@ impl Writer {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static TEST_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
-    pub(crate) static APPEND_FAULT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+    pub static APPEND_FAULT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
 }
 
 /// Test builds log only under a root the test sets, never under the real runtime root.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn events_dir() -> io::Result<Option<PathBuf>> {
     let root = TEST_ROOT.with(|root| root.borrow().clone());
     Ok(root.map(|root| root.join(BINDING_EVENTS_DIR)))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn fault(step: &str) -> io::Result<()> {
     match APPEND_FAULT.with(|fault| fault.get()) {
         Some(armed) if armed == step => Err(io::Error::other(format!("injected {step}"))),
@@ -1036,19 +1054,19 @@ fn fault(step: &str) -> io::Result<()> {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn test_root() -> Option<PathBuf> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_root() -> Option<PathBuf> {
     TEST_ROOT.with(|slot| slot.borrow().clone())
 }
 
-#[cfg(test)]
-pub(crate) fn set_test_root(root: Option<&Path>) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_test_root(root: Option<&Path>) {
     TEST_ROOT.with(|slot| *slot.borrow_mut() = root.map(Path::to_path_buf));
 }
 
 /// Drops what this process remembers about `channel_id`, as a restart would.
-#[cfg(test)]
-pub(crate) fn forget_channel_for_tests(channel_id: u64) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn forget_channel_for_tests(channel_id: u64) {
     if let Ok(Some(path)) = log_path(channel_id) {
         let mut logs = lock_logs();
         logs.remove(&path);

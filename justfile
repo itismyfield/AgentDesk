@@ -9,11 +9,11 @@ fmt-check:
 # `-W clippy::all` lowers Cargo group-member denies; crate attributes in src/lib.rs and
 # src/main.rs keep the risk lints and the correctness group denied. See docs/ci/rust-quality-gates.md.
 lint:
-    cargo clippy --workspace --all-targets --all-features -- -W clippy::all
+    cargo clippy --workspace --all-targets --features adk-base/test-support -- -W clippy::all
 
 # Expected-failing zero-warning target; see docs/ci/rust-quality-gates.md.
 lint-strict:
-    cargo clippy --workspace --all-targets --all-features -- -D warnings
+    cargo clippy --workspace --all-targets --features adk-base/test-support -- -D warnings
 
 cargo-check:
     cargo check --workspace --all-features --all-targets

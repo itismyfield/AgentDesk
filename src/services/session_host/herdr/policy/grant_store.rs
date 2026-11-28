@@ -9,15 +9,31 @@ use crate::services::herdr_launch::{HerdrLaunchEndpoint, policy::LaunchGrantStor
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct GrantRestoration {
-    pub(crate) by_endpoint:
-        HashMap<HerdrLaunchEndpoint, Result<Vec<LaunchAdmissionGrant>, Unverified>>,
-    pub(crate) unknown_failure: bool,
+mod grant_restoration {
+    use super::*;
+
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct GrantRestoration {
+        #[cfg(any(test, feature = "test-support"))]
+        pub by_endpoint:
+            HashMap<HerdrLaunchEndpoint, Result<Vec<LaunchAdmissionGrant>, Unverified>>,
+        #[cfg(not(any(test, feature = "test-support")))]
+        pub(crate) by_endpoint:
+            HashMap<HerdrLaunchEndpoint, Result<Vec<LaunchAdmissionGrant>, Unverified>>,
+        #[cfg(any(test, feature = "test-support"))]
+        pub unknown_failure: bool,
+        #[cfg(not(any(test, feature = "test-support")))]
+        pub(crate) unknown_failure: bool,
+    }
 }
 
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use grant_restoration::GrantRestoration;
+#[cfg(any(test, feature = "test-support"))]
+pub use grant_restoration::GrantRestoration;
+
 impl GrantRestoration {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn from_grants(grants: Vec<LaunchAdmissionGrant>) -> Self {
         let mut grouped: HashMap<HerdrLaunchEndpoint, Vec<LaunchAdmissionGrant>> = HashMap::new();
         for grant in grants {
@@ -36,11 +52,24 @@ impl GrantRestoration {
     }
 }
 
-pub(crate) struct FileGrantStore(Directory);
+pub struct FileGrantStore(Directory);
 impl FileGrantStore {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new_for_test(root: Option<PathBuf>) -> Self {
+        Self::new(root)
+    }
+
     pub(crate) fn new(root: Option<PathBuf>) -> Self {
         Self(Directory(root))
     }
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn load_all_for_test(
+        &self,
+        endpoints: &[HerdrLaunchEndpoint],
+    ) -> Result<GrantRestoration, String> {
+        self.load_all(endpoints).await
+    }
+
     pub(crate) async fn load_all(
         &self,
         endpoints: &[HerdrLaunchEndpoint],

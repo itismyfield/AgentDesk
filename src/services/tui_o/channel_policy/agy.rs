@@ -33,7 +33,7 @@ impl AgySelection {
 }
 
 impl BootChannels {
-    pub(crate) fn agy_channels(&self) -> &BTreeSet<u64> {
+    pub fn agy_channels(&self) -> &BTreeSet<u64> {
         &self.agy.channels
     }
 
@@ -41,7 +41,7 @@ impl BootChannels {
         self.agy.channels.contains(&channel)
     }
 
-    pub(crate) fn agy_target(&self, destination: u64) -> Option<AgyTarget> {
+    pub fn agy_target(&self, destination: u64) -> Option<AgyTarget> {
         if self.site() != &Site::Home {
             return None;
         }
@@ -63,7 +63,7 @@ impl BootChannels {
     }
 
     /// Only a checked Discord thread can inherit selection. A conflicting read closes the child.
-    pub(crate) fn record_agy_thread(&self, channel: &GuildChannel) -> bool {
+    pub fn record_agy_thread(&self, channel: &GuildChannel) -> bool {
         let destination = channel.id.get();
         if self.site() != &Site::Home
             || self.configured_binding(destination)

@@ -6,10 +6,10 @@ use crate::services::cluster::intake_router_hook::owner_record::{
 use crate::services::cluster::intake_router_hook::*;
 
 /// Lets a test change shared state between the first observation and planning.
-#[cfg(test)]
-pub(crate) static BEFORE_PLAN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-#[cfg(test)]
-pub(crate) static ENTERED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+#[cfg(any(test, feature = "test-support"))]
+pub static BEFORE_PLAN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+#[cfg(any(test, feature = "test-support"))]
+pub static ENTERED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 /// `None` keeps the existing placement path: fallback off, out of scope, or an unadopted session.
 pub(super) async fn route(
@@ -21,7 +21,7 @@ pub(super) async fn route(
         .pair_for(ctx.channel_id, ctx.policy_channel_id)
         .cloned();
     let pair = pair?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     ENTERED
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -160,9 +160,9 @@ async fn switch(
         },
     )
     .await?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let hook = BEFORE_PLAN.lock().unwrap_or_else(|e| e.into_inner()).take();
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(sql) = hook {
         sqlx::query(sqlx::AssertSqlSafe(sql)).execute(pool).await?;
     }

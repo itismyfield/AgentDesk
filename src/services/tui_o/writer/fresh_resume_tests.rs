@@ -138,7 +138,7 @@ async fn scenario(in_place: bool, retired_old: bool) {
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
     let _scope = ScopeFixture::new();
     let _fake_tmux =
-        crate::services::provider_teardown::tests::test_support::FakeTmux::install(CANARY_TMUX);
+        crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
     dedupe::reset_state_for_tests();
     dedupe::binding_events::set_test_root(Some(root.path()));
     let n1 = retired_old.then(|| proven(root.path()).1);
@@ -300,15 +300,14 @@ async fn first_fresh_proof_with_no_old_cursor_records_nonce_and_stops_ownership_
     let _dedupe = DedupeGuard::acquire();
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
     let _scope = ScopeFixture::new();
-    let _tmux =
-        crate::services::provider_teardown::tests::test_support::FakeTmux::install(CANARY_TMUX);
+    let _tmux = crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
     dedupe::reset_state_for_tests();
     dedupe::binding_events::set_test_root(Some(root.path()));
     let (current, source) = proven(root.path());
     let harness = Harness::build_channel(CANARY_CHANNEL, |_| Vec::new());
     harness.gate.acquired();
     let writer = harness.writer();
-    let selection = writer.suspension_for_test().clone();
+    let selection = writer.suspension_for_test();
     let (stop, stopped) = watch::channel(false);
     let (resumed, ready) = watch::channel(false);
     let actor = tokio::spawn(run_channel(
@@ -428,7 +427,7 @@ async fn held_work(retired: bool, unsealed: bool, restart_before_replay: bool) {
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
     let _scope = ScopeFixture::new();
     let _fake_tmux =
-        crate::services::provider_teardown::tests::test_support::FakeTmux::install(CANARY_TMUX);
+        crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
     dedupe::reset_state_for_tests();
     dedupe::binding_events::set_test_root(Some(root.path()));
     let (_, n2) = proven(root.path());
@@ -451,7 +450,7 @@ async fn held_work(retired: bool, unsealed: bool, restart_before_replay: bool) {
         .unwrap();
     let (n3_context, n3) = proven(root.path());
     let writer = harness.writer();
-    let selection = writer.suspension_for_test().clone();
+    let selection = writer.suspension_for_test();
     let (stop, stopped) = watch::channel(false);
     let (resumed, ready) = watch::channel(false);
     let task = tokio::spawn(run_channel(
@@ -512,7 +511,11 @@ async fn held_work(retired: bool, unsealed: bool, restart_before_replay: bool) {
         assert!(harness.channel().ledger().unresolved().is_none());
         assert!(harness.channel().ledger().resume_pieces().next().is_none());
         assert_eq!(
-            harness.channel().fresh_selection().unwrap().unwrap().nonce,
+            harness
+                .channel()
+                .fresh_selection_nonce_for_test()
+                .unwrap()
+                .unwrap(),
             n3_context.execution_nonce
         );
     }
@@ -550,7 +553,7 @@ async fn held_work(retired: bool, unsealed: bool, restart_before_replay: bool) {
                 router,
             },
         );
-        let boot_selection = writer.suspension_for_test().clone();
+        let boot_selection = writer.suspension_for_test();
         let (boot_stop, boot_stopped) = watch::channel(false);
         let (boot_resumed, _boot_ready) = watch::channel(false);
         let boot = tokio::spawn(run_channel(
@@ -682,7 +685,7 @@ async fn held_work(retired: bool, unsealed: bool, restart_before_replay: bool) {
 
         // The installed N4 selection is an ordinary same-nonce restart, with no new warning.
         let writer = harness.writer();
-        let restored_selection = writer.suspension_for_test().clone();
+        let restored_selection = writer.suspension_for_test();
         let (same_stop, same_stopped) = watch::channel(false);
         let (same_resumed, same_ready) = watch::channel(false);
         let same = tokio::spawn(run_channel(
@@ -809,8 +812,7 @@ async fn scope_during_transition(inspect: bool) {
     let _dedupe = DedupeGuard::acquire();
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
     let _scope = ScopeFixture::new();
-    let _tmux =
-        crate::services::provider_teardown::tests::test_support::FakeTmux::install(CANARY_TMUX);
+    let _tmux = crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
     dedupe::reset_state_for_tests();
     dedupe::binding_events::set_test_root(Some(root.path()));
     let n2 = (!inspect).then(|| proven(root.path()).1);
@@ -844,7 +846,7 @@ async fn scope_during_transition(inspect: bool) {
     });
     answer(&n3, "Q1 before transition");
     let writer = harness.writer();
-    let selection = writer.suspension_for_test().clone();
+    let selection = writer.suspension_for_test();
     let alarm_count = || {
         harness
             .alarms
@@ -953,8 +955,7 @@ async fn selection_install_fault(after_rename: bool) {
     let _dedupe = DedupeGuard::acquire();
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
     let _scope = ScopeFixture::new();
-    let _tmux =
-        crate::services::provider_teardown::tests::test_support::FakeTmux::install(CANARY_TMUX);
+    let _tmux = crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
     dedupe::reset_state_for_tests();
     dedupe::binding_events::set_test_root(Some(root.path()));
     let (_, old) = proven(root.path());
@@ -981,7 +982,7 @@ async fn selection_install_fault(after_rename: bool) {
     let (current, source) = proven(root.path());
     answer(&source, "answer after durable selection");
     let writer = harness.writer();
-    let selection = writer.suspension_for_test().clone();
+    let selection = writer.suspension_for_test();
     let dir = harness
         ._runtime
         .path()
@@ -1097,7 +1098,7 @@ async fn selection_install_fault(after_rename: bool) {
             None,
         );
         let writer = harness.writer();
-        let restored_selection = writer.suspension_for_test().clone();
+        let restored_selection = writer.suspension_for_test();
         assert_eq!(restored_selection.nonce(), None);
         let (restart_stop, restart_stopped) = watch::channel(false);
         let (restart_resumed, restart_ready) = watch::channel(false);

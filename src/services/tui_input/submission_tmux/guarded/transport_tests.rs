@@ -7,11 +7,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-pub(crate) struct Fixture {
+pub struct Fixture {
     _env: [Env; 4],
-    pub(crate) root: tempfile::TempDir,
-    pub(crate) real: PathBuf,
-    pub(crate) socket: String,
+    pub root: tempfile::TempDir,
+    pub real: PathBuf,
+    pub socket: String,
     _lock: Option<crate::config::test_env_lock::SharedTestEnvLockGuard>,
 }
 
@@ -26,7 +26,7 @@ impl Fixture {
         ))
     }
 
-    pub(crate) fn after_shared_test_env_lock() -> Self {
+    pub fn after_shared_test_env_lock() -> Self {
         Self::with_lock(None)
     }
 
@@ -92,7 +92,7 @@ while True:
         }
     }
 
-    pub(crate) fn tmux(&self, args: &[&str]) -> String {
+    pub fn tmux(&self, args: &[&str]) -> String {
         let mut command = Command::new(&self.real);
         command.args(["-L", &self.socket, "-f", "/dev/null"]);
         if args.first() == Some(&"new-session") {
@@ -115,7 +115,7 @@ while True:
         String::from_utf8(output.stdout).unwrap().trim().to_owned()
     }
 
-    pub(crate) fn receiver(&self, label: &str) -> String {
+    pub fn receiver(&self, label: &str) -> String {
         let dir = self.root.path().join(label);
         std::fs::create_dir(&dir).unwrap();
         format!(
@@ -129,7 +129,7 @@ while True:
         self.session_with_screen(name, &format!("{name}\r\n"))
     }
 
-    pub(crate) fn session_with_screen(&self, name: &str, screen: &str) -> String {
+    pub fn session_with_screen(&self, name: &str, screen: &str) -> String {
         let command = self.receiver(name);
         std::fs::write(self.root.path().join(name).join("screen"), screen).unwrap();
         let pane = self.tmux(&[
@@ -167,7 +167,7 @@ while True:
         std::fs::read(self.root.path().join(label).join("received")).unwrap_or_default()
     }
 
-    pub(crate) fn assert_enter(&self, label: &str, expected: usize) {
+    pub fn assert_enter(&self, label: &str, expected: usize) {
         if expected > 0 {
             wait_until(|| self.count(label) >= expected);
         }
@@ -196,7 +196,7 @@ while True:
         });
     }
 
-    pub(crate) fn attach(&self, session: &str) {
+    pub fn attach(&self, session: &str) {
         self.attach_with_target(session, session, &format!("{}-driver", self.socket));
     }
 

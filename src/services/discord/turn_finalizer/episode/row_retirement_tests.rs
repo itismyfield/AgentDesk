@@ -63,6 +63,99 @@ async fn busy(
     token
 }
 
+#[tokio::test]
+async fn episode_claim_types_and_logs_identity_mismatch() {
+    super::super::tests::with_isolated_runtime_root(|| async {
+        let shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);
+        let channel = ChannelId::new(843_501);
+        let actor = busy(&shared, channel, Some("claim-active")).await;
+        let key = TurnKey::new(channel, 123, 1).with_episode_nonce(Some("claim-other"));
+        let (result, logs) = logged(claim_episode(
+            &shared,
+            &ProviderKind::Codex,
+            key,
+            false,
+            Some(actor),
+            None,
+        ))
+        .await;
+        assert_eq!(result.err(), Some(ClaimRejection::IdentityMismatch));
+        let warnings = lines(&logs, "episode_claim_rejected");
+        assert_eq!(warnings.len(), 1, "{logs}");
+        for field in [
+            "WARN",
+            "channel_id=843501",
+            "turn_nonce=\"claim-active\"",
+            "reason=IdentityMismatch",
+        ] {
+            assert!(warnings[0].contains(field), "{logs}");
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn episode_claim_types_actor_miss_for_same_nonce() {
+    super::super::tests::with_isolated_runtime_root(|| async {
+        let shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);
+        let channel = ChannelId::new(843_502);
+        busy(&shared, channel, Some("claim-active")).await;
+        let other = Arc::new(CancelToken::from_persisted_turn_nonce(Some(
+            "claim-active".into(),
+        )));
+        let key = TurnKey::new(channel, 123, 1).with_episode_nonce(Some("claim-active"));
+        let result =
+            claim_episode(&shared, &ProviderKind::Codex, key, false, Some(other), None).await;
+        assert_eq!(result.err(), Some(ClaimRejection::ActorMiss));
+    })
+    .await;
+}
+
+struct RejectCustody;
+
+impl crate::services::turn_orchestrator::policy_close::ControlCustody for RejectCustody {
+    fn input(&self) -> &str {
+        "claim-denied"
+    }
+
+    fn owns(
+        &self,
+        _: ChannelId,
+        _: Option<&Arc<CancelToken>>,
+        _: Option<MessageId>,
+        _: Option<&str>,
+    ) -> bool {
+        true
+    }
+
+    fn admit(&self, _: bool) -> Result<(), String> {
+        Err("test control custody refusal".into())
+    }
+}
+
+#[tokio::test]
+async fn episode_claim_types_native_control_custody_denial() {
+    super::super::tests::with_isolated_runtime_root(|| async {
+        let shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);
+        let channel = ChannelId::new(843_503);
+        let actor = busy(&shared, channel, Some("claim-active")).await;
+        assert!(
+            shared
+                .mailbox(channel)
+                .install_control_custody(Arc::new(RejectCustody))
+                .await
+        );
+        let key = TurnKey::new(channel, 123, 1).with_episode_nonce(Some("claim-active"));
+        let result =
+            claim_episode(&shared, &ProviderKind::Codex, key, false, Some(actor), None).await;
+        assert_eq!(
+            result.err(),
+            Some(ClaimRejection::NativeControlCustodyDenied)
+        );
+    })
+    .await;
+}
+
 /// The episode's row with its finalizer id drifted from the mailbox key 123.
 fn drifted_row(channel: ChannelId, nonce: Option<&str>) -> InflightTurnState {
     let mut row = InflightTurnState::new(

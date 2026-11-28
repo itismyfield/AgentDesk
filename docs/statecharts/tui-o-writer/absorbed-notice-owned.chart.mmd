@@ -1,0 +1,43 @@
+---
+title: "Claude 턴 도중 사람 입력 공지"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: restart
+    lg1: posted
+    lg2: active
+  }
+  class lg0 yellow
+  class lg1 teal
+  class lg2 blue
+  s0: 권한 인계 전
+  s1: writer가 공지 권한을 인계받음
+  s2: 원본 행을 spool에 보존
+  s3: 물리 행의 수신 확인
+  s4: 입력 근거를 원장에 기록
+  s5: 원본 spool 재생 대기
+  s6: 물리 수신 근거로 논리 ID를 제외
+  s7: 재생 뒤에도 논리 ID의 제외를 유지
+  [*] --> s0
+  s0 --> s1: 동결 구간을 원장에 기록
+  s1 --> s2: 원본 파일의 완전한 행을 캡처
+  s1 --> s3: 명령 행의 물리 UUID로 수신 확인
+  s2 --> s4: 원본 행에서 근거를 기록
+  s2 --> s5: 재시작 후 저장된 원본을 재생
+  s3 --> s2: 원본 파일의 완전한 행을 캡처
+  s4 --> s5: 재시작 후 저장된 원본을 재생
+  s5 --> s4: 원본 행에서 근거를 기록 or 원본 행을 확인
+  s4 --> s6: 논리 입력 ID의 제외를 원장에 기록
+  s6 --> s5: 재시작 후 저장된 원본을 재생
+  s5 --> s6: 원본 행을 확인
+  s6 --> s7: 원본 행을 확인
+  s4 --> s7: 논리 입력 ID의 제외를 원장에 기록
+  s5 --> s7: 원본 행을 확인
+  class s0 blue
+  class s1 blue
+  class s2 blue
+  class s3 blue
+  class s4 blue
+  class s5 yellow
+  class s6 teal
+  class s7 teal

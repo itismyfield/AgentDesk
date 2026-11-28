@@ -153,7 +153,12 @@ function AdvancedTransitionPanel({ ctx, actions }: Props) {
               )}
             </p>
           </div>
-          <button onClick={() => actions.addGate(ctx.selectedTransitionIndex)} className="rounded-xl border px-3 py-1.5 text-xs" style={BUTTON_WARN_STYLE}>
+          <button
+            type="button"
+            onClick={() => actions.addGate(ctx.selectedTransitionIndex)}
+            className="inline-flex items-center justify-center max-[899px]:min-h-11 pointer-coarse:min-h-11 rounded-xl border px-3 py-1.5 text-xs"
+            style={BUTTON_WARN_STYLE}
+          >
             + {tr("게이트", "Gate")}
           </button>
         </div>
@@ -205,13 +210,14 @@ function GateToggleList({ ctx, actions, fsm }: Props & { fsm?: boolean }) {
             <button
               key={name}
               type="button"
+              aria-pressed={active}
               onClick={() => {
                 const next = active
                   ? ctx.selectedTransitionGates.filter((gate) => gate !== name)
                   : [...ctx.selectedTransitionGates, name];
                 actions.updateTransitionGates(ctx.selectedTransitionIndex, next.join(", "));
               }}
-              className="rounded-lg border px-2 py-1 text-xs font-mono transition-colors"
+              className="inline-flex items-center justify-center max-[899px]:min-h-11 pointer-coarse:min-h-11 rounded-lg border px-2 py-1 text-xs font-mono transition-colors"
               style={
                 active
                   ? BUTTON_WARN_STYLE
@@ -281,10 +287,11 @@ function GateDefinitionList({ ctx, actions }: Props) {
             />
           </div>
           <div>
-            <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
+            <label htmlFor={`gate-desc-${gateName}`} className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
               {tr("설명", "Description")}
             </label>
             <input
+              id={`gate-desc-${gateName}`}
               value={pipelineDraft.gates[gateName]?.description ?? ""}
               onChange={(event) => actions.updateGate(gateName, { description: event.target.value || undefined })}
               className={INPUT_CLASS}

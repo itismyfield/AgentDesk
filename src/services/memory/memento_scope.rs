@@ -1,6 +1,6 @@
 use super::*;
 
-pub(crate) fn resolve_memento_workspace(
+pub fn resolve_memento_workspace(
     role_id: &str,
     channel_id: u64,
     workspace_override: Option<&str>,
@@ -8,7 +8,7 @@ pub(crate) fn resolve_memento_workspace(
     resolve_memento_workspace_for_channel(role_id, channel_id, None, workspace_override)
 }
 
-pub(crate) fn resolve_memento_workspace_for_channel(
+pub fn resolve_memento_workspace_for_channel(
     role_id: &str,
     channel_id: u64,
     channel_name: Option<&str>,
@@ -93,7 +93,7 @@ pub(super) fn resolve_remember_agent_id(
         .map(|binding| resolve_memento_agent_id(&binding.role_id, channel_id))
 }
 
-pub(crate) fn resolve_memento_agent_id(role_id: &str, channel_id: u64) -> String {
+pub fn resolve_memento_agent_id(role_id: &str, channel_id: u64) -> String {
     let role_id = role_id.trim();
     if role_id.is_empty() || role_id == UNBOUND_MEMORY_ROLE_ID {
         return format!("agentdesk-channel-{channel_id}");
@@ -101,7 +101,7 @@ pub(crate) fn resolve_memento_agent_id(role_id: &str, channel_id: u64) -> String
     role_id.to_string()
 }
 
-pub(crate) fn sanitize_memento_workspace_segment(value: &str) -> String {
+pub fn sanitize_memento_workspace_segment(value: &str) -> String {
     let mut sanitized = String::with_capacity(value.len());
     let mut last_was_dash = false;
 

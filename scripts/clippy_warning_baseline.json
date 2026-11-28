@@ -5,7 +5,8 @@
   "host": "x86_64-unknown-linux-gnu",
   "rustc_commit": "e408947bfd200af42db322daf0fadfe7e26d3bd1",
   "runner": "Linux",
-  "command": "cargo clippy --workspace --all-targets --all-features -- -W clippy::all",
+  "command": "cargo clippy --workspace --all-targets --features adk-base/test-support -- -W clippy::all",
+  "command_rollout_from": "cargo clippy --workspace --all-targets --all-features -- -W clippy::all",
   "observation": {
     "source": "local WSL observation",
     "sha": "6330b17f93a7852c42580e65df8f0c90752a1765",

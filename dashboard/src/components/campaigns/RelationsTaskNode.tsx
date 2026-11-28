@@ -20,6 +20,10 @@ export type TaskNodeData = {
   error: boolean;
   picked: boolean;
   readOnly?: boolean;
+  critical?: boolean;
+  slack?: number;
+  whatIfDelta?: number;
+  scheduleLabel?: string;
 };
 
 function edgeHandleStyle(side: "left" | "right", color = "var(--fg-dim)"): CSSProperties {
@@ -41,27 +45,38 @@ const RIGHT_HANDLE_CLASS = "campaign-edge-handle-right !-right-[5px] !size-2.5 !
 export function RelationsTaskNode({ data, selected }: NodeProps) {
   const task = data as TaskNodeData;
   const statusTone = getGraphStatusTone(task.error ? "failed" : task.status ?? task.tone);
+  const isCritical = Boolean(task.critical && !task.error);
   const borderColor = selected
     ? "var(--accent)"
     : task.error
       ? "var(--err)"
       : task.picked
         ? "var(--info)"
-        : statusTone.border;
+        : isCritical
+          ? "color-mix(in srgb, var(--accent) 65%, var(--line))"
+          : statusTone.border;
   const ringShadow = selected
     ? "0 0 0 3px var(--accent-soft)"
     : task.error
       ? "0 0 0 3px var(--err-soft)"
       : task.picked
         ? "0 0 0 3px var(--info-soft)"
-        : statusTone.quiet
-          ? "none"
-          : "var(--shadow-sm)";
+        : isCritical
+          ? "0 0 0 2px var(--accent-soft)"
+          : statusTone.quiet
+            ? "none"
+            : "var(--shadow-sm)";
+  const scheduleBadge = !task.note
+    ? isCritical
+      ? task.scheduleLabel ?? "병목 · 여유 0"
+      : task.scheduleLabel ?? (task.slack !== undefined && !statusTone.quiet ? `여유 +${task.slack}` : null)
+    : null;
   return (
     <div
       data-quiet={statusTone.quiet || undefined}
+      data-critical={isCritical ? "true" : undefined}
       className={`relative grid h-auto w-60 rounded-[14px] border border-solid text-left text-xs text-[var(--fg-muted)] ${
-        statusTone.quiet && !selected ? "bg-[var(--bg-1)] opacity-80" : "bg-[var(--th-card-bg)]"
+        statusTone.quiet && !selected && !isCritical ? "bg-[var(--bg-1)] opacity-80" : "bg-[var(--th-card-bg)]"
       }`}
       style={{ borderColor, boxShadow: ringShadow }}
     >
@@ -70,13 +85,13 @@ export function RelationsTaskNode({ data, selected }: NodeProps) {
         position={Position.Left}
         isConnectable={!task.locked && !task.readOnly}
         className={LEFT_HANDLE_CLASS}
-        style={edgeHandleStyle("left", task.locked ? "var(--fg-faint)" : statusTone.pinColor)}
+        style={edgeHandleStyle("left", task.locked ? "var(--fg-faint)" : isCritical ? "var(--accent)" : statusTone.pinColor)}
       />
       <div className="relative grid overflow-hidden rounded-[13px]">
         <i
           aria-hidden
           className="pointer-events-none absolute inset-y-0 left-0 w-[3px]"
-          style={{ background: task.error ? "var(--err)" : statusTone.accent }}
+          style={{ background: task.error ? "var(--err)" : isCritical ? "var(--accent)" : statusTone.accent }}
         />
         <div
           className="grid min-h-[54px] h-auto gap-1.5 border-b border-[var(--line-soft)] py-2.5 px-4"
@@ -99,17 +114,17 @@ export function RelationsTaskNode({ data, selected }: NodeProps) {
           <strong
             title={task.title}
             className={`line-clamp-2 min-h-[2.5rem] text-[13px] leading-5 font-semibold [word-break:keep-all] [overflow-wrap:anywhere] ${
-              statusTone.quiet ? "text-[var(--fg-dim)]" : "text-[var(--fg)]"
+              statusTone.quiet && !isCritical ? "text-[var(--fg-dim)]" : "text-[var(--fg)]"
             }`}
           >
             {task.title}
           </strong>
         </div>
         <div className="grid gap-1.5 py-2 px-4 text-[11px] leading-4">
-          {task.ratio > 0 && !statusTone.quiet && <MeterBar ratio={task.ratio} tone="info" className="h-1" />}
+          {task.ratio > 0 && !statusTone.quiet && <MeterBar ratio={task.ratio} tone={isCritical ? "accent" : "info"} className="h-1" />}
           <div className="flex min-w-0 items-center justify-between gap-2">
             <span className="min-w-0 truncate tabular-nums">{task.summary}</span>
-            {task.note && (
+            {task.note ? (
               <span
                 className={`flex shrink-0 items-center gap-1 font-medium ${
                   task.note.tone === "err"
@@ -122,7 +137,11 @@ export function RelationsTaskNode({ data, selected }: NodeProps) {
                 {task.note.tone === "lock" && <Lock aria-hidden className="size-3" />}
                 {task.note.text}
               </span>
-            )}
+            ) : scheduleBadge ? (
+              <span className={`shrink-0 font-medium tabular-nums ${isCritical ? "text-[var(--accent-fg)]" : "text-[var(--fg-muted)]"}`}>
+                {scheduleBadge}
+              </span>
+            ) : null}
           </div>
         </div>
       </div>
@@ -131,7 +150,7 @@ export function RelationsTaskNode({ data, selected }: NodeProps) {
         position={Position.Right}
         isConnectable={!task.readOnly}
         className={RIGHT_HANDLE_CLASS}
-        style={edgeHandleStyle("right", statusTone.pinColor)}
+        style={edgeHandleStyle("right", isCritical ? "var(--accent)" : statusTone.pinColor)}
       />
     </div>
   );
@@ -150,6 +169,9 @@ export type GroupNodeData = {
   far: string;
   openLabel?: string;
   onOpen?: () => void;
+  critical?: boolean;
+  criticalCount?: number;
+  criticalLabel?: string;
 };
 
 /** Zoomed out, a group card's name, meter bar, and one state line cover it with generous vertical/horizontal clearance. */
@@ -182,13 +204,27 @@ export function RelationsGroupNode({ data, selected }: NodeProps) {
   const group = data as GroupNodeData;
   const scale = useLegible(), far = scale > FAR;
   const statusTone = getGraphStatusTone(group.blocked ? "blocked" : group.tone);
-  const borderColor = selected && !far ? "var(--accent)" : group.blocked ? "var(--warn)" : statusTone.border;
-  const nearShadow = selected ? "0 0 0 3px var(--accent-soft)" : statusTone.quiet ? "none" : "var(--shadow-sm)";
+  const isCritical = Boolean(group.critical);
+  const borderColor = selected && !far
+    ? "var(--accent)"
+    : group.blocked
+      ? "var(--warn)"
+      : isCritical
+        ? "color-mix(in srgb, var(--accent) 65%, var(--line))"
+        : statusTone.border;
+  const nearShadow = selected
+    ? "0 0 0 3px var(--accent-soft)"
+    : isCritical
+      ? "0 0 0 2px var(--accent-soft)"
+      : statusTone.quiet
+        ? "none"
+        : "var(--shadow-sm)";
   return (
     <div
       data-quiet={statusTone.quiet || undefined}
+      data-critical={isCritical ? "true" : undefined}
       className={`relative grid min-h-[156px] h-auto w-60 rounded-[14px] border border-solid text-left text-xs text-[var(--fg-muted)] ${
-        statusTone.quiet && !selected ? "bg-[var(--bg-1)] opacity-80" : "bg-[var(--th-card-bg)]"
+        statusTone.quiet && !selected && !isCritical ? "bg-[var(--bg-1)] opacity-80" : "bg-[var(--th-card-bg)]"
       }`}
       style={{
         "--legible": scale,
@@ -196,27 +232,28 @@ export function RelationsGroupNode({ data, selected }: NodeProps) {
         ...(far ? farRing(scale, selected, !!group.blocked) : { boxShadow: nearShadow }),
       } as CSSProperties}
     >
-      <Handle type="target" position={Position.Left} isConnectable={false} className={LEFT_HANDLE_CLASS} style={edgeHandleStyle("left", statusTone.pinColor)} />
+      <Handle type="target" position={Position.Left} isConnectable={false} className={LEFT_HANDLE_CLASS} style={edgeHandleStyle("left", isCritical ? "var(--accent)" : statusTone.pinColor)} />
       <div className="relative grid overflow-hidden rounded-[13px]">
-        <i aria-hidden className="pointer-events-none absolute inset-y-0 left-0 w-[3px]" style={{ background: statusTone.accent }} />
+        <i aria-hidden className="pointer-events-none absolute inset-y-0 left-0 w-[3px]" style={{ background: isCritical && !group.blocked ? "var(--accent)" : statusTone.accent }} />
         <div className="grid min-h-[54px] h-auto gap-1.5 border-b border-[var(--line-soft)] py-2.5 px-4" style={{ background: statusTone.headerBg }}>
           <div className="flex min-w-0 items-center gap-1.5">
             <StatusMarker tone={group.tone} ratio={group.ratio} />
             {group.code && <span className="shrink-0 font-mono text-[11px] font-medium text-[var(--fg-muted)] tabular-nums">{group.code}</span>}
             <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--fg-muted)] tabular-nums">{group.meta}</span>
+            {isCritical && group.criticalLabel && <Chip tone="accent" className="h-[19px] px-1.5 text-[10.5px] tabular-nums">{group.criticalLabel}</Chip>}
             {group.statusLabel && <Chip tone={statusTone.chipTone} className="h-[19px] px-1.5 text-[10.5px]">{group.statusLabel}</Chip>}
           </div>
           <strong
             title={group.title}
             className={`line-clamp-2 min-h-[2.5rem] text-sm leading-5 font-semibold [word-break:keep-all] [overflow-wrap:anywhere] ${
-              statusTone.quiet ? "text-[var(--fg-dim)]" : "text-[var(--fg)]"
+              statusTone.quiet && !isCritical ? "text-[var(--fg-dim)]" : "text-[var(--fg)]"
             }`}
           >
             {group.title}
           </strong>
         </div>
         <div className="grid gap-2 py-2.5 px-4">
-          <MeterBar ratio={group.ratio} tone={group.blocked ? "warn" : "ok"} />
+          <MeterBar ratio={group.ratio} tone={group.blocked ? "warn" : isCritical ? "accent" : "ok"} />
           <div className="flex min-w-0 items-center justify-between gap-2 text-[11px] leading-4">
             <span className="min-w-0 truncate tabular-nums">
               {group.blocked ? <span className="font-medium text-[var(--warn)]">{group.blocked}</span> : group.summary}
@@ -238,8 +275,8 @@ export function RelationsGroupNode({ data, selected }: NodeProps) {
           </div>
         </div>
       </div>
-      <Handle type="source" position={Position.Right} isConnectable={false} className={RIGHT_HANDLE_CLASS} style={edgeHandleStyle("right", statusTone.pinColor)} />
-      {far && <><FarCover scale={scale} title={group.title} line={group.far} ratio={group.ratio} error={!!group.blocked} className="bg-[var(--th-card-bg)]" /><FarPins scale={scale} color={statusTone.pinColor} /></>}
+      <Handle type="source" position={Position.Right} isConnectable={false} className={RIGHT_HANDLE_CLASS} style={edgeHandleStyle("right", isCritical ? "var(--accent)" : statusTone.pinColor)} />
+      {far && <><FarCover scale={scale} title={group.title} line={group.far} ratio={group.ratio} error={!!group.blocked} className="bg-[var(--th-card-bg)]" /><FarPins scale={scale} color={isCritical ? "var(--accent)" : statusTone.pinColor} /></>}
     </div>
   );
 }

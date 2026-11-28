@@ -842,7 +842,7 @@ fn a_stop_after_its_turns_start_was_read_runs_only_for_the_current_token() {
         }
         let state = case.token.herdr_interrupt_state().unwrap();
         state.submission.lock().unwrap().submission = HerdrSubmission::Unsubmitted;
-        state.own_start_observed(0, "turn-a");
+        state.own_start_observed_for_test(0, "turn-a");
         let (shared, channel, provider) =
             (case.shared.clone(), case.channel, case.provider.clone());
         // The turn is submitted and the channel takes another token before the stop runs again.
@@ -872,7 +872,7 @@ fn a_rollout_rewritten_in_place_never_retargets_a_late_stop() {
         }
         let state = case.token.herdr_interrupt_state().unwrap();
         state.submission.lock().unwrap().submission = HerdrSubmission::Unsubmitted;
-        state.own_start_observed(0, "turn-a");
+        state.own_start_observed_for_test(0, "turn-a");
         let (path, observation) = (case.path.clone(), state.clone());
         *BEFORE_LATE_STOP.lock().unwrap() = Some(Box::pin(async move {
             let next =
@@ -1245,7 +1245,7 @@ fn act7_cold_start_accepts_intent_without_marker_then_sends_once() {
                 let _binding = TestBindingRoot::enter(binding_root.as_deref());
                 crate::services::provider::cancel_token_claude_interrupt::HERDR_SETTLEMENT_OVERRIDE
                     .set(true);
-                state.own_start_observed(1, "turn-a");
+                state.own_start_observed_for_test(1, "turn-a");
             });
             runtime.block_on(async {
                 while !reader.is_finished() {

@@ -10,7 +10,7 @@ use crate::services::session_host::surface_policy::VerifiedSurface;
 
 mod child_store;
 mod lifecycle;
-pub(crate) use child_store::ChildStore;
+pub use child_store::ChildStore;
 pub(crate) use lifecycle::ChildLifecycle;
 
 const FLOOR: &str = "thread_children.floor";
@@ -77,7 +77,7 @@ impl OStore {
 // Test seam for the child init tests mounted in the root test host.
 #[cfg(any(test, feature = "test-support"))]
 impl OStore {
-    pub(crate) fn init_channel_checked_for_test(
+    pub fn init_channel_checked_for_test(
         &self,
         init: &Initialized,
         origin: InitOrigin,
@@ -92,17 +92,17 @@ impl OStore {
 #[cfg(test)]
 mod retirement_tests;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl OStore {
     fn fixture_scope(channels: &[u64]) -> std::sync::Arc<InitScope> {
         std::sync::Arc::new(InitScope::fixture(channels))
     }
 
-    pub(crate) fn init_fixture_channel(&self, init: &Initialized) -> Result<(), StoreError> {
+    pub fn init_fixture_channel(&self, init: &Initialized) -> Result<(), StoreError> {
         self.init_channel(init, &Self::fixture_scope(&[init.channel]))
     }
 
-    pub(crate) fn init_fixture_channel_as(
+    pub fn init_fixture_channel_as(
         &self,
         init: &Initialized,
         origin: InitOrigin,
@@ -110,7 +110,7 @@ impl OStore {
         self.init_channel_as(init, origin, &Self::fixture_scope(&[init.channel]))
     }
 
-    pub(crate) fn begin_fixture_era_as(
+    pub fn begin_fixture_era_as(
         &self,
         init: &Initialized,
         origin: InitOrigin,
@@ -118,7 +118,7 @@ impl OStore {
         self.begin_era_as(init, origin, &Self::fixture_scope(&[init.channel]), None)
     }
 
-    pub(crate) fn begin_fixture_era(
+    pub fn begin_fixture_era(
         &self,
         channels: &[u64],
         at: chrono::DateTime<chrono::Utc>,
