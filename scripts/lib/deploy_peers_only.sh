@@ -1,12 +1,43 @@
 #!/usr/bin/env bash
 
-_deploy_cluster_role() (
-    local config_path
-    # Scope release environment overrides to role detection.
+_deploy_cluster_role() {
+    # Match the generated service environment before applying its overrides.
+    local release_path="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$HOME/.cargo/bin:$HOME/.local/bin:$HOME/bin"
+    env -i HOME="$HOME" PATH="$release_path" AGENTDESK_ROOT_DIR="$ADK_REL" AGENTDESK_DCSERVER_LABEL="$PLIST_REL" \
+        "$BASH" --noprofile --norc -s -- "$SCRIPT_DIR" "$REL_LAUNCHD_ENV_FILE" <<EOF
+set -euo pipefail
+$(declare -f _read_deploy_cluster_role _release_config_path _apply_launchd_env_file_to_shell _parse_launchd_env_line _trim_whitespace)
+SCRIPT_DIR=\$1
+REL_LAUNCHD_ENV_FILE=\$2
+ADK_REL=\$AGENTDESK_ROOT_DIR
+_read_deploy_cluster_role
+EOF
+}
+
+_read_deploy_cluster_role() {
+    case "$REL_LAUNCHD_ENV_FILE" in
+        /*) ;;
+        *) REL_LAUNCHD_ENV_FILE="$PWD/$REL_LAUNCHD_ENV_FILE" ;;
+    esac
+    CDPATH='' cd -- "$ADK_REL" || return 1
     if [ -f "$REL_LAUNCHD_ENV_FILE" ]; then
         _apply_launchd_env_file_to_shell "$REL_LAUNCHD_ENV_FILE" || return 1
     fi
-    config_path="$(_release_config_path)" && [ -n "$config_path" ] || return 1
+    local config_path="" default_root release_cwd runtime_root root previous_root=""
+    release_cwd="$(pwd -P)" || return 1
+    default_root="$HOME/.adk/release"
+    runtime_root="$(_trim_whitespace "${AGENTDESK_ROOT_DIR:-}")"
+    # Reuse the resolver for each runtime search root while keeping the service cwd.
+    for root in "${runtime_root:-$default_root}" "$release_cwd" "$default_root"; do
+        [ "$root" != "$previous_root" ] || continue
+        previous_root="$root"
+        [ -n "${AGENTDESK_CONFIG:-}" ] || [ -d "$root" ] || continue
+        config_path="$(ADK_REL="$root" _release_config_path)" && [ -n "$config_path" ] || return 1
+        if [ -n "${AGENTDESK_CONFIG:-}" ] || [ -e "$config_path" ] || [ -L "$config_path" ]; then
+            break
+        fi
+    done
+    [ -n "$config_path" ] || return 1
     if [ ! -e "$config_path" ] && [ ! -L "$config_path" ]; then
         [ -z "${AGENTDESK_CONFIG:-}" ] || return 1
         echo standalone
@@ -43,7 +74,7 @@ except Exception:
     # Configuration can contain credentials. Emit only the derived role.
     sys.exit(1)
 PY
-)
+}
 
 _require_deploy_source_builder() {
     [ "${AGENTDESK_DEPLOY_PEER_BUILD_FALLBACK:-0}" != 1 ] || return 0

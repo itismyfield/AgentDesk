@@ -546,12 +546,13 @@ run_entry_case() (
     export AGENTDESK_DEPLOY_TEST_MODE=1 AGENTDESK_DEPLOY_NO_DETACH=1
     export AGENTDESK_DEPLOY_SKIP_FRESHNESS=1 AGENTDESK_DEPLOY_MAX_LOADAVG=5
     export AGENTDESK_ROOT_DIR="$WORK/leader" AGENTDESK_REPO_DIR="$WORK/repo"
+    export HOME="$WORK/home"
     export FAKE_RELEASE_DB_ROUTE=shell
     export AGENTDESK_DEPLOY_PEERS=peer FAKE_LOAD=9 FAKE_PENDING='[]'
     unset AGENTDESK_CONFIG AGENTDESK_DEPLOY_BINARY AGENTDESK_DEPLOY_PEER_ARTIFACT_DIR AGENTDESK_DEPLOY_TARGET_SHA
     unset AGENTDESK_DEPLOY_PEER_INVOCATION AGENTDESK_DEPLOY_ALL_NODES AGENTDESK_DEPLOY_PEER_BUILD_FALLBACK
     : >"$TRACE"
-    mkdir -p "$WORK/leader/"{dashboard/dist,runtime}
+    mkdir -p "$HOME" "$WORK/leader/"{dashboard/dist,runtime}
     printf '<html></html>\n' >"$WORK/leader/dashboard/dist/index.html"
     printf '%s\n' "${EXPECTED_SHA//0/1}" >"$WORK/leader/dashboard/dist/.build-commit"
     printf 'cluster: {enabled: true, role: hub}\n' >"$WORK/leader/fixture-config.yml"

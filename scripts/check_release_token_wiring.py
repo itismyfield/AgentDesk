@@ -18,6 +18,7 @@ HELPERS = ("_deploy_policy_generation.sh", "lib/deploy_allow_degraded.sh",
            "lib/dashboard_build_commit.sh", "lib/deploy_routines.sh", "lib/deploy_peers_only.sh")
 DEFAULTS = """
 ADK_DEFAULT_PORT=1
+_trim_whitespace() { printf '%s' "$1"; }
 setup_sccache_env() { return 1; }
 _preflight_resource_contention() { return 0; }
 wait_for_live_turns_to_drain_or_fail() { return 0; }
