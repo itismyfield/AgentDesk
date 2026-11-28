@@ -474,8 +474,8 @@ mod tests {
         let listener = UnixListener::bind(&live).unwrap();
         drop(UnixListener::bind(&fresh).unwrap());
         let old = SystemTime::now() - Duration::from_secs(25 * 60 * 60);
-        set_mtime(&stale, old);
-        set_mtime(&live, old);
+        set_mtime_nofollow(&stale, old);
+        set_mtime_nofollow(&live, old);
         let stale_dir = temp.path().join("cgb2-fixture");
         let live_dir = temp.path().join("cgb2-live-fixture");
         let fresh_dir = temp.path().join("cgb2-recent");
@@ -489,7 +489,8 @@ mod tests {
         fs::set_permissions(&nested, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
         let nested_socket = nested.join("cgb2-4");
         let nested_listener = UnixListener::bind(&nested_socket).unwrap();
-        for path in [&stale_dir, &live_dir, &nested, &nested_socket] {
+        set_mtime_nofollow(&nested_socket, old);
+        for path in [&stale_dir, &live_dir, &nested] {
             set_mtime(path, old);
         }
         fs::create_dir(&fresh_dir).unwrap();
@@ -754,7 +755,7 @@ mod tests {
         let now = SystemTime::now();
         let old = now.checked_sub(Duration::from_secs(2 * 60 * 60)).unwrap();
         set_mtime(&candidate, old);
-        set_symlink_mtime(candidate.join("linked-target"), old);
+        set_mtime_nofollow(candidate.join("linked-target"), old);
         set_mtime(&recent_file, now);
 
         let activity = bounded_recursive_last_activity(&candidate).unwrap();
@@ -770,7 +771,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn set_symlink_mtime(path: impl AsRef<Path>, modified: SystemTime) {
+    fn set_mtime_nofollow(path: impl AsRef<Path>, modified: SystemTime) {
         let modified = FileTime::from_system_time(modified);
         filetime::set_symlink_file_times(path, modified, modified).unwrap();
     }
