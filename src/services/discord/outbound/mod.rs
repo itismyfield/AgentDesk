@@ -6,6 +6,7 @@
 
 use std::sync::OnceLock;
 pub(in crate::services::discord) mod body_census;
+pub(in crate::services::discord) mod bot_http;
 
 pub(crate) mod completed_turn_ledger; // #4564
 pub(crate) mod confirmation;

@@ -5,12 +5,14 @@ use std::sync::Arc;
 use poise::serenity_prelude::ChannelId;
 
 use crate::services::discord::SharedData;
+use crate::services::discord::health::{InjectOrigin, inject_human_input};
+use crate::services::discord::queue_io::human_input::{HumanInputRequest, InjectAttempt};
 use crate::services::discord::queue_io::transport::IntakeDeps;
 use crate::services::discord::shared_state::{
     PortFuture, PromoteBlockedFuture, QueuedAdmission, QueuedRun, RouterPorts,
 };
 use crate::services::provider::ProviderKind;
-use crate::services::turn_orchestrator::{DispatchLease, Intervention};
+use crate::services::turn_orchestrator::{DispatchLease, Intervention, QueueIdentity};
 
 pub(in crate::services::discord) const ROUTER_PORTS: RouterPorts = RouterPorts {
     #[cfg(unix)]
@@ -21,10 +23,27 @@ pub(in crate::services::discord) const ROUTER_PORTS: RouterPorts = RouterPorts {
     start_exact_retry,
     defer_promoted_dispatch,
     queued_head_inject_covers: super::queued_head_inject_covers,
+    queued_head_ready: InjectOrigin::queued_head_ready,
+    inject_queued_head,
     owned_original: super::input_payload::owned_original,
     #[cfg(unix)]
     owner_start_session_key,
 };
+
+fn inject_queued_head<'a>(
+    shared: &'a Arc<SharedData>,
+    request: &'a HumanInputRequest,
+    expected: QueueIdentity,
+    parent: Option<ChannelId>,
+    gate: fn(ChannelId, Option<ChannelId>) -> bool,
+) -> PortFuture<'a, InjectAttempt> {
+    let origin = InjectOrigin::QueuedHead {
+        expected,
+        parent,
+        gate,
+    };
+    Box::pin(inject_human_input(shared, request, origin))
+}
 
 fn promote_readiness_blocked<'a>(
     shared: &'a Arc<SharedData>,

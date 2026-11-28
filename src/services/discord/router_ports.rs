@@ -9,10 +9,11 @@ use poise::serenity_prelude::{self as serenity, ChannelId, UserId};
 
 use crate::services::cluster::attachment_transfer::uploads::PendingUploads;
 use crate::services::cluster::intake_turn::{IntakeExecution, IntakeRequest};
+use crate::services::discord::queue_io::human_input::{HumanInputRequest, InjectAttempt};
 use crate::services::discord::queue_io::transport::IntakeDeps;
 use crate::services::discord::replay_policy::{ExactHandoff, ExactRetry};
 use crate::services::provider::ProviderKind;
-use crate::services::turn_orchestrator::{DispatchLease, Intervention};
+use crate::services::turn_orchestrator::{DispatchLease, Intervention, QueueIdentity};
 
 use super::super::{Error, SharedData};
 
@@ -23,6 +24,8 @@ pub(in crate::services::discord) type PromoteBlockedFuture<'a> =
 /// A router future borrowed from its arguments.
 pub(in crate::services::discord) type PortFuture<'a, T> =
     Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+type QueuedHeadGate = fn(ChannelId, Option<ChannelId>) -> bool;
 
 /// One dequeued intervention's queued admission request, as the router's admission takes it.
 pub(in crate::services::discord) struct QueuedAdmission<'a> {
@@ -82,7 +85,15 @@ pub(in crate::services::discord) struct RouterPorts {
         Arc<DispatchLease>,
     ) -> PortFuture<'a, bool>,
     /// Whether the queued head may be offered to the running pane.
-    pub queued_head_inject_covers: fn(ChannelId, Option<ChannelId>) -> bool,
+    pub queued_head_inject_covers: QueuedHeadGate,
+    pub queued_head_ready: fn(&ProviderKind, ChannelId) -> bool,
+    pub inject_queued_head: for<'a> fn(
+        &'a Arc<SharedData>,
+        &'a HumanInputRequest,
+        QueueIdentity,
+        Option<ChannelId>,
+        QueuedHeadGate,
+    ) -> PortFuture<'a, InjectAttempt>,
     /// The intervention an intake request becomes when the input owner admits it.
     pub owned_original: fn(&IntakeRequest, bool, PendingUploads, bool) -> Intervention,
     /// The session key a kept start's headless turn runs under.

@@ -5,8 +5,11 @@ use std::sync::{Arc, LazyLock, Mutex};
 use poise::serenity_prelude::ChannelId;
 
 use super::snapshot::WatcherStateSnapshot;
-use super::{HealthRegistry, stall_liveness};
+use super::{HealthRegistry, relay_recovery_retry_delay_secs, stall_liveness};
 use crate::services::discord::inflight::{InflightTurnIdentity, InflightTurnState};
+use crate::services::discord::relay_health::retry_delay::{
+    REDRIVE_BACKOFF_SECS, REDRIVE_CAPPED_REARM_SECS, REDRIVE_MAX_NO_PROGRESS_ATTEMPTS,
+};
 use crate::services::discord::relay_health::{DurableFrontierObservation, RelayStallState};
 use crate::services::discord::relay_recovery::{
     self, RelayRecoveryActionKind, RelayRecoveryApplySource, RelayRecoveryDecision,
@@ -14,25 +17,6 @@ use crate::services::discord::relay_recovery::{
 };
 use crate::services::discord::{RelayFrontierToken, SharedData};
 use crate::services::provider::ProviderKind;
-
-// Delay after each admitted attempt. The six initial action times are
-// cumulative +0/+30/+90/+210/+450/+930. The hard placeholder shield expires at
-// +900, so the sixth action intentionally runs under the reclaim semantics
-// restored by that bound. A still-stalled episode then enters a one-hour
-// degraded backoff before a new bounded attempt cycle is admitted; it is never
-// permanently abandoned solely because the first cycle reached its cap.
-const REDRIVE_BACKOFF_SECS: [i64; 6] = [30, 60, 120, 240, 480, 960];
-const REDRIVE_MAX_NO_PROGRESS_ATTEMPTS: u8 = 6;
-const REDRIVE_CAPPED_REARM_SECS: i64 = 3600;
-const _: () = assert!(REDRIVE_BACKOFF_SECS.len() == REDRIVE_MAX_NO_PROGRESS_ATTEMPTS as usize);
-
-pub(in crate::services::discord) fn relay_recovery_retry_delay_secs(attempts: u32) -> i64 {
-    match attempts {
-        0 => 0,
-        n if n >= u32::from(REDRIVE_MAX_NO_PROGRESS_ATTEMPTS) => REDRIVE_CAPPED_REARM_SECS,
-        n => REDRIVE_BACKOFF_SECS[n as usize - 1],
-    }
-}
 
 type RedriveKey = (String, String, u64);
 

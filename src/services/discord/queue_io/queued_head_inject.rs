@@ -1,6 +1,7 @@
 use std::time::Duration;
 
-use super::super::{health, mailbox_snapshot, session_runtime};
+use super::super::{mailbox_snapshot, session_runtime};
+use super::human_input::{HumanInputRequest, InjectAttempt};
 use super::transport::IntakeDeps;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::busy_followup_retry_store::input_class;
@@ -28,21 +29,15 @@ pub(in crate::services::discord) fn binding_key(session: &str) -> Option<Binding
     ))
 }
 
-pub(in crate::services::discord) fn persistence_failed(error: String) -> health::InjectAttempt {
+pub(in crate::services::discord) fn persistence_failed(error: String) -> InjectAttempt {
     tracing::warn!(%error, "queued busy injection persistence failed");
-    health::InjectAttempt::HandbackFailed("queued_head_blocked")
+    InjectAttempt::HandbackFailed("queued_head_blocked")
 }
 
 /// `ADK_QUEUED_HEAD_INJECT=1` opts into queued-head injection; absent values keep it off.
-pub(in crate::services::discord) fn queued_head_enabled(channel: u64) -> bool {
-    #[cfg(all(test, unix))]
-    return health::inject_hook::queued_head_enabled(channel);
-    #[cfg(not(all(test, unix)))]
-    {
-        static PROCESS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        let _ = channel;
-        *PROCESS.get_or_init(|| crate::utils::env_flag("ADK_QUEUED_HEAD_INJECT", false))
-    }
+pub(in crate::services::discord) fn queued_head_env_enabled() -> bool {
+    static PROCESS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PROCESS.get_or_init(|| crate::utils::env_flag("ADK_QUEUED_HEAD_INJECT", false))
 }
 
 /// One queued-head attempt as an operator reads it: ids, coded reasons and where the head stands.
@@ -88,7 +83,8 @@ pub(in crate::services::discord) async fn try_busy(
     trigger: &'static str,
 ) -> bool {
     let Some(gate) = gate else { return false };
-    if !health::InjectOrigin::queued_head_ready(provider, channel) {
+    let ports = &deps.shared.router_ports;
+    if !(ports.queued_head_ready)(provider, channel) {
         return false;
     }
     // Some(None) records a validated non-thread; only unresolved callers perform a lookup.
@@ -98,7 +94,7 @@ pub(in crate::services::discord) async fn try_busy(
             .await
             .map(|(id, _)| id),
     };
-    if !health::InjectOrigin::queued_head_gate_enabled(provider, channel, parent, gate) {
+    if !(ports.queued_head_ready)(provider, channel) || !gate(channel, parent) {
         return false;
     }
     // The durable echo may yield before the enqueue's caller releases its transition.
@@ -124,7 +120,7 @@ pub(in crate::services::discord) async fn try_busy(
     if super::decision_drain::queued::origin(head).is_some() {
         return false;
     }
-    let request = health::HumanInputRequest {
+    let request = HumanInputRequest {
         channel_id: channel,
         provider: provider.clone(),
         text: head.text.clone(),
@@ -135,12 +131,9 @@ pub(in crate::services::discord) async fn try_busy(
     };
     #[cfg(all(test, unix))]
     tests::OFFERED_HEADS.lock().unwrap().push(head.message_id);
-    let origin = health::InjectOrigin::QueuedHead {
-        expected: QueueIdentity::of(head),
-        parent,
-        gate,
-    };
-    let attempt = health::inject_human_input(deps.shared, &request, origin).await;
+    let attempt =
+        (ports.inject_queued_head)(deps.shared, &request, QueueIdentity::of(head), parent, gate)
+            .await;
     let (outcome, reason, head_state) = attempt.queued_report();
     AttemptRow {
         channel_id: channel.get(),
@@ -154,7 +147,7 @@ pub(in crate::services::discord) async fn try_busy(
     }
     .emit();
     if *provider == ProviderKind::Claude
-        && matches!(attempt, health::InjectAttempt::NotSent(veto) | health::InjectAttempt::HandedBack { veto, .. } if preparation_veto(veto))
+        && matches!(attempt, InjectAttempt::NotSent(veto) | InjectAttempt::HandedBack { veto, .. } if preparation_veto(veto))
     {
         super::super::turn_bridge::followup_requeue::preparation_notice::enqueue(
             deps.shared,
@@ -170,7 +163,7 @@ pub(in crate::services::discord) async fn try_busy(
     // Other non-submission outcomes retain their existing idle-start policy.
     !matches!(
         attempt,
-        health::InjectAttempt::NotSent(_) | health::InjectAttempt::HandedBack { .. }
+        InjectAttempt::NotSent(_) | InjectAttempt::HandedBack { .. }
     )
 }
 

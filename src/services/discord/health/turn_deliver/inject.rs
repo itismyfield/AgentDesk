@@ -18,15 +18,17 @@ use std::sync::Arc;
 
 use poise::serenity_prelude::{ChannelId, MessageId};
 
-use super::HumanInputRequest;
+use super::super::CodexLedger;
+use super::{HumanInputRequest, queue_entry};
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::claude_tui::busy_inject::{self, Outcome, Receipt};
 use crate::services::codex_tui::busy_inject as codex_inject;
 use crate::services::discord::SharedData;
 use crate::services::discord::inflight::{InflightTurnState, TurnSource};
 use crate::services::discord::inject_disposition::{self, InjectionOutcome, SourceGuard};
+pub(crate) use crate::services::discord::queue_io::human_input::InjectAttempt;
 use crate::services::discord::queue_io::queued_head_inject::{
-    BindingKey, binding_key, persistence_failed, queued_head_enabled,
+    BindingKey, binding_key, persistence_failed, queued_head_env_enabled,
 };
 use crate::services::discord::router::live_intake_inject_covers;
 use crate::services::imsg_reply::{self, ReplyObligation, episode};
@@ -70,31 +72,6 @@ impl InjectMode {
             _ => Self::Off,
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum InjectAttempt {
-    /// Nothing was reserved or sent; the caller's own start or queue follows.
-    NotSent(&'static str),
-    Injected {
-        turn_id: Option<String>,
-    },
-    Unconfirmed {
-        turn_id: Option<String>,
-        detail: &'static str,
-    },
-    /// The pane vetoed after the reservation; the input took the queue front as `turn_id`.
-    HandedBack {
-        turn_id: String,
-        veto: &'static str,
-    },
-    /// The pane vetoed or an admitted GUID stayed unbound, and the queue front was not written
-    /// or its result is unknown.
-    HandbackFailed(&'static str),
-    /// The owner died outside the pane effect: nothing was recorded and the paste is unknown.
-    OwnerFailed {
-        turn_id: Option<String>,
-    },
 }
 
 /// Where the input came from. A Discord message carries its id, the queue entry a vetoed paste
@@ -151,6 +128,14 @@ pub(super) fn mode(channel_id: u64) -> InjectMode {
         let _ = channel_id;
         *PROCESS.get_or_init(|| InjectMode::parse(std::env::var(INJECT_ENV).ok().as_deref()))
     }
+}
+
+fn queued_head_enabled(channel: u64) -> bool {
+    let _ = channel;
+    let forced = None;
+    #[cfg(all(test, unix))]
+    let forced = forced.or(Some(test_hook::queued_head_enabled(channel)));
+    forced.unwrap_or_else(queued_head_env_enabled)
 }
 
 /// Require the requested channel itself; intake permission from its parent is insufficient.
@@ -541,8 +526,8 @@ pub(crate) async fn attempt(
     });
     let (session, turn_id) = (target.session.clone(), target.turn_id.clone());
     let (message, handback, guard) = match origin {
-        Origin::External => (None, request.queue_entry(None), None),
-        Origin::Obligated(reply) => (None, request.queue_entry(Some(&reply)), None),
+        Origin::External => (None, queue_entry(request, None), None),
+        Origin::Obligated(reply) => (None, queue_entry(request, Some(&reply)), None),
         Origin::Discord {
             message,
             handback,
@@ -886,33 +871,6 @@ fn run_with(
         Err(_) => alert("executor_failed"),
     };
     result
-}
-
-/// Tells the dedupe observers the nonce is this Discord message, aimed at the target turn.
-pub(in crate::services::discord) struct CodexLedger<'a> {
-    pub(in crate::services::discord) session: &'a str,
-    pub(in crate::services::discord) nonce: &'a str,
-    pub(in crate::services::discord) target_turn: &'a str,
-    pub(in crate::services::discord) message: Option<MessageId>,
-}
-
-impl codex_inject::Ledger for CodexLedger<'_> {
-    fn register(&self) -> bool {
-        let message = self.message.map(MessageId::get);
-        let register = crate::services::tui_prompt_dedupe::register_injected_steer;
-        register("codex", self.session, self.nonce, self.target_turn, message)
-    }
-
-    fn withdraw(&self) {
-        let withdraw = crate::services::tui_prompt_dedupe::withdraw_injected_steer;
-        withdraw("codex", self.session, self.nonce);
-    }
-    fn message_id(&self) -> Option<u64> {
-        self.message.map(MessageId::get)
-    }
-    fn admitted(&self) {
-        self.withdraw();
-    }
 }
 
 /// The Codex pane effect: `target` is the session, its rollout and the model turn read as open.
