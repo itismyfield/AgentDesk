@@ -150,6 +150,8 @@ campaign-execution/CampaignVerificationReceiptSplitWrite.cfg	CampaignVerificatio
 campaign-execution/CampaignVerificationSettleBefore.cfg	CampaignVerification	-	StopFinishCompletes,UnsealedClosed,VSettles
 campaign-execution/CampaignVerificationTwoValues.cfg	CampaignVerification	-	-
 catch-up-frontier/CatchUpFrontier.cfg	CatchUpFrontier	-	-
+catch-up-frontier/CatchUpFrontierBefore.cfg	CatchUpFrontier	ClosedRetentionDoesNotSeal	DeliveredInputsAdvanceCursor
+catch-up-frontier/CatchUpFrontierFilterOnly.cfg	CatchUpFrontier	ClosedRetentionDoesNotSeal,NoClosedRetentionReinjection	DeliveredInputsAdvanceCursor
 catch-up-frontier/CatchUpFrontierMain.cfg	CatchUpFrontier	-	DeliveredInputsAdvanceCursor
 catch-up-frontier/CatchUpFrontierPendingPass.cfg	CatchUpFrontier	NoDeadlock,NoUndeliveredBehindCursor	-
 claude-stop/ClaudeStopBefore.cfg	ClaudeStop	ActiveScreenStops,UnreadFooterStops	-
