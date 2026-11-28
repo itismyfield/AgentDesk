@@ -221,6 +221,7 @@ cat >"$WORK/entry-stubs.sh" <<'STUB'
 . "$ROOT/scripts/_defaults.sh"
 DEPLOY_RUN_STARTED="$SECONDS"
 REL_LAUNCHD_ENV_FILE="$WORK/release-env-fixture"
+entry_config="${AGENTDESK_CONFIG:-}"
 _self_hosted_release_session() { return 1; }
 _acquire_release_deploy_lock() { :; }
 _resolve_release_server_port() { echo 1; }
@@ -232,7 +233,8 @@ _schema_order_guard_before_build() { :; }
 setup_sccache_env() { return 1; }
 _ensure_dashboard_dependencies() { echo dependencies >>"$TRACE"; }
 _resolve_default_release_binary() {
-    [ -z "${AGENTDESK_CONFIG:-}" ] || return 1
+    [ "${AGENTDESK_CONFIG:-}" = "$entry_config" ] || return 1
+    [ "$PWD" = "$REPO" ] || return 1
     echo "$WORK/built"
 }
 _cleanup_owned_pg_tunnel_preflight() { :; }
@@ -600,7 +602,29 @@ PYMANIFEST
             case "$scenario" in
                 release-env-runner)
                     printf 'cluster: {enabled: true, role: runner}\n' >"$selected_config"
+                    export AGENTDESK_CONFIG="$WORK/caller-config.yml"
+                    printf 'cluster: {enabled: true, role: hub}\n' >"$AGENTDESK_CONFIG"
                     reason='Deploy from the primary or provide AGENTDESK_DEPLOY_BINARY'
+                    ;;
+                release-env-caller)
+                    printf 'cluster: {enabled: true, role: runner}\n' >"$WORK/leader/fixture-config.yml"
+                    printf 'cluster: {enabled: false}\n' >"$selected_config"
+                    printf '# Release uses its default config.\n' >"$WORK/release-env-fixture"
+                    export AGENTDESK_CONFIG="$selected_config"
+                    reason='Deploy from the primary or provide AGENTDESK_DEPLOY_BINARY'
+                    ;;
+                release-env-relative-runner|release-env-relative-hub)
+                    local relative_config=relative-role.yml
+                    printf 'AGENTDESK_CONFIG=%s\n' "$relative_config" >"$WORK/release-env-fixture"
+                    if [ "$scenario" = release-env-relative-runner ]; then
+                        printf 'cluster: {enabled: true, role: runner}\n' >"$WORK/leader/$relative_config"
+                        printf 'cluster: {enabled: false}\n' >"$WORK/repo/$relative_config"
+                        reason='Deploy from the primary or provide AGENTDESK_DEPLOY_BINARY'
+                    else
+                        printf 'cluster: {enabled: true, role: hub}\n' >"$WORK/leader/$relative_config"
+                        rm -f "$WORK/repo/$relative_config"
+                        expected_rc=0; expected_builds=1; reason='Building release binary'
+                    fi
                     ;;
                 release-env-hub)
                     printf 'cluster: {enabled: true, role: runner}\n' >"$WORK/leader/fixture-config.yml"
@@ -646,7 +670,7 @@ PYMANIFEST
             ;;
         *) fail "unknown entry case $scenario" ;;
     esac
-    bash "$WORK/repo/scripts/entry.sh" "${args[@]}" >"$stdout" 2>&1 || rc=$?
+    (cd "$WORK/repo" && bash scripts/entry.sh "${args[@]}") >"$stdout" 2>&1 || rc=$?
     if [ -n "${AGENTDESK_TEST_LOG_DIR:-}" ]; then
         mkdir -p "$AGENTDESK_TEST_LOG_DIR"
         cp "$stdout" "$AGENTDESK_TEST_LOG_DIR/$scenario.log"
@@ -663,7 +687,7 @@ PYMANIFEST
             grep -qx restart "$TRACE" || fail "$scenario did not reach activation"
             ! grep -qx dependencies "$TRACE" || fail "$scenario installed dashboard dependencies"
             ;;
-        release-env-hub|standalone-source)
+        release-env-hub|release-env-relative-hub|standalone-source)
             grep -qx restart "$TRACE" || fail "$scenario did not reach activation"
             ;;
         *) ! grep -Ex 'stage|restart' "$TRACE" || fail "$scenario reached local staging or restart" ;;
@@ -691,7 +715,8 @@ else
     count=0
     for scenario in success codesign-verbosity hash arch transfer stages size signature execute runtime toolchain os format source profile signature-meta optimized-hash concurrency detach leader-staged leader-live witness-mismatch unavailable launch-fail peer-platform head-target \
         high-load-install high-load-source high-load-dashboard no-fallback no-fallback-unavailable no-fallback-old-checkout \
-        default-success fallback-value-not-one direct-peer release-env-runner release-env-hub release-env-missing standalone-source \
+        default-success fallback-value-not-one direct-peer release-env-runner release-env-caller release-env-relative-runner \
+        release-env-relative-hub release-env-hub release-env-missing standalone-source \
         peers-only peers-only-fast peers-only-wrong-head peers-only-migration peers-only-checksum \
         peers-only-bad-signature peers-only-no-source; do
         run_scenario "$scenario"
