@@ -18,7 +18,7 @@ pub(super) fn episode_fingerprint(nonce: Option<&str>) -> [u8; 32] {
 
 pub(in crate::services::discord) struct CapturedFinish {
     pub(in crate::services::discord) finish: crate::services::turn_orchestrator::FinishTurnResult,
-    pub(super) snapshot: Option<SyntheticClaimSnapshot>,
+    pub(in crate::services::discord) snapshot: Option<SyntheticClaimSnapshot>,
     /// This claim itself removed the episode's row.
     pub(super) row_cleared: bool,
 }

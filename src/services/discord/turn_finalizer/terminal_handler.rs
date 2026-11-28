@@ -333,7 +333,8 @@ pub(super) async fn handle_policy_close(
 #[cfg(unix)]
 #[derive(Clone)]
 pub(in crate::services::discord) struct NativeAdmission {
-    evidence: crate::services::tui_o::writer::input_facts::native::Evidence,
+    pub(in crate::services::discord) evidence:
+        crate::services::tui_o::writer::input_facts::native::Evidence,
     registrations_fingerprint: String,
     pub(in crate::services::discord) cleanup: Option<(TurnKey, Arc<CancelToken>)>,
 }
@@ -381,10 +382,11 @@ impl NativeAdmission {
 pub(in crate::services::discord) struct NativePrepared {
     history: crate::services::tui_input::human_frame::history::v2::Registry,
     namespace: String,
-    ticket: crate::services::tui_input::human_frame::history::v2::native::Ticket,
+    pub(in crate::services::discord) ticket:
+        crate::services::tui_input::human_frame::history::v2::native::Ticket,
     key: TurnKey,
     actor: Option<Arc<CancelToken>>,
-    started_before: std::time::Instant,
+    pub(in crate::services::discord) started_before: std::time::Instant,
     row_witness: Option<super::super::inflight::InflightTurnState>,
 }
 

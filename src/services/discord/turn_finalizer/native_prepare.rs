@@ -311,7 +311,10 @@ pub(in crate::services::discord) async fn holds_row(
         .unwrap_or(true)
 }
 
-pub(super) async fn handle(msg: FinalizeMsg, ledger: &mut HashMap<LedgerKey, LedgerEntry>) {
+pub(in crate::services::discord) async fn handle(
+    msg: FinalizeMsg,
+    ledger: &mut HashMap<LedgerKey, LedgerEntry>,
+) {
     match msg {
         FinalizeMsg::NativeAbstain {
             input,

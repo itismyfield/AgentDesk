@@ -5,7 +5,7 @@ use crate::services::discord::queue_io::decision_drain::*;
 #[cfg(unix)]
 use crate::services::discord::queue_io::input_owner::drive::{Front, Handoff};
 use crate::services::discord::queue_io::input_owner::origin::InputOrigin;
-use crate::services::turn_orchestrator::ChannelMailboxHandle;
+use crate::services::turn_orchestrator::{ChannelMailboxHandle, ChannelMailboxRegistry};
 use sqlx::PgPool;
 use std::sync::atomic::Ordering;
 

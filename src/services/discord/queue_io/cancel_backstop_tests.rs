@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+use poise::serenity_prelude::{ChannelId, HttpBuilder, MessageId, UserId};
 
 use crate::services::discord::bot_runtime::saturating_decrement_global_active;
 use crate::services::discord::queue_io::backstop::DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY;
@@ -351,7 +351,7 @@ async fn routing_http(
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let http = Arc::new(
-        serenity::HttpBuilder::new("cancel-test-token")
+        HttpBuilder::new("cancel-test-token")
             .proxy(format!("http://{}", listener.local_addr().unwrap()))
             .ratelimiter_disabled(true)
             .build(),
