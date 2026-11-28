@@ -22,6 +22,7 @@ use crate::services::platform::tmux::session_inventory::test_support::{
 };
 use crate::services::provider::ProviderKind;
 use crate::services::tui_prompt_dedupe::binding_events as p5;
+use adk_runtime::services::tmux_common::TMUX_RUNTIME_KIND_TEMP_EXT;
 use poise::serenity_prelude::ChannelId;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -694,12 +695,12 @@ async fn s1_historical_and_canonical_host_runtime_nonce_traces_are_required_pg()
                 "session_identity_unresolved",
             ),
             (
-                tmux_common::TMUX_RUNTIME_KIND_TEMP_EXT,
+                TMUX_RUNTIME_KIND_TEMP_EXT,
                 &b"process_backend"[..],
                 "session_identity_unresolved",
             ),
             (
-                tmux_common::TMUX_RUNTIME_KIND_TEMP_EXT,
+                TMUX_RUNTIME_KIND_TEMP_EXT,
                 &b"unknown-runtime"[..],
                 "session_probe_failed",
             ),
@@ -930,11 +931,7 @@ async fn s1_saved_idle_rejects_historical_and_recovered_candidate_trace_changes_
                 fixture.marker(&fixture.old_name, "host_kind", b"tmux");
             }
             "runtime" => {
-                fixture.marker(
-                    &fixture.old_name,
-                    tmux_common::TMUX_RUNTIME_KIND_TEMP_EXT,
-                    b"claude_tui",
-                );
+                fixture.marker(&fixture.old_name, TMUX_RUNTIME_KIND_TEMP_EXT, b"claude_tui");
             }
             "inflight" => fixture.inflight("new-inflight-nonce"),
             _ => unreachable!(),
