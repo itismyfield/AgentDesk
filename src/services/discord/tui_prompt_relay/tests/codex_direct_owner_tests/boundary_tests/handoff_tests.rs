@@ -1446,10 +1446,13 @@ fn send_captured_hook_on(
     prompt: &str,
     turn: &str,
 ) {
-    let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/hook_payload/codex-0.157.1.json"
-    )))
+    let fixture: serde_json::Value = serde_json::from_reader(
+        std::fs::File::open(
+            std::path::Path::new(crate::runtime_layout::REPO_ROOT)
+                .join("tests/fixtures/hook_payload/codex-0.157.1.json"),
+        )
+        .expect("read codex-0.157.1.json fixture"),
+    )
     .expect("captured hook fixture");
     let mut payload = fixture["runs"][1]["events"]
         .as_array()

@@ -21,7 +21,7 @@ fn isolated(name: &str) -> bool {
         crate::services::discord::health::test_support::install_runtime_ports_for_tests();
         return true;
     }
-    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/o-delivery-e2e");
+    let base = Path::new(crate::runtime_layout::REPO_ROOT).join("target/o-delivery-e2e");
     std::fs::create_dir_all(&base).unwrap();
     let root = tempfile::tempdir_in(base).unwrap();
     let qualified = format!("{}::{name}", module_path!().split_once("::").unwrap().1);

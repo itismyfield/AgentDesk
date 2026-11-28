@@ -17,7 +17,10 @@ const WAIT: Duration = Duration::from_secs(30);
 
 fn child(test: &str) -> bool {
     let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    api_child(test.strip_prefix("agentdesk::").unwrap_or(test))
+    api_child(
+        test.strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
+            .unwrap_or(test),
+    )
 }
 
 /// Claude pipe channels on a migrated database holding one cancelled dispatch.

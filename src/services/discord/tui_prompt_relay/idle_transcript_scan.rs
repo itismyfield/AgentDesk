@@ -725,10 +725,13 @@ mod tests {
     /// not prove the provider's hook/row correspondence.
     #[test]
     fn claude_idle_scans_thread_the_row_prompt_id() {
-        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/hook_payload/claude-2.1.283.json"
-        )))
+        let fixture: serde_json::Value = serde_json::from_reader(
+            std::fs::File::open(
+                std::path::Path::new(crate::runtime_layout::REPO_ROOT)
+                    .join("tests/fixtures/hook_payload/claude-2.1.283.json"),
+            )
+            .expect("read claude-2.1.283.json fixture"),
+        )
         .expect("fixture json");
         let payload = &fixture["runs"][0]["events"]
             .as_array()

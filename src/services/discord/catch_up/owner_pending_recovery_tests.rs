@@ -189,7 +189,7 @@ async fn boot_live_pending_auto_reset_catch_up_commits_once_and_preserves_metada
     let before_reset = std::fs::read(&path).unwrap();
     let runtime_root = path.ancestors().nth(4).unwrap();
     let output = std::process::Command::new("python3")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .current_dir(crate::runtime_layout::REPO_ROOT)
         .args([
             "-c",
             r#"

@@ -746,7 +746,7 @@ mod o_cut_tests {
                 module_path!(),
                 "::o_delegated_restart_handoff_keeps_only_the_marker"
             )
-            .trim_start_matches("agentdesk::"),
+            .trim_start_matches(concat!(env!("CARGO_CRATE_NAME"), "::")),
         ) {
             return;
         }

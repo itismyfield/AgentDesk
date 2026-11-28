@@ -228,7 +228,7 @@ fn owner_tick(pool: &PgPool, now_ms: i64, watch_sql: bool) -> i32 {
     let runtime = rquickjs::Runtime::new().unwrap();
     let context = rquickjs::Context::full(&runtime).unwrap();
     let read = |name| {
-        std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(name))
+        std::fs::read_to_string(std::path::Path::new(crate::runtime_layout::REPO_ROOT).join(name))
             .unwrap()
     };
     let helpers = read("policies/lib/timeouts-helpers.js");
@@ -500,7 +500,7 @@ fn orphan_owner_policy_isolates_malformed_rows_and_coerces_executed() {
         )
         .unwrap();
         let read = |name| {
-            std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(name))
+            std::fs::read_to_string(std::path::Path::new(crate::runtime_layout::REPO_ROOT).join(name))
                 .unwrap()
         };
         let helpers = read("policies/lib/timeouts-helpers.js");
@@ -702,7 +702,7 @@ async fn orphan_owner_actor_hook_flushes_deferred_confirmation_pg() {
         "timeouts/orphan-dispatch.js",
     ] {
         std::fs::copy(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            std::path::Path::new(crate::runtime_layout::REPO_ROOT)
                 .join("policies")
                 .join(relative),
             dir.path().join(relative),

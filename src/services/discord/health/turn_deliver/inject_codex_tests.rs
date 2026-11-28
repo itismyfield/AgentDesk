@@ -150,7 +150,7 @@ pub(super) struct CodexPane {
 
 impl CodexPane {
     fn new(channel: u64, rollout: &str, runtime: RuntimeHandoffKind) -> Self {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/busy-inject-tmp");
+        let root = Path::new(crate::runtime_layout::REPO_ROOT).join("target/busy-inject-tmp");
         fs::create_dir_all(&root).unwrap();
         let pane = Self {
             dir: tempfile::tempdir_in(root).unwrap(),
@@ -208,7 +208,8 @@ impl CodexPane {
 
     /// The pane before any paste shows this captured Codex screen.
     fn show(&self, fixture: &str) {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex_busy_inject");
+        let dir =
+            Path::new(crate::runtime_layout::REPO_ROOT).join("tests/fixtures/codex_busy_inject");
         self.set(
             "cap.before",
             &fs::read_to_string(dir.join(fixture)).unwrap(),

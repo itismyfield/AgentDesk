@@ -29,7 +29,7 @@ async fn a_stale_leak_resend_stays_counted_through_its_edit_and_continuations() 
             module_path!(),
             "::a_stale_leak_resend_stays_counted_through_its_edit_and_continuations"
         )
-        .trim_start_matches("agentdesk::"),
+        .trim_start_matches(concat!(env!("CARGO_CRATE_NAME"), "::")),
     ) {
         return;
     }

@@ -239,7 +239,7 @@ async fn a_task_response_stays_counted_across_its_chunks_until_the_transport_dro
             module_path!(),
             "::a_task_response_stays_counted_across_its_chunks_until_the_transport_drops"
         )
-        .trim_start_matches("agentdesk::"),
+        .trim_start_matches(concat!(env!("CARGO_CRATE_NAME"), "::")),
     ) {
         return;
     }

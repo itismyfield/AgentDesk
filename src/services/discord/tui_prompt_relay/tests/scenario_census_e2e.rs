@@ -48,7 +48,7 @@ struct Scenario {
 }
 
 fn scenario_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(SCENARIO_SUBDIR)
+    PathBuf::from(crate::runtime_layout::REPO_ROOT).join(SCENARIO_SUBDIR)
 }
 
 fn text_of(node: &Value, key: &str) -> Option<String> {

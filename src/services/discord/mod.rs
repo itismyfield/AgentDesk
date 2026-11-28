@@ -454,9 +454,7 @@ pub(in crate::services::discord) use bot_runtime::saturating_decrement_global_ac
 pub(super) use bot_runtime::single_message_panel_enabled;
 pub(super) use bot_runtime::status_update_interval;
 
-pub(crate) fn clear_inflight_state_for_channel(provider: &ProviderKind, channel_id: u64) -> bool {
-    inflight::clear_inflight_state(provider, channel_id)
-}
+pub(crate) use bot_runtime::clear_inflight_state_for_channel;
 
 pub(in crate::services::discord) use recovery_known_ids::{
     RecoveryKnownIdArm, queued_message_ids, recovery_known_arms_and_ids,
@@ -707,27 +705,7 @@ use queue_exit::queue_exit_card_body;
 use queue_exit::queue_exit_drain_queued_placeholders;
 pub(in crate::services::discord) use queue_exit::queue_exit_feedback_emoji;
 
-struct QueueExitPendingPlaceholderDeleter {
-    http: Arc<serenity::Http>,
-}
-
-impl placeholder_controller::queued_card_gate::StalePlaceholderDeleter
-    for QueueExitPendingPlaceholderDeleter
-{
-    fn delete<'a>(
-        &'a self,
-        channel_id: ChannelId,
-        placeholder_msg_id: MessageId,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
-        Box::pin(async move {
-            channel_id
-                .delete_message(&self.http, placeholder_msg_id)
-                .await
-                .map(|_| ())
-                .map_err(|error| error.to_string())
-        })
-    }
-}
+pub(crate) use queue_exit::QueueExitPendingPlaceholderDeleter;
 
 #[cfg(test)]
 mod queue_exit_feedback_reconciler_tests {

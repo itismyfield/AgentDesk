@@ -777,7 +777,7 @@ mod tests {
                 module_path!(),
                 "::unfinished_background_refresh_schedules_registered_footer_edit"
             )
-            .trim_start_matches("agentdesk::"),
+            .trim_start_matches(concat!(env!("CARGO_CRATE_NAME"), "::")),
         ) {
             return;
         }

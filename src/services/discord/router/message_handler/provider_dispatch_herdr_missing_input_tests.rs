@@ -306,10 +306,11 @@ fn a_busy_registration_failure_keeps_live_input_and_submits_once_on_idle_pg() {
     let original_runtime;
     let mut intake = Intake::new(&fx, &started);
     original_runtime = recording_runtime(&mut intake, &fx, false);
-    let screen = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/tui_input/claude-2.1.293-idle.txt"
-    ));
+    let screen = std::fs::read_to_string(
+        std::path::Path::new(crate::runtime_layout::REPO_ROOT)
+            .join("tests/fixtures/tui_input/claude-2.1.293-idle.txt"),
+    )
+    .expect("read Claude idle screen fixture");
     let screen_at = |text: &str| {
         json!({"type":"pane_read","read":{
             "pane_id":PANE, "source":"recent_unwrapped", "text":text,

@@ -15,7 +15,7 @@ const T: &str = "01a11d88-ef31-7860-9d48-88926c4b1809";
 const ROWS: usize = 40;
 
 fn fixture(name: &str) -> String {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex_busy_inject");
+    let dir = Path::new(crate::runtime_layout::REPO_ROOT).join("tests/fixtures/codex_busy_inject");
     fs::read_to_string(dir.join(name)).unwrap()
 }
 
@@ -36,7 +36,7 @@ pub(super) fn codex_renderer_in(
     fs::create_dir(&root).unwrap();
     // An idle pane is a captured idle Codex composer at 80 columns, drawn at the pane's bottom.
     let (shown, width) = if idle {
-        let idle = Path::new(env!("CARGO_MANIFEST_DIR"))
+        let idle = Path::new(crate::runtime_layout::REPO_ROOT)
             .join("tests/fixtures/tui_input/codex-status-sol-80-idle.ansi");
         let pad = "\n".repeat(ROWS);
         (pad + &fs::read_to_string(idle).unwrap(), "80")

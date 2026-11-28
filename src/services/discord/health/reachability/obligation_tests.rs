@@ -13,7 +13,7 @@ fn identity() -> TranscriptFileId {
 }
 
 fn fixture_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/relay_obligation")
+    Path::new(crate::runtime_layout::REPO_ROOT).join("tests/fixtures/relay_obligation")
 }
 
 /// One corpus case, as declared in `cases.json`.

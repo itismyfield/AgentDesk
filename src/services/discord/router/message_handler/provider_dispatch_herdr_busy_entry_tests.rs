@@ -709,10 +709,11 @@ fn a_managed_herdr_busy_input_observes_early_once_without_a_late_read_pg() {
             json!({"type":"assistant","uuid":uuid(),"apiBlockIndex":0,"sessionId":started.session,"message":{"id":"i8114-working-message","role":"assistant","content":[{"type":"text","text":"working"}]}}),
         ],
     );
-    let screen = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/tui_input/claude-2.1.293-idle.txt"
-    ));
+    let screen = std::fs::read_to_string(
+        std::path::Path::new(crate::runtime_layout::REPO_ROOT)
+            .join("tests/fixtures/tui_input/claude-2.1.293-idle.txt"),
+    )
+    .expect("read claude-2.1.293-idle.txt fixture");
     fx.rig.answer(
         "pane.read",
         json!({"type":"pane_read", "read": {
@@ -804,10 +805,11 @@ fn an_early_new_herdr_execution_cannot_borrow_its_old_global_pin_pg() {
             json!({"type":"assistant","uuid":uuid(),"apiBlockIndex":0,"sessionId":started.session,"message":{"id":"i8114-working-message","role":"assistant","content":[{"type":"text","text":"working"}]}}),
         ],
     );
-    let screen = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/tui_input/claude-2.1.293-idle.txt"
-    ));
+    let screen = std::fs::read_to_string(
+        std::path::Path::new(crate::runtime_layout::REPO_ROOT)
+            .join("tests/fixtures/tui_input/claude-2.1.293-idle.txt"),
+    )
+    .expect("read claude-2.1.293-idle.txt fixture");
     fx.rig.answer(
         "pane.read",
         json!({"type":"pane_read", "read": {
@@ -1251,10 +1253,11 @@ fn an_input_before_source_promotion_wakes_once_on_its_authentic_hook_pg() {
     assert!(
         crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&started.path).is_busy()
     );
-    let screen = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/tui_input/claude-2.1.293-idle.txt"
-    ));
+    let screen = std::fs::read_to_string(
+        std::path::Path::new(crate::runtime_layout::REPO_ROOT)
+            .join("tests/fixtures/tui_input/claude-2.1.293-idle.txt"),
+    )
+    .expect("read claude-2.1.293-idle.txt fixture");
     fx.rig.answer(
         "pane.read",
         json!({"type":"pane_read","read":{

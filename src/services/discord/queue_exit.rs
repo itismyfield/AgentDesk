@@ -2,10 +2,9 @@
 
 use super::{
     Arc, ChannelId, HashMap, Instant, Intervention, InterventionMode, MessageId, ProviderKind,
-    QueueExitEvent, QueueExitKind, QueueExitPendingPlaceholderDeleter, QueuedCardDisposition,
-    QueuedCardTeardown, SharedData, UserId, mailbox_enqueue_intervention, queue_marker,
-    queue_overflow_dlq, queued_card_gate, queued_placeholders_store,
-    schedule_deferred_idle_queue_kickoff,
+    QueueExitEvent, QueueExitKind, QueuedCardDisposition, QueuedCardTeardown, SharedData, UserId,
+    mailbox_enqueue_intervention, queue_marker, queue_overflow_dlq, queued_card_gate,
+    queued_placeholders_store, schedule_deferred_idle_queue_kickoff, serenity,
 };
 
 pub(in crate::services::discord) fn queue_exit_feedback_emoji(kind: QueueExitKind) -> char {
@@ -203,6 +202,26 @@ pub(super) async fn apply_queue_exit_feedback(
     }
 }
 
+pub(crate) struct QueueExitPendingPlaceholderDeleter {
+    pub(super) http: Arc<serenity::Http>,
+}
+
+impl queued_card_gate::StalePlaceholderDeleter for QueueExitPendingPlaceholderDeleter {
+    fn delete<'a>(
+        &'a self,
+        channel_id: ChannelId,
+        placeholder_msg_id: MessageId,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            channel_id
+                .delete_message(&self.http, placeholder_msg_id)
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+    }
+}
+
 pub(in crate::services::discord) async fn drain_pending_queue_exit_placeholder_clears(
     shared: &SharedData,
 ) {
@@ -212,7 +231,7 @@ pub(in crate::services::discord) async fn drain_pending_queue_exit_placeholder_c
     let Some(http) = shared.serenity_http_or_token_fallback() else {
         return;
     };
-    let deleter = QueueExitPendingPlaceholderDeleter { http };
+    let deleter = super::QueueExitPendingPlaceholderDeleter { http };
     drain_pending_queue_exit_placeholder_clears_with(shared, &deleter).await;
 }
 

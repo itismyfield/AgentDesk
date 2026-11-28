@@ -162,7 +162,7 @@ fn issue_4313_agentdesk_prompt_has_single_policy_owner() {
     let prompt = build_system_prompt(
         "ctx",
         &[],
-        env!("CARGO_MANIFEST_DIR"),
+        crate::runtime_layout::REPO_ROOT,
         ChannelId::new(1),
         "tok",
         Some(&binding),
@@ -1561,7 +1561,7 @@ fn peer_directory_shared_keywords_are_not_voice_aliases_or_meeting_keywords() {
 #[test]
 fn peer_directory_example_hides_e2e_and_keeps_specialist_names() {
     let example = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("agentdesk.example.yaml"),
+        std::path::Path::new(crate::runtime_layout::REPO_ROOT).join("agentdesk.example.yaml"),
     )
     .unwrap();
     let root = tempfile::tempdir().unwrap();

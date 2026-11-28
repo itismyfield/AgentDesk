@@ -1021,7 +1021,7 @@ impl SessionBoundDiscordRelaySink {
 async fn writer_channel_unknown_destination_is_held_before_transport() {
     use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
 
-    let temp = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("temp runtime root");
+    let temp = tempfile::tempdir_in(crate::runtime_layout::REPO_ROOT).expect("temp runtime root");
     let _root = crate::config::set_agentdesk_root_for_test(temp.path());
     let binding = matched("0");
     let registry = Arc::new(HealthRegistry::new());

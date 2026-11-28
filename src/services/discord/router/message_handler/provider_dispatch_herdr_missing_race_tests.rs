@@ -21,10 +21,11 @@ fn capture_race(active: bool, unknown: bool, successor: bool) {
             json!({"type":"assistant","uuid":uuid(),"apiBlockIndex":0,"sessionId":started.session,"message":{"id":"busy-race","role":"assistant","content":[{"type":"text","text":"working"}]}}),
         ],
     );
-    let screen = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/tui_input/claude-2.1.293-idle.txt"
-    ));
+    let screen = std::fs::read_to_string(
+        std::path::Path::new(crate::runtime_layout::REPO_ROOT)
+            .join("tests/fixtures/tui_input/claude-2.1.293-idle.txt"),
+    )
+    .expect("read claude-2.1.293-idle.txt fixture");
     fx.rig.answer(
         "pane.read",
         json!({"type":"pane_read","read":{

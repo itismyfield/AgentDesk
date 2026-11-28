@@ -158,7 +158,9 @@ async fn queue_notice_survives_process_restart_and_legacy_restore() {
         "{}::queue_notice_survives_process_restart_and_legacy_restore",
         module_path!()
     );
-    let name = name.strip_prefix("agentdesk::").unwrap();
+    let name = name
+        .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
+        .unwrap();
     let mut enqueued = Vec::new();
     for phase in ["enqueue", "restart", "legacy"] {
         if phase == "legacy" {

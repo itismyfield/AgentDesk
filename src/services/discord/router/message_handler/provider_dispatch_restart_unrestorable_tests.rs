@@ -135,10 +135,11 @@ fn a_restored_reply_ends_the_same_busy_hold_with_one_delivery_and_no_refusal_pg(
     append(&started.path, &records);
     readiness::test_support::forget_session(fx.logical());
     assert!(readiness::observe(fx.logical(), Some(&started.path)).is_none());
-    let idle = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/tui_input/claude-2.1.293-idle.txt"
-    ));
+    let idle = std::fs::read_to_string(
+        std::path::Path::new(crate::runtime_layout::REPO_ROOT)
+            .join("tests/fixtures/tui_input/claude-2.1.293-idle.txt"),
+    )
+    .expect("read claude-2.1.293-idle.txt fixture");
     let show = |text: &str| {
         fx.rig.answer(
             "pane.read",
@@ -190,7 +191,7 @@ fn a_restored_reply_ends_the_same_busy_hold_with_one_delivery_and_no_refusal_pg(
             &ProviderKind::Claude,
             CHANNEL
         ));
-        show(idle);
+        show(&idle);
         let look = tokio::time::timeout(LIMIT, observed)
             .await
             .unwrap()
@@ -219,12 +220,13 @@ fn restored(fx: &Fixture, started: &Started, idle: bool) {
         &started.path,
         &std::iter::once(end).chain(records).collect::<Vec<_>>(),
     );
-    let screen = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/tui_input/claude-2.1.293-idle.txt"
-    ));
+    let screen = std::fs::read_to_string(
+        std::path::Path::new(crate::runtime_layout::REPO_ROOT)
+            .join("tests/fixtures/tui_input/claude-2.1.293-idle.txt"),
+    )
+    .expect("read claude-2.1.293-idle.txt fixture");
     let busy = format!("✻ Thinking… (12s · esc to interrupt)\n{screen}");
-    let text = if idle { screen.to_string() } else { busy };
+    let text = if idle { screen } else { busy };
     fx.rig.answer(
         "pane.read",
         json!({"type":"pane_read","read":{
@@ -494,10 +496,11 @@ async fn settles_at_due(
 }
 
 fn show_idle_screen(fx: &Fixture) {
-    let screen = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/tui_input/claude-2.1.293-idle.txt"
-    ));
+    let screen = std::fs::read_to_string(
+        std::path::Path::new(crate::runtime_layout::REPO_ROOT)
+            .join("tests/fixtures/tui_input/claude-2.1.293-idle.txt"),
+    )
+    .expect("read claude-2.1.293-idle.txt fixture");
     fx.rig.answer(
         "pane.read",
         json!({"type":"pane_read","read":{

@@ -67,7 +67,9 @@ fn b2b_real_sigterm_provider_persists_then_exits_its_original_process() {
         module_path!(),
         "::b2b_real_sigterm_provider_persists_then_exits_its_original_process"
     );
-    let selector = selector.strip_prefix("agentdesk::").unwrap_or(selector);
+    let selector = selector
+        .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
+        .unwrap_or(selector);
     let child = std::process::Command::new(std::env::current_exe().unwrap())
         .env_clear()
         .env("PATH", "/usr/bin:/bin")

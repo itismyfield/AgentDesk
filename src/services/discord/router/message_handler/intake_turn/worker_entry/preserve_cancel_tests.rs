@@ -12,7 +12,10 @@ const TS: &str = "2026-11-05T00:00:00+00:00";
 
 fn child(test: &str) -> bool {
     let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    api_child(test.strip_prefix("agentdesk::").unwrap_or(test))
+    api_child(
+        test.strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
+            .unwrap_or(test),
+    )
 }
 
 /// What the queue holds for `message` after its start was called off: in memory, and as a

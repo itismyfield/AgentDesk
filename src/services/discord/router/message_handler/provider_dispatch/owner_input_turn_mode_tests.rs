@@ -328,7 +328,7 @@ const LIVE_SESSION: &str = "019e7942-0000-7000-8000-000000000002";
 const ROWS: usize = 40;
 
 fn codex_fixture(name: &str) -> String {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let dir = Path::new(crate::runtime_layout::REPO_ROOT).join("tests/fixtures");
     fs::read_to_string(dir.join(name)).unwrap()
 }
 

@@ -210,7 +210,7 @@ fn deploy_ready(body: &Value, jq: bool) -> bool {
         .env("WANT_JQ", if jq { "1" } else { "0" })
         .env(
             "DEFAULTS",
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/_defaults.sh"),
+            Path::new(crate::runtime_layout::REPO_ROOT).join("scripts/_defaults.sh"),
         )
         .env("BODY", body.to_string())
         .status()

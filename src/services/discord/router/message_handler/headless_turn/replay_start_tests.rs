@@ -8,7 +8,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
 fn child(name: &str) -> bool {
-    api_child(name.strip_prefix("agentdesk::").unwrap_or(name))
+    api_child(
+        name.strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
+            .unwrap_or(name),
+    )
 }
 
 struct Host {
@@ -921,7 +924,7 @@ fn p5_process_start_env_variants_use_the_production_selector_pg() {
         module_path!(),
         "::p5_process_start_env_variants_use_the_production_selector_pg"
     )
-    .strip_prefix("agentdesk::")
+    .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
     .unwrap();
     if let Ok(label) = std::env::var(MARKER) {
         intake_replay_rt().block_on(async {
@@ -991,7 +994,7 @@ fn p5_live_foreign_boot_does_not_preempt_the_owner_pg() {
         module_path!(),
         "::p5_live_foreign_boot_does_not_preempt_the_owner_pg"
     )
-    .strip_prefix("agentdesk::")
+    .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
     .unwrap();
     let role = std::env::var(ROLE).unwrap_or_default();
     if role == "peer" && std::env::var(SCENARIO).ok().as_deref() == Some("same-root-overlap") {

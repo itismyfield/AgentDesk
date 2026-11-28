@@ -305,10 +305,10 @@ impl Fixture {
                 "read": {
                     "pane_id": PANE,
                     "source": "recent_unwrapped",
-                    "text": include_str!(concat!(
-                        env!("CARGO_MANIFEST_DIR"),
-                        "/tests/fixtures/tui_input/claude-2.1.293-idle.txt"
-                    )),
+                    "text": std::fs::read_to_string(
+                        std::path::Path::new(crate::runtime_layout::REPO_ROOT).join("tests/fixtures/tui_input/claude-2.1.293-idle.txt"),
+                    )
+                    .expect("read claude-2.1.293-idle.txt fixture"),
                     "revision": 1,
                     "truncated": false,
                 },

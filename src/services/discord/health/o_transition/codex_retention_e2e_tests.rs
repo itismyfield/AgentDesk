@@ -31,6 +31,11 @@ fn backlog(fixture: &Fixture, count: usize) -> (Vec<SourceId>, chrono::DateTime<
     let root = crate::config::runtime_root().unwrap();
     let mut sources = Vec::new();
     let mut events = Vec::new();
+    let golden = std::fs::read_to_string(
+        std::path::Path::new(crate::runtime_layout::REPO_ROOT)
+            .join("tests/fixtures/codex_retention/activity_rollout_016x.jsonl"),
+    )
+    .expect("read Codex retention rollout fixture");
     for index in 0..count {
         let id = format!("019e660d-4859-7522-9cee-{:012x}", index + 100);
         let path = fixture
@@ -39,10 +44,6 @@ fn backlog(fixture: &Fixture, count: usize) -> (Vec<SourceId>, chrono::DateTime<
             .as_ref()
             .unwrap()
             .join(format!("rollout-old-{id}.jsonl"));
-        let golden = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/codex_retention/activity_rollout_016x.jsonl"
-        ));
         let rows: Vec<serde_json::Value> = golden
             .lines()
             .enumerate()

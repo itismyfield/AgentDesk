@@ -353,7 +353,8 @@ async fn injected_new_turn_delivers(root: PathBuf, channel: u64, hook_first: boo
     )
     .unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex_busy_inject");
+    let fixtures =
+        Path::new(crate::runtime_layout::REPO_ROOT).join("tests/fixtures/codex_busy_inject");
     std::fs::write(
         dir.join("before"),
         std::fs::read(fixtures.join("busy_empty.ansi")).unwrap(),
@@ -542,7 +543,7 @@ fn codex_discord_attempt_new_turn_delivers_through_production_ledger_pg() {
             )
             .unwrap();
             std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-            let screen = Path::new(env!("CARGO_MANIFEST_DIR"))
+            let screen = Path::new(crate::runtime_layout::REPO_ROOT)
                 .join("tests/fixtures/codex_busy_inject/busy_empty.ansi");
             std::fs::write(dir.join("before"), std::fs::read(screen).unwrap()).unwrap();
             std::fs::write(dir.join("dynamic"), "").unwrap();

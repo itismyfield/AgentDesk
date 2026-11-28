@@ -75,10 +75,11 @@ fn delivers_once_after_restart(records: fn(&str) -> Vec<serde_json::Value>) {
     append(&started.path, &records(&started.session));
     readiness::test_support::forget_session(fx.logical());
     assert!(readiness::observe(fx.logical(), Some(&started.path)).is_none());
-    let idle = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/tui_input/claude-2.1.293-idle.txt"
-    ));
+    let idle = std::fs::read_to_string(
+        std::path::Path::new(crate::runtime_layout::REPO_ROOT)
+            .join("tests/fixtures/tui_input/claude-2.1.293-idle.txt"),
+    )
+    .expect("read claude-2.1.293-idle.txt fixture");
     let show = |text: &str| {
         fx.rig.answer(
             "pane.read",
@@ -145,7 +146,7 @@ fn delivers_once_after_restart(records: fn(&str) -> Vec<serde_json::Value>) {
             &ProviderKind::Claude,
             CHANNEL
         ));
-        show(idle);
+        show(&idle);
         assert!(
             readiness::observe(fx.logical(), Some(&started.path)).is_none(),
             "screen recovery supplies no new hook or post-floor transcript activity"

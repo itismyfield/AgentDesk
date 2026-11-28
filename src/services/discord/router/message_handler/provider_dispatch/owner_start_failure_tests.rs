@@ -697,7 +697,7 @@ async fn start_failure_repeated_retains_once_and_delivers_b_pg() {
             module_path!(),
             "::start_failure_repeated_retains_once_and_delivers_b_pg"
         )
-        .trim_start_matches("agentdesk::"),
+        .trim_start_matches(concat!(env!("CARGO_CRATE_NAME"), "::")),
     ) {
         return;
     }
@@ -719,7 +719,7 @@ async fn start_failure_s2_not_sent_frame_deletes_placeholder_without_notice() {
             module_path!(),
             "::start_failure_s2_not_sent_frame_deletes_placeholder_without_notice"
         )
-        .trim_start_matches("agentdesk::"),
+        .trim_start_matches(concat!(env!("CARGO_CRATE_NAME"), "::")),
     ) {
         return;
     }
@@ -741,7 +741,7 @@ async fn start_failure_recovers_before_retry_without_a_notice_pg() {
             module_path!(),
             "::start_failure_recovers_before_retry_without_a_notice_pg"
         )
-        .trim_start_matches("agentdesk::"),
+        .trim_start_matches(concat!(env!("CARGO_CRATE_NAME"), "::")),
     ) {
         return;
     }
@@ -755,7 +755,7 @@ async fn start_failure_policy_removal_before_token_release_keeps_progress_pg() {
             module_path!(),
             "::start_failure_policy_removal_before_token_release_keeps_progress_pg"
         )
-        .trim_start_matches("agentdesk::"),
+        .trim_start_matches(concat!(env!("CARGO_CRATE_NAME"), "::")),
     ) {
         return;
     }
@@ -769,7 +769,7 @@ async fn start_failure_discord_preserves_typed_confirmed_refusal_pg() {
             module_path!(),
             "::start_failure_discord_preserves_typed_confirmed_refusal_pg"
         )
-        .trim_start_matches("agentdesk::"),
+        .trim_start_matches(concat!(env!("CARGO_CRATE_NAME"), "::")),
     ) {
         return;
     }
@@ -782,7 +782,7 @@ async fn start_failure_headless_preserves_typed_confirmed_refusal_pg() {
             module_path!(),
             "::start_failure_headless_preserves_typed_confirmed_refusal_pg"
         )
-        .trim_start_matches("agentdesk::"),
+        .trim_start_matches(concat!(env!("CARGO_CRATE_NAME"), "::")),
     ) {
         return;
     }
@@ -796,7 +796,7 @@ async fn start_failure_blocked_notice_does_not_block_b_pg() {
             module_path!(),
             "::start_failure_blocked_notice_does_not_block_b_pg"
         )
-        .trim_start_matches("agentdesk::"),
+        .trim_start_matches(concat!(env!("CARGO_CRATE_NAME"), "::")),
     ) {
         return;
     }
@@ -813,7 +813,7 @@ async fn start_failure_own_timeout_waits_for_its_due_and_counts_no_failed_start_
             module_path!(),
             "::start_failure_own_timeout_waits_for_its_due_and_counts_no_failed_start_pg"
         )
-        .trim_start_matches("agentdesk::"),
+        .trim_start_matches(concat!(env!("CARGO_CRATE_NAME"), "::")),
     ) {
         return;
     }

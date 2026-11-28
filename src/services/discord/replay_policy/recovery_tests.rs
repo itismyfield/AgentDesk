@@ -194,7 +194,7 @@ fn p5_actual_own_restart_and_foreign_orphan_preserve_the_authority_boundary_pg()
         let db=crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool=db.connect_and_migrate().await;
         let target=crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
-        let name=concat!(module_path!(),"::p5_actual_own_restart_and_foreign_orphan_preserve_the_authority_boundary_pg").strip_prefix("agentdesk::").unwrap();
+        let name=concat!(module_path!(),"::p5_actual_own_restart_and_foreign_orphan_preserve_the_authority_boundary_pg").strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::")).unwrap();
         let old=std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact",name,"--nocapture"])
             .env(SETUP,serde_json::to_string(&(&db.database_url,&root,&target)).unwrap()).env("AGENTDESK_INSTANCE_ID",&target).output().unwrap();
         assert!(old.status.success(),"{} {}",String::from_utf8_lossy(&old.stdout),String::from_utf8_lossy(&old.stderr));
@@ -458,7 +458,7 @@ fn p5_live_no_effect_handoff_survives_local_and_foreign_recovery_pg() {
         shared.restart.replay_restart.set(lock).unwrap();
         let sink = o_cut_recorder::start(s.channel_id).await;
         crate::services::discord::recovery_engine::restore_inflight_turns(&sink.http, &shared, &ProviderKind::Codex).await;
-        let name = concat!(module_path!(), "::p5_live_no_effect_handoff_survives_local_and_foreign_recovery_pg").strip_prefix("agentdesk::").unwrap();
+        let name = concat!(module_path!(), "::p5_live_no_effect_handoff_survives_local_and_foreign_recovery_pg").strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::")).unwrap();
         let peer = std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact", name, "--nocapture"]).env(PEER, &db.database_url).env("AGENTDESK_STALE_REPLAY_V1", "0").output().unwrap();
         assert!(peer.status.success(), "{} {}", String::from_utf8_lossy(&peer.stdout), String::from_utf8_lossy(&peer.stderr));
         assert!(String::from_utf8_lossy(&peer.stdout).contains("NO_EFFECT_PEER_PRESERVED"));

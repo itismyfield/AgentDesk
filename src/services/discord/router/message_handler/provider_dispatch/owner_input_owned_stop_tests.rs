@@ -31,10 +31,11 @@ impl StopRig {
     }
 
     async fn build(id: u64, marker: Option<&str>, idle: bool) -> Self {
-        let running = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/tui_input/claude-2.1.293-tool-running.txt"
-        ))
+        let running = std::fs::read_to_string(
+            std::path::Path::new(crate::runtime_layout::REPO_ROOT)
+                .join("tests/fixtures/tui_input/claude-2.1.293-tool-running.txt"),
+        )
+        .expect("read claude-2.1.293-tool-running.txt fixture")
         .lines()
         .filter(|line| !line.contains("Tomfoolering"))
         .collect::<Vec<_>>()
@@ -1009,10 +1010,11 @@ async fn restarted_variant(
     if spinner {
         fs::write(
             rig.intake.renderer.join("after"),
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/fixtures/tui_input/claude-2.1.293-thinking.txt"
-            )),
+            std::fs::read_to_string(
+                std::path::Path::new(crate::runtime_layout::REPO_ROOT)
+                    .join("tests/fixtures/tui_input/claude-2.1.293-thinking.txt"),
+            )
+            .expect("read claude-2.1.293-thinking.txt fixture"),
         )
         .unwrap();
     }
@@ -1188,10 +1190,11 @@ async fn a_restarted_remove_only_input_stops_from_durable_evidence() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_restarted_spinner_with_a_draft_receives_no_escape() {
-    let screen = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/tui_input/claude-2.1.293-thinking.txt"
-    ))
+    let screen = std::fs::read_to_string(
+        std::path::Path::new(crate::runtime_layout::REPO_ROOT)
+            .join("tests/fixtures/tui_input/claude-2.1.293-thinking.txt"),
+    )
+    .expect("read claude-2.1.293-thinking.txt fixture")
     .replace("❯", "❯ unsubmitted draft");
     restarted_variant(
         "a_restarted_spinner_with_a_draft_receives_no_escape",

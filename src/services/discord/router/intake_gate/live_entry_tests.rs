@@ -447,7 +447,7 @@ fn run_with_content(test: &str, branches: &[Branch], fail_save: bool, content: O
         return;
     }
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/c2b-live-gate");
+    let base = Path::new(crate::runtime_layout::REPO_ROOT).join("target/c2b-live-gate");
     std::fs::create_dir_all(&base).unwrap();
     let scratch = tempfile::tempdir_in(base).unwrap();
     let root = std::fs::canonicalize(scratch.path()).unwrap();
