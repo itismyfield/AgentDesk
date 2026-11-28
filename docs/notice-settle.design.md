@@ -46,13 +46,13 @@ relevant 99, sha256 약 300, pane_liveness 314+207, legacy-body-census-writer 73
 | 새 record 분류·identity seal | `src/services/tui_o/writer/input_notices.rs:61`, `:73`, `:112`, `:145`, `:165` | Discord/비인간은 None; Known은 None, Pending/원본 부족은 Err; UnitKey=(channel,Claude,UUID,InputNotice) |
 | evidence 생성/회수 | `src/services/tui_o/writer/input_notices/evidence.rs:8`, `:17`, `:44`, `:57` | project가 Ok(None)이 아니면 raw+선택 prompt/digest/key/payload/origin 보존; origin/key 없는 record도 가능 |
 | migration floor | `src/services/tui_o/writer/input_notices/evidence.rs:64` | frozen source lower/시간/기존 binding checkpoint; 새 TTL이 아님 |
-| 최초 boot freeze | `src/services/tui_o/writer/actor/notice_work.rs:61`, `:129`; `src/services/tui_o/writer/actor.rs:361` | resume capture 전 finite source/history cohort, binding checkpoint와 freeze 시각 |
+| 최초 boot freeze | `src/services/tui_o/writer/actor/notice_work.rs:61`, `:129`; `src/services/tui_o/writer/actor/publishing.rs:169` | resume capture 전 finite source/history cohort, binding checkpoint와 freeze 시각 |
 | materialize append | `src/services/tui_o/writer/actor/notice_work.rs:169`, `:200`, `:204` | 기존 payload canonical 유지, covers면 재append 없음 |
 | evidence validate/merge | `src/services/tui_o/store/ledger/input_notices.rs:106`, `:166`, `:189`, `:217` | source/start/end/raw 일치, optional 단조 보강; complete는 prompt/digest/key/payload/origin 모두 Some |
 | ledger append/replay | `src/services/tui_o/store/mod.rs:483`; `src/services/tui_o/store/ledger.rs:447`, `:794`, `:839` | append 후 apply; complete unknown JSON variant는 damage 오류, truncate 대상 아님 |
 | notice format floor/handover | `src/services/tui_o/store/input_notice_floor.rs:13`, `:43`; `src/services/tui_o/writer/input_notices.rs:39` | `input_notice.floor=1`, migration_started durable 확인 뒤 relay→writer handover |
 | startup/incarnation deriver | `src/services/tui_o/writer/actor/fresh_resume.rs:24`, `:135` | rescope는 Codex만; Claude notice 만료 신호로 사용 불가. rebuild가 ledger를 지우지 않음 |
-| boot/주기 재진입 | `src/services/tui_o/writer/actor.rs:393`, `:400`, `:449`, `:876`, `:903` | 한 actor loop에 prepare 두 번; follow/capture/tend 뒤 새 evidence persist |
+| boot/주기 재진입 | `src/services/tui_o/writer/actor/publishing.rs:208`, `:257`; `src/services/tui_o/writer/actor.rs:629`, `:656` | 한 actor loop에 prepare 두 번; follow/capture/tend 뒤 새 evidence persist |
 | pending 열거·origin 재시도 | `src/services/tui_o/writer/actor/notice_work.rs:238`, `:256`, `:268` | Posted/Excluded 외 전부 clone; 미완성은 binding log 재조회 |
 | Batch owner snapshot | `src/services/tui_input/human_frame/history/notice_owner.rs:67`, `:80`, `:100`, `:132` | history 읽기, source별 census, origin별 후보; stable history/context/native fingerprint 재확인 |
 | candidate/blocked 생성 | `src/services/tui_input/human_frame/history/notice_owner.rs:176`, `:225`, `:264`, `:309` | source/owner/nonce/context 불일치 → hash별 registration_source_mismatch; unbound → unbound_pre_source |
@@ -63,7 +63,7 @@ relevant 99, sha256 약 300, pane_liveness 314+207, legacy-body-census-writer 73
 | legacy migration 소비 | `src/services/tui_o/writer/input_notices/migration.rs:98`, `:116`, `:126`, `:194`, `:207` | 모든 evidence를 읽음; 불확실 기존 메시지는 MigrationUnresolved 및 후보 ID 예약으로 보존 |
 | durable state의 이관 소비 | `src/services/tui_o/store/ledger/input_notices.rs:246`, `:284`; `src/services/tui_o/store/ledger.rs:449` | Imported→Excluded, unresolved는 감사 부채; 새로운 proof 없는 무조건 청소 불가 |
 | 실제 게시/재시도/확인 | `src/services/tui_o/writer/deliver.rs:589`, `:621`, `:850`; `src/services/tui_o/writer/local_retry/notice_selection.rs:12` | Prepared/Posted/NotFound/Ambiguous; unresolved POST와 local retry는 만료로 대체 불가 |
-| debt/retention/queued 소비 | `src/services/tui_o/writer/actor/notice_work.rs:390`, `:434`, `:457`; `src/services/tui_o/writer/actor.rs:729`, `:835` | debt count와 raw-independent/notice-only 판정 모두 새 terminal을 보아야 함 |
+| debt/retention/queued 소비 | `src/services/tui_o/writer/actor/notice_work.rs:390`, `:434`, `:457`; `src/services/tui_o/writer/actor.rs:509`, `:565`, `:575` | debt count와 raw-independent/notice-only 판정 모두 새 terminal을 보아야 함 |
 | memory reset/로그 수명 | `src/services/tui_o/writer/deliver.rs:204`, `:265`; `src/services/tui_o/writer/actor/notice_work.rs:267`, `:330`, `:353` | 기준 main의 HashMap<RecordId,String>은 restart와 eligible 전환에 지워짐; 새 구현은 nonterminal 동안 유지 |
 
 모델 값은 이 표에서만 추상화했다. RecordId는 `(SourceId,start,end)`, InputClass는

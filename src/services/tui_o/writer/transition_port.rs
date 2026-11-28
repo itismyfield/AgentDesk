@@ -347,6 +347,10 @@ impl Operation {
 }
 
 impl Receiver {
+    pub(super) fn pending(&self) -> bool {
+        !self.receive.is_empty()
+    }
+
     /// The next envelope sent to this run; one sent to another run is answered as foreign.
     pub(super) fn try_next(&mut self) -> Result<Option<Envelope>, mpsc::error::TryRecvError> {
         let envelope = match self.receive.try_recv() {

@@ -20,6 +20,8 @@ pub mod rotation;
 pub mod spool;
 pub mod thread_children;
 pub mod tool_card_switch;
+pub(crate) mod wake;
+pub use wake::wake as wake_writer;
 
 #[cfg(all(test, unix))]
 mod input_notice_store_tests;
@@ -475,6 +477,7 @@ impl OStore {
             init,
             ledger,
             sources,
+            spool_generation: 0,
             segment_max,
             spool_cap,
             failed: None,
@@ -488,6 +491,7 @@ pub struct ChannelStore {
     init: Initialized,
     ledger: LedgerState,
     sources: BTreeMap<String, spool::SourceSpool>,
+    spool_generation: u64,
     segment_max: u64,
     spool_cap: u64,
     /// The kind of the first I/O error, which leaves the store refusing writes.
@@ -501,6 +505,11 @@ impl ChannelStore {
 
     pub fn ledger(&self) -> &LedgerState {
         &self.ledger
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn codex_end_path(&self) -> Option<PathBuf> {
+        None
     }
 
     /// The I/O error that made the store refuse writes, if any.

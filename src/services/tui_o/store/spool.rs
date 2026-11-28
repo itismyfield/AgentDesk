@@ -433,6 +433,10 @@ fn frames_for(spool: &SourceSpool, batch: &CaptureBatch) -> Result<Vec<SpoolFram
 }
 
 impl ChannelStore {
+    pub(crate) fn spool_generation(&self) -> u64 {
+        self.spool_generation
+    }
+
     pub fn cursor(&self, source: &SourceId) -> Option<&Cursor> {
         self.sources
             .get(&source_key(source))
@@ -469,6 +473,7 @@ impl ChannelStore {
                         transition_cleanup: None,
                     };
                     write_cursor(&store.dir, slot.key(), &cursor)?;
+                    store.spool_generation += 1;
                     slot.insert(SourceSpool {
                         cursor,
                         segments: Vec::new(),
@@ -550,6 +555,7 @@ impl ChannelStore {
             };
             write_cursor(&store.dir, &key, &cursor)?;
             spool.cursor = cursor;
+            store.spool_generation += 1;
             Ok(())
         })
     }
@@ -567,6 +573,7 @@ impl ChannelStore {
             };
             write_cursor(&store.dir, &key, &cursor)?;
             spool.cursor = cursor;
+            store.spool_generation += 1;
             Ok(())
         })
     }
@@ -634,6 +641,7 @@ impl ChannelStore {
             fsync_parent_dir(&segment.path)?;
             if let Some(spool) = store.sources.get_mut(&key) {
                 spool.segments.remove(0);
+                store.spool_generation += 1;
             }
             Ok(())
         })

@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use super::{ChannelStore, STORE_DIR_NAME};
 use crate::domain::file_sync::fsync_parent_dir;
 use crate::services::tui_o::shadow::ShadowProvider;
+use crate::services::tui_o::shadow::capture::Fingerprint;
 
 pub(crate) const DIR_NAME: &str = "o_restart_notices";
 static WRITE: Mutex<()> = Mutex::new(());
@@ -78,7 +79,7 @@ pub fn record(root: &Path, intent: &Intent) -> Result<(), String> {
         return Err("restart notice has no exact episode".into());
     }
     let bytes = serde_json::to_vec(intent).map_err(|error| error.to_string())?;
-    let _write = WRITE.lock().unwrap_or_else(PoisonError::into_inner);
+    let write = WRITE.lock().unwrap_or_else(PoisonError::into_inner);
     let target = path(root, intent);
     let same = |target: &Path| fs::read(target).is_ok_and(|now| now == bytes);
     if fs::symlink_metadata(&target).is_ok() {
@@ -90,27 +91,51 @@ pub fn record(root: &Path, intent: &Intent) -> Result<(), String> {
     }
     super::durable::ensure_dir(&root.join(DIR_NAME)).map_err(|error| error.to_string())?;
     super::durable::ensure_dir(&dir(root, intent.channel)).map_err(|error| error.to_string())?;
-    match super::durable::create_once(&target, &bytes) {
+    let written = match super::durable::create_once(&target, &bytes) {
         Ok(()) => Ok(()),
         Err(_) if same(&target) => fsync_parent_dir(&target).map_err(|error| error.to_string()),
         Err(error) => Err(error.to_string()),
+    };
+    drop(write);
+    if written.is_ok() {
+        super::wake::wake(intent.channel);
     }
+    written
 }
 
 /// This channel's recorded, unsettled episodes; an unreadable file stays for a later pass.
 pub fn pending(root: &Path, channel: u64) -> Vec<Intent> {
-    let Ok(entries) = fs::read_dir(dir(root, channel)) else {
-        return Vec::new();
+    scan(root, channel).0
+}
+
+pub(crate) fn scan(root: &Path, channel: u64) -> (Vec<Intent>, bool) {
+    let entries = match fs::read_dir(dir(root, channel)) {
+        Ok(entries) => entries,
+        Err(error) => return (Vec::new(), error.kind() != io::ErrorKind::NotFound),
     };
-    let mut intents: Vec<Intent> = entries
-        .flatten()
-        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".json"))
-        .filter_map(|entry| serde_json::from_slice(&fs::read(entry.path()).ok()?).ok())
-        .filter(|intent: &Intent| intent.channel == channel)
-        .filter(|intent| fs::symlink_metadata(done(root, intent)).is_err())
-        .collect();
+    let mut intents = Vec::new();
+    let mut unreadable = false;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            unreadable = true;
+            continue;
+        };
+        if !entry.file_name().to_string_lossy().ends_with(".json") {
+            continue;
+        }
+        let Ok(bytes) = fs::read(entry.path()) else {
+            unreadable = true;
+            continue;
+        };
+        if let Ok(intent) = serde_json::from_slice::<Intent>(&bytes)
+            && intent.channel == channel
+            && fs::symlink_metadata(done(root, &intent)).is_err()
+        {
+            intents.push(intent);
+        }
+    }
     intents.sort_by(|a, b| (a.born_generation, a.key()).cmp(&(b.born_generation, b.key())));
-    intents
+    (intents, unreadable)
 }
 
 /// Marks an episode whose piece reached a final outcome; nothing is deleted.
@@ -120,6 +145,8 @@ pub(crate) fn settle(root: &Path, intent: &Intent) -> io::Result<()> {
     if fs::symlink_metadata(&target).is_err() {
         super::durable::create_once(&target, b"")?;
     }
+    #[cfg(any(test, feature = "test-support"))]
+    super::durable::fault::strike(&target, super::durable::fault::Step::RestartNoticeDirSync)?;
     fsync_parent_dir(&target)
 }
 
@@ -129,5 +156,16 @@ impl ChannelStore {
         (parent.file_name()? == STORE_DIR_NAME)
             .then(|| parent.parent())
             .flatten()
+    }
+
+    pub(crate) fn restart_notice_stamp(&self) -> io::Result<Option<Fingerprint>> {
+        let Some(root) = self.restart_notice_root() else {
+            return Ok(None);
+        };
+        match fs::metadata(dir(root, self.init().channel)) {
+            Ok(meta) => Fingerprint::of(&meta).map(Some),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 }

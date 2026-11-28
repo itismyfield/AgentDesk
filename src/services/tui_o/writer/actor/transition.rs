@@ -62,6 +62,10 @@ impl Transitions {
         }
     }
 
+    pub(super) fn pending(&self) -> bool {
+        self.job.is_some() || self.receiver.as_ref().is_some_and(Receiver::pending)
+    }
+
     /// A job is retiring sources, so the channel's unsettled count is not final.
     pub(super) fn applying(&self) -> bool {
         (self.job.as_ref()).is_some_and(|job| matches!(job.stage, Stage::Apply(_)))

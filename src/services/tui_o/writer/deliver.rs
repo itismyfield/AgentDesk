@@ -218,7 +218,7 @@ pub struct ChannelWriter<P, L, A> {
     pub(super) suspension: super::suspension::Suspension,
     channel: u64,
     store: ChannelStore,
-    gate: Arc<OwnershipGate>,
+    pub(super) gate: Arc<OwnershipGate>,
     port: Arc<P>,
     lease: L,
     alarms: A,

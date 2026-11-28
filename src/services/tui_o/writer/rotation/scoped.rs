@@ -26,6 +26,18 @@ impl<B: BindingEvents> Sources<B> {
             })
     }
 
+    pub(crate) fn quiescent_for_stamp(&self) -> bool {
+        // Pending binding work is independent of the transcript stamp.
+        self.quiescent_for_rescope()
+            && self
+                .checkpoint
+                .is_some_and(|seq| *self.notice.borrow() <= seq)
+            && !self.log_alarmed
+            && !self.clear_due
+            && !self.codex_end_due
+            && !self.legacy_hops_unread
+    }
+
     /// The actor checks quiescence before replacing readers; the shared selection stays monotone.
     pub(crate) fn reset_for_rescope(&mut self) {
         let config = self.reader_config;

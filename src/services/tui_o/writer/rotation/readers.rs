@@ -145,7 +145,15 @@ impl<B: BindingEvents> Sources<B> {
                     .gc_segments(&cursor.source)
                     .is_empty();
             reader.rotated_at = self.rotation.successors.contains_key(&key).then_some(now);
-            reader.watch_until = cursor.retired.then_some(now + RETIRED_WATCH);
+            if cursor.retired {
+                reader.retired_watch = Some(if self.reader_config.is_some() {
+                    RetiredWatch::Path
+                } else if reader.capture.is_some() {
+                    RetiredWatch::PathUntil(now + RETIRED_WATCH)
+                } else {
+                    RetiredWatch::Expired
+                });
+            }
             reader.drain_to = match self.rotation.successors.get(&key) {
                 // A record written before the rotation length was kept holds to the length now.
                 Some(next) if next.seq.is_none() => reader.backlog_end(),
@@ -177,9 +185,10 @@ impl<B: BindingEvents> Sources<B> {
                     }
                 }
             }
-            if (reader.watch_until.is_some() || self.reader_config.is_some()) && ended {
+            if (cursor.retired || self.reader_config.is_some()) && ended {
                 self.pend_at_end(&key, cursor.captured_through);
             }
+            reader.capture = reader.capture.filter(|_| !cursor.retired);
             self.readers.push(reader);
         }
         self.restore_legacy_hops(writer)?;
@@ -300,19 +309,11 @@ impl<B: BindingEvents> Sources<B> {
             if reader.parked {
                 continue;
             }
-            if let Some(until) = reader.watch_until {
-                if let Ok(fp) = Fingerprint::path(&reader.source) {
-                    let through = writer
-                        .store()
-                        .cursor(&reader.source)
-                        .map_or(0, |c| c.captured_through);
-                    if fp.len > through {
-                        let source = reader.source.clone();
-                        self.unretire(writer, &source)?;
-                        transition::regrowth_alarm(writer, source);
-                    } else if now >= until {
-                        self.readers[index].capture = None;
-                    }
+            if let Some(watch) = reader.retired_watch {
+                if self.readers[index].watch_growth(watch, writer.store(), now) {
+                    let source = self.readers[index].source.clone();
+                    self.unretire(writer, &source)?;
+                    transition::regrowth_alarm(writer, source);
                 }
                 continue;
             }
@@ -426,10 +427,7 @@ impl<B: BindingEvents> Sources<B> {
                             tracing::info!(channel = self.channel, source = %reader.source.path.display(),
                                 offset = cursor.captured_through, "[tui_o] cleanup retired drained source after long silence");
                         }
-                        reader.watch_until = Some(now + RETIRED_WATCH);
-                        reader.dormant = None;
-                        reader.capture = None;
-                        reader.quiet = None;
+                        reader.retire(RetiredWatch::Path);
                     } else if sleep {
                         reader.capture = None;
                         reader.dormant = Some(now + DORMANT_POLL);
@@ -531,10 +529,12 @@ impl<B: BindingEvents> Sources<B> {
             .store()
             .set_retired(&source, true)
             .map_err(halted("archive boot retire"))?;
-        let reader = &mut self.readers[index];
-        reader.capture = None;
-        reader.dormant = None;
-        reader.watch_until = Some(Instant::now() + RETIRED_WATCH);
+        let watch = if self.reader_config.is_some() {
+            RetiredWatch::Path
+        } else {
+            RetiredWatch::Expired
+        };
+        self.readers[index].retire(watch);
         tracing::info!(channel = self.channel, path = %source.path.display(),
             offset = cursor.captured_through, "[tui_o] retired archive at verified boot EOF");
         Ok(())
@@ -612,10 +612,12 @@ impl<B: BindingEvents> Sources<B> {
         tracing::info!(channel = self.channel, source = %reader.source.path.display(),
             offset = cursor.captured_through, modified = ?fp.modified,
             "[tui_o] retired archived source at verified EOF");
-        let reader = &mut self.readers[index];
-        reader.capture = None;
-        reader.dormant = None;
-        reader.watch_until = Some(Instant::now() + RETIRED_WATCH);
+        let watch = if self.reader_config.is_some() {
+            RetiredWatch::Path
+        } else {
+            RetiredWatch::Expired
+        };
+        self.readers[index].retire(watch);
         Ok(true)
     }
 
@@ -683,9 +685,7 @@ impl<B: BindingEvents> Sources<B> {
             .map_err(halted("cleanup retire"))?;
         tracing::warn!(source = %reader.source.path.display(), ?alarm, anomaly = "Missing", "[tui_o] cleanup retired drained source");
         writer.alarm(alarm);
-        reader.capture = None;
-        reader.dormant = None;
-        reader.watch_until = Some(Instant::now() + RETIRED_WATCH);
+        reader.retire(RetiredWatch::Path);
         Ok(())
     }
 
@@ -802,25 +802,15 @@ impl<B: BindingEvents> Sources<B> {
         if self.provider != ShadowProvider::Codex {
             return HashMap::new();
         }
-        // Herdr channels never capture a Codex end, so silence is their only retirement evidence.
-        let silence = if crate::config::session_hosts::has_herdr_endpoint(self.channel) {
-            HERDR_UNPROVEN_SILENCE
-        } else {
-            RETIRED_WATCH
-        };
         let now = Instant::now();
         self.readers
             .iter()
             .filter_map(|reader| {
-                let (fingerprint, since) = reader.idle.as_ref()?;
+                let (fingerprint, _) = reader.idle.as_ref()?;
                 let cursor = writer.store().cursor(&reader.source)?;
-                if self.replaced_source(reader)
+                if self.aged_replacement_due(reader, now, wall_now)
                     && drained(reader, cursor)
                     && fingerprint.len == cursor.captured_through
-                    && now - *since >= RETIRE_QUIET
-                    && wall_now
-                        .duration_since(fingerprint.modified)
-                        .is_ok_and(|age| age >= silence)
                     && Fingerprint::path(&reader.source).ok().as_ref() == Some(fingerprint)
                 {
                     Some((source_key(&reader.source), fingerprint.clone()))
@@ -847,6 +837,12 @@ impl<B: BindingEvents> Sources<B> {
             if reader.parked {
                 continue;
             }
+            if let Some(watch) = reader.retired_watch {
+                if reader.watch_growth(watch, writer.store(), now) {
+                    grew_back.push(reader.source.clone());
+                }
+                continue;
+            }
             let Some(capture) = reader.capture.as_ref() else {
                 continue;
             };
@@ -854,14 +850,6 @@ impl<B: BindingEvents> Sources<B> {
                 continue;
             };
             let through = capture.captured_through();
-            if let Some(until) = reader.watch_until {
-                if len > through {
-                    grew_back.push(reader.source.clone());
-                } else if now >= until {
-                    reader.capture = None;
-                }
-                continue;
-            }
             let successor = self.rotation.successors.get(&source_key(&reader.source));
             let Some(successor) = successor else {
                 continue;
@@ -917,7 +905,13 @@ impl<B: BindingEvents> Sources<B> {
                     tracing::info!(channel = self.channel, source = %reader.source.path.display(),
                         offset = through, "[tui_o] cleanup retired drained source after long silence");
                 }
-                (reader.watch_until, reader.quiet) = (Some(now + RETIRED_WATCH), None);
+                let until = now + RETIRED_WATCH;
+                let watch = if Fingerprint::path(&reader.source).is_ok() {
+                    RetiredWatch::PathUntil(until)
+                } else {
+                    RetiredWatch::Descriptor(until)
+                };
+                reader.retire(watch);
             }
         }
         for source in grew_back {
@@ -950,5 +944,5 @@ fn drained(reader: &Reader, cursor: &Cursor) -> bool {
 }
 
 fn missing_reader(reader: &Reader) -> bool {
-    reader.capture.is_none() && reader.watch_until.is_none()
+    reader.capture.is_none() && reader.retired_watch.is_none()
 }

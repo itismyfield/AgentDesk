@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 
 use super::binding::BindingEvents;
@@ -83,6 +83,7 @@ pub struct Undelivered {
 struct Asks {
     waiting: AtomicUsize,
     last: AtomicU64,
+    wake: Notify,
 }
 
 /// Drain reads waiting on what a channel owes; its actor reads the store for them only meanwhile.
@@ -94,6 +95,7 @@ impl Demand {
     pub fn want(&self) -> Wanting {
         self.0.waiting.fetch_add(1, Ordering::SeqCst);
         let asked = self.0.last.fetch_add(1, Ordering::SeqCst) + 1;
+        self.0.wake.notify_one();
         Wanting(Arc::clone(&self.0), asked)
     }
 
@@ -219,280 +221,8 @@ where
     .await
 }
 
-/// [`run_projecting`] that also publishes what the channel still owes, beside its count.
-async fn run_publishing<P, L, A, B>(
-    writer: ChannelWriter<P, L, A>,
-    provider: ShadowProvider,
-    bindings: Arc<B>,
-    (mut stop, resumed): (watch::Receiver<bool>, watch::Sender<bool>),
-    (unsettled, owing): (Unsettled, Owing),
-    (utc, readers, producer_absent, _native): (
-        Option<chrono::DateTime<chrono::Utc>>,
-        Option<ReaderConfig>,
-        bool,
-        Option<native_input::NativePort>,
-    ),
-    (mut commands, transitions): (
-        Option<codex_submission::Receiver>,
-        Option<transition_port::Receiver>,
-    ),
-) -> Option<StopCause>
-where
-    P: DiscordPort,
-    L: DeliveryLease,
-    A: AlarmSink,
-    B: BindingEvents,
-{
-    let mut writer = writer.with_repost_stop(stop.clone());
-    let deriver =
-        fresh_resume::configured_deriver(writer.channel(), provider, writer.store().ledger());
-    let mut sources = Sources::new(writer.channel(), provider, Arc::clone(&bindings))
-        .with_suspension(writer.suspension.clone())
-        .with_producer_absent(producer_absent)
-        .with_native_inputs(_native.is_some());
-    if let Some(readers) = readers {
-        sources = sources.with_readers(readers);
-    }
-    if let Some(anchors) = sources.reply_anchors() {
-        writer.attach_reply_anchors(anchors);
-    }
-    let owed = VecDeque::new();
-    let ready = admission::owed_delivery_ready(writer.channel());
-    let verified = ready.then(|| super::owed::OwedLog::new(writer.channel(), provider));
-    let mut actor = Actor {
-        replay_deferred: false,
-        writer,
-        deriver,
-        owed,
-        verified,
-        sources,
-        bindings,
-        transitions: transition::Transitions::new(transitions, stop.clone()),
-        notice: None,
-        waiting: Waiting::default(),
-        scope_hold: None,
-        boot_previous_nonce: None,
-        clock: (
-            tokio::time::Instant::now(),
-            utc.unwrap_or_else(chrono::Utc::now),
-        ),
-    };
-    let selection = actor.writer.suspension.clone();
-    let restore = provider == ShadowProvider::Codex;
-    if restore {
-        match selection.restore_current(actor.writer.store()) {
-            Ok(restored) => {
-                if !restored
-                    && crate::services::tui_prompt_dedupe::clear_relaunch::fresh_scope_eligible(
-                        actor.writer.channel(),
-                    )
-                {
-                    actor.boot_previous_nonce = actor
-                        .writer
-                        .store()
-                        .fresh_selection()
-                        .ok()
-                        .flatten()
-                        .map(|record| record.nonce);
-                }
-            }
-            Err(error) => {
-                actor.writer.stop(WriterAlarm::Halted {
-                    detail: format!("fresh selection restore: {error:?}"),
-                });
-                return actor.writer.stop_cause().cloned();
-            }
-        }
-    }
-    let progress = super::progress::Publisher::new(actor.writer.channel());
-    let mut sources_resumed = false;
-    while !actor.writer.is_stopped() && !*stop.borrow() {
-        match actor.rescope() {
-            fresh_resume::Rescope::Changed => {
-                sources_resumed = false;
-                resumed.send_replace(false);
-            }
-            fresh_resume::Rescope::Busy => {
-                // Later source reads can take the same lock, so defer the whole poll.
-                tokio::select! {
-                    () = tokio::time::sleep(POLL_INTERVAL) => {},
-                    changed = stop.changed() => if changed.is_err() { break },
-                }
-                continue;
-            }
-            fresh_resume::Rescope::Unchanged => {}
-        }
-        if actor.writer.is_stopped() {
-            break;
-        }
-        let restart_ready = match super::restart_end::refresh(
-            &mut actor.writer,
-            &mut actor.deriver,
-            actor.bindings.as_ref(),
-            provider,
-        )
-        .await
-        {
-            Ok(()) => true,
-            Err(alarm) => {
-                if !sources_resumed {
-                    resumed.send_replace(false);
-                }
-                tracing::warn!(?alarm, "[tui_o] restart witness remains unreadable");
-                false
-            }
-        };
-        if restart_ready && sources_resumed {
-            resumed.send_replace(true);
-        }
-        let mut fresh = Vec::new();
-        if !sources_resumed
-            && restart_ready
-            && actor.sources_allowed()
-            && actor.start_notice_migration()
-        {
-            let phase = actor.writer.boot.phase("resume");
-            let (writer, deriver) = (&mut actor.writer, &mut actor.deriver);
-            let restored = match &mut actor.verified {
-                Some(log) => actor.sources.resume(writer, deriver, log),
-                None => actor.sources.resume(writer, deriver, &mut actor.owed),
-            };
-            match &mut actor.verified {
-                Some(log) => {
-                    super::restart_end::finish(actor.writer.store(), &mut actor.deriver, log)
-                }
-                None => super::restart_end::finish(
-                    actor.writer.store(),
-                    &mut actor.deriver,
-                    &mut actor.owed,
-                ),
-            }
-            let restored = restored.and_then(|()| actor.sources.follow(&mut actor.writer));
-            if let Err(alarm) = restored {
-                actor.writer.stop(alarm);
-            }
-            actor.replay_deferred = actor.verified.is_none() && actor.sources.replayed.deferred;
-            phase.finish(if actor.writer.is_stopped() {
-                "stopped"
-            } else {
-                "ok"
-            });
-            sources_resumed = true;
-            if !actor.writer.is_stopped() {
-                actor.boot_previous_nonce = None;
-                actor.project_operator_resumes();
-                fresh = actor.persist_notice_evidence();
-                if !actor.writer.is_stopped() {
-                    actor.writer.halt_cleared();
-                    resumed.send_replace(true);
-                }
-            }
-        }
-        actor.prepare_notices(&fresh).await;
-        actor.observe_waiting(false);
-        let drain = actor.writer.boot.first_drain();
-        let serial_before = drain
-            .as_ref()
-            .map(|_| actor.writer.store().ledger().next_serial());
-        let now = actor.utc_now();
-        if actor.delivery_allowed() {
-            actor.writer.retry_local(now).await;
-            actor.refilter_after_open();
-        }
-        if !actor.writer.has_local_retry() {
-            actor.deliver_owed(&progress).await;
-        }
-        // A restart-cut episode's one notice goes after this poll's owed pieces.
-        if sources_resumed && actor.delivery_allowed() && !actor.writer.has_local_retry() {
-            actor.writer.deliver_restart_notices().await;
-        }
-        if let Some(drain) = drain {
-            let prepared = actor
-                .writer
-                .store()
-                .ledger()
-                .next_serial()
-                .saturating_sub(serial_before.unwrap_or(0));
-            drain.finish_with(
-                if actor.writer.is_stopped() {
-                    "stopped"
-                } else {
-                    "ok"
-                },
-                super::boot::Details {
-                    done: actor.writer.boot.done(),
-                    prepared,
-                    ..super::boot::Details::default()
-                },
-            );
-        }
-        // Re-post runs in this same turn and only once nothing is owed, so it never sends beside
-        // a piece of this channel. It holds no exact permit, so a verified channel never runs it.
-        if actor.verified.is_none()
-            && actor.notice_only_owed()
-            && !actor.writer.has_local_retry()
-            && actor.delivery_allowed()
-        {
-            actor.writer.repost_turn().await;
-        }
-        actor.collect_settled();
-        let fresh = if restart_ready {
-            actor.read_sources()
-        } else {
-            Vec::new()
-        };
-        #[cfg(unix)]
-        if let Some(port) = &_native {
-            actor.sources.offer_native(port).await;
-        }
-        actor.prepare_notices(&fresh).await;
-        actor.poll_transition(sources_resumed, &unsettled).await;
-        actor.observe_waiting(sources_resumed);
-        progress.publish(actor.progress());
-        #[cfg(any(test, feature = "test-support"))]
-        fresh_resume::note_work(actor.owed.len(), actor.deriver.has_unsealed());
-        // A writer that stopped in this poll ends now, so its readiness drops before the next poll.
-        if actor.writer.is_stopped() {
-            break;
-        }
-        // Only a Herdr-configured channel's clear reads it, so other channels skip the store read.
-        let channel = actor.writer.channel();
-        let herdr = crate::services::session_host::thread_host::runs_herdr(channel);
-        if herdr {
-            unsettled.send_replace(actor.unsettled());
-        }
-        // A turn-mode carried turn closes on this read too, and a thread child's store retires on
-        // it. Read only while a reader waits on it, so a channel nobody asks about adds no reads.
-        if herdr
-            || crate::services::tui_o::turn_mode::transcript_turns(channel)
-            || crate::services::tui_o::cutover::thread_child(channel)
-        {
-            let asked = owing.demand.asked();
-            if owing.demand.wanted() {
-                owing.published.send_replace(actor.undelivered(asked));
-            }
-        }
-        if let Some(receiver) = &mut commands {
-            tokio::select! {
-                request = receiver.next() => {
-                    if let Some(request) = request {
-                        receiver.apply(&mut actor.writer, request);
-                    } else { commands = None; }
-                }
-                () = tokio::time::sleep(POLL_INTERVAL) => {}
-                changed = stop.changed() => if changed.is_err() { break },
-            }
-            if commands.is_some() {
-                continue;
-            }
-        }
-        tokio::select! {
-            () = tokio::time::sleep(POLL_INTERVAL) => {}
-            changed = stop.changed() => if changed.is_err() { break },
-        }
-    }
-    actor.writer.stop_cause().cloned()
-}
+mod publishing;
+use publishing::run_publishing;
 
 #[cfg(any(test, feature = "test-support"))]
 pub async fn run_channel_at<P, L, A, B>(
@@ -521,6 +251,7 @@ where
 }
 
 mod fresh_resume;
+mod idle;
 mod notice_settlement;
 // Test builds open it to the notice tests mounted in the discord-layer test host.
 #[cfg(not(any(test, feature = "test-support")))]

@@ -243,6 +243,18 @@ pub fn observe_binding_hook(
     }
 }
 
+pub(super) fn wake_writer(accepted: bool, event: &super::HookEvent) {
+    use crate::services::tui_prompt_dedupe::binding_context::execution_context;
+    if accepted
+        && let Some(context) = &event.original_context
+        && let Some(channel) = context.channel_id
+        && execution_context(&event.provider, &context.execution_nonce)
+            .is_ok_and(|canonical| canonical == *context)
+    {
+        crate::services::tui_o::store::wake::wake(channel);
+    }
+}
+
 fn classify_skip(
     skip: AdoptSkip,
     command_session_id: &str,

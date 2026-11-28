@@ -7,17 +7,17 @@ Materialized append, Posted 확인과 재시작 재생을 연결한다.
 
 ## 진입점
 
-아래 코드 좌표는 기준 SHA에 고정했다. 행 번호가 바뀌어도 같은 함수에서 시작한다.
+아래 표는 기준 SHA의 동작을 기록한다. writer 좌표는 publishing 모듈 분리를 반영한다.
 
 | 모델 행동 | 코드 진입점과 효과 |
 | --- | --- |
 | Handoff | `src/services/tui_o/writer/actor/notice_work.rs:132–169`의 `start_notice_migration`이 `MigrationStarted`를 append한다. `src/services/tui_o/store/input_notice_floor.rs:55–76`이 그 기록을 확인한다. |
 | Observe | `src/services/discord/tui_prompt_relay.rs:416–442`가 observer 결정을 전달한다. `src/services/discord/tui_prompt_relay/synthetic_start_wiring.rs:141–149,170–181`은 durable 인계 후 announced prompt ID를 기록하고 반환한다. |
-| Capture | `src/services/tui_o/writer/actor.rs:905`의 `read_sources`가 source poll을 시작한다. `src/services/tui_o/writer/rotation/retained_capture.rs:35–119`가 완전한 행을 spool에 append하고 `owe`로 전달한다. |
+| Capture | `src/services/tui_o/writer/actor.rs:629`의 `read_sources`가 source poll을 시작한다. `src/services/tui_o/writer/rotation/retained_capture.rs:35–119`가 완전한 행을 spool에 append하고 `owe`로 전달한다. |
 | Project | `src/services/tui_o/writer/rotation/owe.rs:110–135` → `src/services/tui_o/writer/pieces.rs:127` → `src/services/tui_o/writer/input_notices/evidence.rs:8–54`. `src/services/tui_o/writer/input_notices.rs:114,149–215`와 `src/services/tui_prompt_dedupe/extract.rs:165–187`에서 후보와 키를 정한다. `src/services/tui_o/writer/actor/notice_work.rs:213–261`이 Materialized를 기록하고 `src/services/tui_o/store/ledger/input_notices.rs:131–176`이 원본 행과 키를 대조한다. |
 | Prepare | `src/services/tui_o/writer/actor/notice_work.rs:285–495`의 `prepare_notices`가 게시 가능 근거를 모은다. `src/services/tui_o/writer/deliver.rs:550–586`가 같은 키와 근거의 Prepared를 POST 전에 기록한다. |
 | Post, Confirm | `src/services/tui_o/writer/deliver.rs:592–606,690–714`에서 POST를 시작하고 확인된 결과를 Posted로 기록한다. |
-| Restart, Replay | `src/services/tui_o/writer/actor.rs:345–388` → `src/services/tui_o/writer/rotation/readers.rs:94–123`에서 저장된 spool을 같은 `owe`로 재생한다. 보존된 ledger와 `src/services/tui_o/writer/replay.rs:15–48`의 정산 여부가 이미 게시된 키의 재게시를 막는다. |
+| Restart, Replay | `src/services/tui_o/writer/actor/publishing.rs:165–205` → `src/services/tui_o/writer/rotation/readers.rs:94–123`에서 저장된 spool을 같은 `owe`로 재생한다. 보존된 ledger와 `src/services/tui_o/writer/replay.rs:15–48`의 정산 여부가 이미 게시된 키의 재게시를 막는다. |
 
 관측기가 writer에 넘긴 뒤의 적격 인간 입력 하나에 일반 `user` 행만, 흡수된
 `queued_command`만, 또는 두 형태가 남을 수 있다. 첫 두 가지는 11-26 트랜스크립트에서 관찰됐다.
@@ -139,14 +139,14 @@ W3의 소유권 정산과 기존 기록·재생 경로를 함께 연결한다.
 | --- | --- | --- |
 | Handoff, Observe | `src/services/tui_o/writer/actor/notice_work.rs:132–169`, `src/services/discord/tui_prompt_relay/synthetic_start_wiring.rs:141–149` | durable 인계와 direct 관측의 hook POST 생략 |
 | Enqueue | `src/services/tui_o/writer/input_facts/native.rs:41–47,682–697` | 대기 입력과 source-bound 등록을 연결한다. enqueue의 공지 부채는 0건이다. |
-| Capture | `src/services/tui_o/writer/actor.rs:442–450,905`, `src/services/tui_o/writer/rotation/retained_capture.rs:35–119` | 일치하는 source의 완전한 remove 행을 spool에 보존한다. |
+| Capture | `src/services/tui_o/writer/actor/publishing.rs:248–252`, `src/services/tui_o/writer/actor.rs:629`, `src/services/tui_o/writer/rotation/retained_capture.rs:35–119` | 일치하는 source의 완전한 remove 행을 spool에 보존한다. |
 | Project | `src/services/tui_prompt_dedupe/extract.rs:244–270`, `src/services/tui_o/writer/input_notices.rs:97–141,175–222`, `src/services/tui_o/writer/input_notices/evidence.rs:8–54`, `src/services/tui_o/writer/actor/notice_work.rs:213–261` | remove의 commandUuid를 논리 공지 키로 기록한다. 등록 소유권이 미확정인 원본이 Materialized 된다. |
 | RecordPhysicalReceipt | `src/services/tui_o/writer/input_facts/native/receipt.rs:49–75`, `src/services/tui_o/writer/rotation/owe.rs:618–655` | 기존 command/user receipt 경로를 보존한다. W3 교차 scope에 필요한 remove 근거는 새 물리 receipt를 기록하지 않는다. |
 | NativeExecuted | `src/services/tui_o/writer/input_facts/native.rs:626–651,762–829,879–890`, `src/services/tui_o/writer/rotation/owe.rs:699–730` | 원본 등록이 해당 턴에 흡수된 사실과 정상 종료를 실행 경로에 제안한다. |
 | ReviewAbsorption, SettleOwned | `src/services/tui_input/human_frame/history/notice_owner/absorption.rs:12–91`, `src/services/tui_o/writer/input_notices/absorption.rs:11–94`, `src/services/tui_o/writer/input_facts/native/projection/notice_absorption.rs:11–69`, `src/services/tui_input/human_frame/history/notice_owner.rs:338–390,627–701`, `src/services/tui_o/writer/actor/notice_settlement.rs:124–163` | W3는 source가 검증한 등록과 remove 범위를 흡수 증거로 대조한다. 일치하면 `settle_notice`에서 같은 논리 키의 `Settled::Owned`를 기록한다. |
 | Prepare, Post, Confirm | `src/services/tui_o/writer/actor/notice_work.rs:285–495`, `src/services/tui_o/writer/input_notices/admission.rs:121–135`, `src/services/tui_o/writer/deliver.rs:550–606,690–714` | 등록 Pending은 POST를 막는다. 정산된 키도 이후 준비와 게시에서 배제한다. |
-| Restart, Replay | `src/services/tui_o/writer/actor.rs:345–389`, `src/services/tui_o/writer/rotation/readers.rs:94–123`, `src/services/tui_o/store/ledger/input_notices/settlement.rs:72–85,87–142,146–183` | 원본을 재생하고 durable terminal 및 canonical 제외를 보존한다. |
-| ReadRetirement | `src/services/tui_o/writer/actor/notice_work.rs:541–564`, `src/services/tui_o/writer/actor.rs:849–864`, `src/services/tui_o/writer/host/child_retirement.rs:112–129` | fresh `notice_owed`가 0일 때 공지 부채 거부를 피한다. |
+| Restart, Replay | `src/services/tui_o/writer/actor/publishing.rs:165–205`, `src/services/tui_o/writer/rotation/readers.rs:94–123`, `src/services/tui_o/store/ledger/input_notices/settlement.rs:72–85,87–142,146–183` | 원본을 재생하고 durable terminal 및 canonical 제외를 보존한다. |
+| ReadRetirement | `src/services/tui_o/writer/actor/notice_work.rs:541–564`, `src/services/tui_o/writer/actor.rs:580–595`, `src/services/tui_o/writer/host/child_retirement.rs:112–129` | fresh `notice_owed`가 0일 때 공지 부채 거부를 피한다. |
 | Done | 기존 완료 상태의 모델용 대기 | POST와 debt가 추가로 바뀌지 않는 종결을 표현한다. |
 
 ### W3 TLC 결과

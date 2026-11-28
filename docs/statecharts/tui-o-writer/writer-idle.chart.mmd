@@ -1,0 +1,11 @@
+stateDiagram-v2
+    [*] --> Wait
+    state "1초 대기" as Wait
+    state "스탬프·대기 작업 확인" as Observe
+    state "변화 처리" as Poll
+    Wait --> Observe: 1초 경과
+    Wait --> Poll: 입력·hook·내구 restart intent 즉시
+    Observe --> Wait: 무변경·대기 작업 없음
+    Observe --> Poll: 파일·spool 변화 또는 독립 작업·reader 마감
+    Poll --> Wait: 공지 lease 대기나 정산 실패 시 intent 유지
+    Poll --> Wait: 처리 후 계속

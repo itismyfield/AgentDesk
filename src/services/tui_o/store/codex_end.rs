@@ -357,13 +357,15 @@ fn publish(root: &Path, channel: u64, bytes: &[u8]) -> Result<Appended, String> 
     durable::ensure_dir(&dir).map_err(|error| error.to_string())?;
     durable::sweep_tmp(&dir).map_err(|error| error.to_string())?;
     let target = path(root, channel);
-    match durable::replace(&target, bytes) {
-        Ok(()) => Ok(Appended::Durable),
+    let appended = match durable::replace(&target, bytes) {
+        Ok(()) => Appended::Durable,
         Err(error) if fs::read(&target).is_ok_and(|now| now.as_slice() == bytes) => {
-            Ok(Appended::PublishedUnsynced(error.to_string()))
+            Appended::PublishedUnsynced(error.to_string())
         }
-        Err(error) => Err(error.to_string()),
-    }
+        Err(error) => return Err(error.to_string()),
+    };
+    super::wake::wake(channel);
+    Ok(appended)
 }
 
 impl ChannelStore {
@@ -377,6 +379,12 @@ impl ChannelStore {
             })
             .and_then(Path::parent)
             .ok_or_else(|| "the store has no runtime root".into())
+    }
+
+    pub(crate) fn codex_end_path(&self) -> Option<PathBuf> {
+        self.codex_end_root()
+            .ok()
+            .map(|root| path(root, self.init.channel))
     }
 
     /// Strictly reads this channel's existing End records beside its store.

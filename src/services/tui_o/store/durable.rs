@@ -158,6 +158,8 @@ pub mod fault {
         Write,
         /// The directory sync of a replace, after its rename already published the new file.
         ReplaceDirSync,
+        /// Synchronizing a restart notice's done marker before releasing its retry obligation.
+        RestartNoticeDirSync,
         /// Cutting a withdrawn ledger line, before the cut or before its sync.
         Cut,
         CutSync,

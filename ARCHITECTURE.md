@@ -4900,7 +4900,8 @@ src/
 │   │   │   ├── thread_children_tests.rs
 │   │   │   ├── tool_card_switch.rs
 │   │   │   ├── tool_card_switch_recovery_tests.rs
-│   │   │   └── tool_card_switch_tests.rs
+│   │   │   ├── tool_card_switch_tests.rs
+│   │   │   └── wake.rs
 │   │   ├── writer/
 │   │   │   ├── actor/
 │   │   │   │   ├── automatic.rs
@@ -4914,6 +4915,7 @@ src/
 │   │   │   │   ├── codex_retention_tests.rs
 │   │   │   │   ├── codex_submission.rs
 │   │   │   │   ├── fresh_resume.rs
+│   │   │   │   ├── idle.rs
 │   │   │   │   ├── native_input.rs
 │   │   │   │   ├── notice_absorbed_tests.rs
 │   │   │   │   ├── notice_activation_tests.rs
@@ -4929,6 +4931,7 @@ src/
 │   │   │   │   ├── notice_settlement_tests.rs
 │   │   │   │   ├── notice_work.rs
 │   │   │   │   ├── notice_work_tests.rs
+│   │   │   │   ├── publishing.rs
 │   │   │   │   ├── scoped_submission_tests.rs
 │   │   │   │   ├── scoped_transition_support.rs
 │   │   │   │   ├── scoped_transition_tests.rs
@@ -5029,6 +5032,7 @@ src/
 │   │   │   │   ├── current.rs
 │   │   │   │   ├── current_repair_tests.rs
 │   │   │   │   ├── current_tests.rs
+│   │   │   │   ├── idle_reader.rs
 │   │   │   │   ├── owe.rs
 │   │   │   │   ├── provenance.rs
 │   │   │   │   ├── reader_count.rs

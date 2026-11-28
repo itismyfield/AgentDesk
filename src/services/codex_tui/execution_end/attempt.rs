@@ -224,6 +224,24 @@ pub fn current(channel: u64, pane: &str) -> Option<AttemptId> {
     })
 }
 
+/// A retry may be due without a new binding or a transcript write.
+pub(crate) fn bound_candidate_pending(channel: u64, pane: &str) -> bool {
+    let Some(scope) = Scope::new(channel, pane) else {
+        return false;
+    };
+    let registry = REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
+    registry.untracked == 0
+        && registry.scopes.get(&scope).is_some_and(|entry| {
+            entry.candidate.as_ref().is_some_and(|slot| {
+                entry.valid(&slot.id)
+                    && entry
+                        .bound
+                        .as_ref()
+                        .is_some_and(|(token, _)| *token == slot.id.token)
+            })
+        })
+}
+
 pub fn take_ticket(id: &AttemptId) -> Option<String> {
     tc::with_tmux_source_authority(id.pane(), |authority| {
         if !id.matches(authority) {

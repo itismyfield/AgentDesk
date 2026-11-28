@@ -256,6 +256,7 @@ pub fn append(root: &Path, witness: &RestartEnd) -> Result<Appended, String> {
             if let Err(error) = super::durable::create_once(&target, &bytes) {
                 if fs::read(&target).is_ok_and(|now| now == bytes) {
                     version_sender(witness.channel).send_modify(|version| *version += 1);
+                    super::wake::wake(witness.channel);
                     return Ok(Appended::PublishedUnsynced(error.to_string()));
                 }
                 return Err(error.to_string());
@@ -264,6 +265,7 @@ pub fn append(root: &Path, witness: &RestartEnd) -> Result<Appended, String> {
         Err(error) => return Err(error.to_string()),
     }
     version_sender(witness.channel).send_modify(|version| *version += 1);
+    super::wake::wake(witness.channel);
     Ok(Appended::Durable)
 }
 

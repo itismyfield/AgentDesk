@@ -436,12 +436,20 @@ async fn an_unsynced_codex_seal_waits_across_restore_and_retries_on_an_idle_foll
     );
     sources.follow(&mut writer).unwrap();
     assert_eq!(successor(&fixture.harness, &fixture.old).proof, None);
+    assert!(
+        !sources.quiescent_for_stamp(),
+        "unsynced proof keeps its retry"
+    );
     drop((sources, writer));
     let (mut sources, mut writer, ..) = fixture.engine(false, SystemTime::now());
     assert_eq!(
         successor(&fixture.harness, &fixture.old).proof,
         None,
         "reopening a reader cannot turn published unsynced bytes into proof"
+    );
+    assert!(
+        !sources.quiescent_for_stamp(),
+        "the resumed writer also retries"
     );
     assert_eq!(std::fs::read(&file).unwrap(), published);
     drop(failure);
@@ -452,6 +460,10 @@ async fn an_unsynced_codex_seal_waits_across_restore_and_retries_on_an_idle_foll
         "an idle poll retries durability without a new binding notification"
     );
     assert_eq!(std::fs::read(file).unwrap(), published);
+    assert!(
+        sources.quiescent_for_stamp(),
+        "durable proof clears its retry"
+    );
 }
 
 fn ignored_backlog() -> Vec<u8> {

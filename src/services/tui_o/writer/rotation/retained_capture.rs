@@ -10,7 +10,7 @@ impl<B: BindingEvents> Sources<B> {
         owed: &mut impl Owe,
         index: usize,
     ) -> Result<(), WriterAlarm> {
-        if self.reader_config.is_some() && self.readers[index].watch_until.is_none() {
+        if self.reader_config.is_some() && self.readers[index].retired_watch.is_none() {
             let reader = &self.readers[index];
             if reader.capture.is_none() && (reader.drain_to.is_some() || reader.pending.is_some()) {
                 return Err(halt(
@@ -24,7 +24,7 @@ impl<B: BindingEvents> Sources<B> {
         let Some(capture) = reader
             .capture
             .as_mut()
-            .filter(|_| reader.watch_until.is_none())
+            .filter(|_| reader.retired_watch.is_none())
         else {
             if self.reader_config.is_none() {
                 reader.drain_to = None;

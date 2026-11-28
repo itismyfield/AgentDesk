@@ -121,6 +121,7 @@ pub fn append(runtime_root: &Path, record: ClearEnd) -> Result<Appended, String>
         Err(error) => return Err(error.to_string()),
     };
     version_sender(channel).send_modify(|version| *version += 1);
+    super::wake::wake(channel);
     Ok(appended)
 }
 
