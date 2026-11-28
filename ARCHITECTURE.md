@@ -1844,6 +1844,7 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   └── registry.rs
 │   │   ├── formatting/
+│   │   │   ├── context_followup_tests.rs
 │   │   │   ├── delivery.rs
 │   │   │   ├── footer_retirement_tests.rs
 │   │   │   ├── long_send_rollback.rs
@@ -1857,7 +1858,8 @@ src/
 │   │   │   ├── headless.rs
 │   │   │   ├── headless_exact.rs
 │   │   │   ├── intake_placeholder_retirement_tests.rs
-│   │   │   └── outbound_messages.rs
+│   │   │   ├── outbound_messages.rs
+│   │   │   └── promote_dispatch_tests.rs
 │   │   ├── health/
 │   │   │   ├── o_transition/
 │   │   │   │   ├── automatic/
@@ -3076,6 +3078,7 @@ src/
 │   │   ├── session_runtime/
 │   │   │   ├── channel_routing.rs
 │   │   │   ├── restore_cwd.rs
+│   │   │   ├── resume_launch_binding_tests.rs
 │   │   │   └── worktree.rs
 │   │   ├── session_transition/
 │   │   │   ├── host_tests.rs
@@ -3136,6 +3139,7 @@ src/
 │   │   │   ├── retired_metadata.rs
 │   │   │   ├── send_stage_tests.rs
 │   │   │   ├── store.rs
+│   │   │   ├── stream_context_tests.rs
 │   │   │   ├── terminal_identity.rs
 │   │   │   └── tests.rs
 │   │   ├── task_supervisor/
@@ -3857,6 +3861,7 @@ src/
 │   │   │   ├── orphan_sweep.rs
 │   │   │   ├── previous_v3_reader_tests.rs
 │   │   │   ├── queue_repair.rs
+│   │   │   ├── reaction_hook_tests.rs
 │   │   │   ├── reaction_set.rs
 │   │   │   ├── resolution.rs
 │   │   │   ├── store.rs
@@ -3925,6 +3930,8 @@ src/
 │   │   ├── dispatch_policy.rs
 │   │   ├── dl_herdr_terminate_tests.rs
 │   │   ├── dl_herdr_terminate_unix_tests.rs
+│   │   ├── dl_misc_tests.rs
+│   │   ├── dl_misc_unix_tests.rs
 │   │   ├── dl_recovery_engine_tests.rs
 │   │   ├── dl_recovery_engine_unix_tests.rs
 │   │   ├── dl_tmux_watcher_tests.rs
@@ -3951,6 +3958,7 @@ src/
 │   │   ├── herdr_terminate_route_tests.rs
 │   │   ├── herdr_terminate_tests.rs
 │   │   ├── host_defer_gate.rs
+│   │   ├── host_defer_gate_fixture_tests.rs
 │   │   ├── host_defer_gate_tests.rs
 │   │   ├── host_key_derivation.rs
 │   │   ├── host_key_derivation_tests.rs
