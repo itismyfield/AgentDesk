@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// restored watcher finalize / direct-terminal idle commit / queue kickoff /
 /// terminal stop decision), moved verbatim from tmux_watcher.rs L3746-4115.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum TerminalCommitEpilogueOutcome {
+pub(in crate::services::discord) enum TerminalCommitEpilogueOutcome {
     BreakWatcherLoop,
     Fallthrough,
 }
