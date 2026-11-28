@@ -15,8 +15,6 @@ use crate::services::tui_prompt_dedupe as dedupe;
 use poise::serenity_prelude::ChannelId;
 use serde_json::json;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::Ordering;
-use std::time::Duration;
 
 /// Its own pipe keeps this fixture-owned process alive with `codex resume UUID` in argv.
 /// Both Linux /proc and macOS ps therefore exercise the real process-argument reader.

@@ -4,7 +4,6 @@ use crate::services::discord::inflight::{InflightTurnIdentity, load_inflight_sta
 use crate::services::discord::tmux::tmux_watcher::turn_stream_collector::*;
 use crate::services::discord::tmux::{HostSnapshot, WatchHost};
 use poise::serenity_prelude as serenity;
-use crate::services::provider::ProviderKind;
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use std::time::Duration;
 use crate::services::discord::tmux::tmux_watcher::utf8_chunk_decoder::Utf8ChunkDecoder;

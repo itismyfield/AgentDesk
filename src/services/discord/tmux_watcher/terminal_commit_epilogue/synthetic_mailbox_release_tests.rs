@@ -13,7 +13,7 @@ use crate::services::provider::ProviderKind;
 use crate::services::tui_prompt_dedupe::{
     ExternalInputRelayLease, ExternalInputRelayOwner, TuiRuntimeBinding,
 };
-use poise::serenity_prelude::{self as serenity, MessageId};
+use poise::serenity_prelude as serenity;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},

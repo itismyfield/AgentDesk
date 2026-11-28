@@ -8,7 +8,7 @@ use crate::services::provider::ProviderKind;
 use crate::services::tmux_common as tc;
 use crate::services::tui_prompt_dedupe::{self as binding, TuiRuntimeBinding};
 use poise::serenity_prelude::{self as serenity, ChannelId};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 

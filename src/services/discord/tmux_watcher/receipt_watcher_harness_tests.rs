@@ -6,7 +6,7 @@ use crate::services::discord::inflight::TurnSource;
 use crate::services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::{
     CLAUDE, Harness, field, isolated_in_module, said, stop, user,
 };
-use poise::serenity_prelude::{self as serenity, ChannelId, MessageId};
+use poise::serenity_prelude::{self as serenity, ChannelId};
 use std::sync::{Arc, atomic::Ordering};
 
 const T0: &str = "I7340 T0 delivered before the watcher started";

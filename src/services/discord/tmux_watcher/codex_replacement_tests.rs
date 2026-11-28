@@ -25,7 +25,7 @@ use crate::services::provider::CancelToken;
 use crate::services::provider::ProviderKind;
 use crate::services::provider_teardown::test_support::FakeTmux;
 use crate::services::tui_prompt_dedupe::{self as dedupe, binding_events as p5};
-use poise::serenity_prelude::{self as serenity, ChannelId, MessageId, UserId};
+use poise::serenity_prelude::{self as serenity, ChannelId, MessageId};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
