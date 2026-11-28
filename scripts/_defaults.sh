@@ -2461,7 +2461,7 @@ _preflight_resource_contention() {
   # still printed, downgraded to warnings), consistent with the
   # AGENTDESK_DEPLOY_FORCE_ROLLBACK force-through style.
   # Queue entry only: the caller rechecks without exemption inside build_token.py.
-  # Other callers (including external-artifact deploys) retain builder rejection.
+  # Dashboard builds and the in-token recheck retain builder rejection.
   local build_serialization="${1:-}"
   local force="${AGENTDESK_DEPLOY_FORCE_RESOURCE_PREFLIGHT:-0}"
   local max_load="${AGENTDESK_DEPLOY_MAX_LOADAVG:-}"

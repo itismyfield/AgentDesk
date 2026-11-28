@@ -71,7 +71,15 @@ remote="${*: -1}"
 remote="${remote#bash -lc }"
 remote="$(eval "printf '%s' $remote")"
 case "$remote" in
-    *'git merge'*) echo presync >>"$TRACE"; exit 0 ;;
+    *'git merge'*)
+        echo presync >>"$TRACE"
+        guard='if [ ! -r scripts/lib/deploy_peers_only.sh'
+        if [ "${OLD_PEER_CHECKOUT:-0}" = 1 ] && [[ "$remote" == *"$guard"* ]]; then
+            cd "$WORK/peer"
+            exec bash -c "$guard${remote##*"$guard"}"
+        fi
+        exit 0
+        ;;
     *_extract_yaml_server_port_shell*) printf '%s\n' "$PEER_ROOT" 18742; exit 0 ;;
 esac
 export FAKE_ARCH="${PEER_ARCH:-arm64}" FAKE_RUSTC="${PEER_RUSTC:-1.92.0}" FAKE_MACOS="${PEER_MACOS:-15.6}"
@@ -138,7 +146,9 @@ cat >"$WORK/good-binary" <<'BIN'
 #!/usr/bin/env bash
 if [ "${1:-}" = doctor ]; then
     echo doctor >>"$TRACE"
-    printf '{"checks":[{"id":"postgres_connection","evidence":{"applied_count":1,"resolved_count":1,"pending_versions":%s,"checksum_mismatches":[]}}]}\n' "${FAKE_PENDING:-[]}"
+    [ "${FAKE_RELEASE_DB_ROUTE:-}" = primary ] && [ "$AGENTDESK_ROOT_DIR" = "$WORK/leader" ] || exit 7
+    printf '{"checks":[{"id":"postgres_connection","evidence":{"applied_count":1,"resolved_count":1,"pending_versions":%s,"checksum_mismatches":%s}}]}\n' \
+        "${FAKE_PENDING:-[]}" "${FAKE_CHECKSUM_MISMATCHES:-[]}"
     exit 0
 fi
 [ "${1:-}" = build-info ] || exit 9
@@ -174,7 +184,9 @@ prefix = prefix.replace(entry, '. "$WORK/entry-stubs.sh"\n' + entry)
 # Within this isolated prefix, fake work replaces activation and all resource probes.
 prefix = prefix.replace(dry, 'if false; then')
 prefix = prefix.replace('if [ "$DEPLOY_TEST_MODE" != "1" ]; then', 'if true; then')
-(work / 'entry.sh').write_text(prefix + '\necho stage >>"$TRACE"\necho restart >>"$TRACE"\n')
+prefix = prefix.replace(' && [ "$DEPLOY_TEST_MODE" != 1 ]', '')
+(work / 'entry.sh').write_text(prefix + '\n_clean_release_build_cache_after_staging\n'
+                               'echo stage >>"$TRACE"\necho restart >>"$TRACE"\n')
 PY
 mkdir -p "$WORK/repo/scripts"
 cat >"$WORK/repo/scripts/build_token.py" <<'PY'
@@ -204,6 +216,7 @@ cp "$WORK/entry.sh" "$WORK/repo/scripts/entry.sh"
 cat >"$WORK/entry-stubs.sh" <<'STUB'
 . "$ROOT/scripts/_defaults.sh"
 DEPLOY_RUN_STARTED="$SECONDS"
+REL_LAUNCHD_ENV_FILE="$WORK/release-env-fixture"
 _self_hosted_release_session() { return 1; }
 _acquire_release_deploy_lock() { :; }
 _resolve_release_server_port() { echo 1; }
@@ -223,7 +236,13 @@ _preflight_loadavg_1min() { echo "$FAKE_LOAD"; }
 _preflight_mem_pressure_level() { echo 1; }
 _preflight_high_cpu_processes() { :; }
 _preflight_deploy_target_pids() { :; }
-_deploy_to_all_peers() { echo peer-leg >>"$TRACE"; }
+_deploy_to_all_peers() {
+    [ "$#" -eq 0 ] && [ "$DEPLOY_BUILT_SOURCE_SHA" = "$EXPECTED_SHA" ] \
+        && [ "$AGENTDESK_DEPLOY_TARGET_SHA" = "$EXPECTED_SHA" ] \
+        && [ "$FAKE_RELEASE_DB_ROUTE" = shell ] \
+        && [ "$DEPLOY_PEER_BINARY_SOURCE" = "$ADK_REL/bin/agentdesk" ] || return 1
+    printf 'peer-leg profile=%s fast=%s\n' "$DEPLOY_BUILD_PROFILE" "$AGENTDESK_DEPLOY_FAST" >>"$TRACE"
+}
 git() {
     case "$3" in
         rev-parse) echo "$EXPECTED_SHA" ;;
@@ -246,6 +265,9 @@ REPO="$WORK/repo" ADK_REL="$PEER_ROOT" SCRIPT_DIR="$WORK/repo/scripts"
 DEPLOY_PEER_INVOCATION=1 DEPLOY_TARGET_SHA="$EXPECTED_SHA" DEPLOY_BUILD_PROFILE=release
 DEPLOY_LOCK_TIMEOUT_SECS=1 DEPLOY_BUILT_SOURCE_SHA="" DEPLOY_RUN_STARTED="$SECONDS"
 SOURCE_RECORD=""
+. "$WORK/defaults.sh"
+. "$SCRIPT_DIR/lib/deploy_peers_only.sh"
+setup_sccache_env() { return 1; }
 trap '_emit_terminal_deploy_marker "$?"; _cleanup_peer_binary' EXIT
 _ensure_dashboard_dependencies() { :; }
 _check_repo_remote_freshness() { :; }
@@ -276,6 +298,9 @@ REPO="$WORK/repo" ADK_REL="$WORK/leader" SCRIPT_DIR="$WORK/repo/scripts"
 DEPLOY_PEER_INVOCATION=0 DEPLOY_TARGET_SHA="$EXPECTED_SHA" DEPLOY_BUILD_PROFILE=release
 DEPLOY_LOCK_TIMEOUT_SECS=1 DEPLOY_BUILT_SOURCE_SHA="" DEPLOY_RUN_STARTED="$SECONDS"
 SOURCE_RECORD=""
+. "$WORK/defaults.sh"
+. "$SCRIPT_DIR/lib/deploy_peers_only.sh"
+setup_sccache_env() { return 1; }
 DEPLOY_SSH_CONNECT_TIMEOUT=1
 export BUILD_NODE=leader-build
 unset DEPLOY_BINARY_PLATFORM DEPLOY_PEER_BINARY_SOURCE
@@ -321,6 +346,8 @@ run_case() (
     case "$scenario" in
         success|codesign-verbosity|stages|concurrency|detach|leader-staged|leader-live|unavailable) ;;
         no-fallback) export CORRUPT=hash ;;
+        no-fallback-old-checkout) export OLD_PEER_CHECKOUT=1 ;;
+        no-fallback-unavailable) ;;
         launch-fail) export LAUNCH_FAIL=1 ;;
         peer-platform) export PEER_RUNTIME_MACOS=14.0 ;;
         head-target) export PEER_RUNTIME_HEAD=old-head ;;
@@ -333,7 +360,7 @@ run_case() (
         transfer) export TRANSFER_FAIL=1 ;;
         *) fail "unknown case $scenario" ;;
     esac
-    if [ "$scenario" = no-fallback ]; then
+    if [[ "$scenario" == no-fallback* ]]; then
         unset AGENTDESK_DEPLOY_PEER_BUILD_FALLBACK
     else
         export AGENTDESK_DEPLOY_PEER_BUILD_FALLBACK=1
@@ -405,17 +432,22 @@ PROBE
             bash "$WORK/leader-driver.sh" "$scenario" >"$WORK/$scenario.log" 2>&1 || deploy_rc=$?
             ;;
         *)
-            [ "$scenario" != unavailable ] || unset DEPLOY_PEER_BINARY_SOURCE
+            if [[ "$scenario" == *unavailable ]]; then unset DEPLOY_PEER_BINARY_SOURCE; fi
             echo leader-smoke >>"$TRACE"
             _deploy_to_one_peer peer >"$WORK/$scenario.log" 2>&1 || deploy_rc=$?
             ;;
     esac
-    if [ "$scenario" = no-fallback ]; then
+    if [[ "$scenario" == no-fallback* ]]; then
+        local reason='verification failed: SHA256'
+        case "$scenario" in
+            no-fallback-unavailable) reason='artifact unavailable' ;;
+            no-fallback-old-checkout) reason='target checkout does not support binary-only peer deploys' ;;
+        esac
         if [ -n "${AGENTDESK_TEST_LOG_DIR:-}" ]; then
             cp "$WORK/$scenario.log" "$AGENTDESK_TEST_LOG_DIR/$scenario.log"
             cp "$TRACE" "$AGENTDESK_TEST_LOG_DIR/$scenario.trace"
         fi
-        [ "$deploy_rc" = 1 ] && grep -q 'DEPLOY_FAILED_PEER: verification failed: SHA256' "$WORK/$scenario.log" \
+        [ "$deploy_rc" = 1 ] && grep -q "DEPLOY_FAILED_PEER: $reason" "$WORK/$scenario.log" \
             && ! grep -Ex 'build|activate' "$TRACE" \
             || fail "$scenario rc=$deploy_rc: $(cat "$WORK/$scenario.log" "$TRACE")"
         echo "PASS $scenario"
@@ -497,11 +529,12 @@ PY
 run_entry_case() (
     local scenario=$1 rc=0 expected_rc=1 reason='load average'
     local source="$WORK/leader/bin/agentdesk" deployed="$WORK/leader/runtime/release-source.json"
-    local stdout="$WORK/$scenario.log"
+    local stdout="$WORK/$scenario.log" expected_leg=""
     local -a args=()
     export AGENTDESK_DEPLOY_TEST_MODE=1 AGENTDESK_DEPLOY_NO_DETACH=1
     export AGENTDESK_DEPLOY_SKIP_FRESHNESS=1 AGENTDESK_DEPLOY_MAX_LOADAVG=5
     export AGENTDESK_ROOT_DIR="$WORK/leader" AGENTDESK_REPO_DIR="$WORK/repo"
+    export FAKE_RELEASE_DB_ROUTE=shell
     export AGENTDESK_DEPLOY_PEERS=peer FAKE_LOAD=9 FAKE_PENDING='[]'
     unset AGENTDESK_DEPLOY_BINARY AGENTDESK_DEPLOY_PEER_ARTIFACT_DIR AGENTDESK_DEPLOY_TARGET_SHA
     unset AGENTDESK_DEPLOY_PEER_INVOCATION AGENTDESK_DEPLOY_ALL_NODES AGENTDESK_DEPLOY_PEER_BUILD_FALLBACK
@@ -510,6 +543,7 @@ run_entry_case() (
     printf '<html></html>\n' >"$WORK/leader/dashboard/dist/index.html"
     printf '%s\n' "${EXPECTED_SHA//0/1}" >"$WORK/leader/dashboard/dist/.build-commit"
     printf 'cluster: {enabled: true, role: hub}\n' >"$WORK/leader/fixture-config.yml"
+    printf '%s\n' 'FAKE_RELEASE_DB_ROUTE=primary' "AGENTDESK_ROOT_DIR=$WORK/unrelated" >"$WORK/release-env-fixture"
     cp "$WORK/good-binary" "$source"
     python3 "$WORK/repo/scripts/release_source.py" seal "$source" "$EXPECTED_SHA" aarch64-apple-darwin
     printf '{"repo_head":"%s","build_profile":"release"}\n' "$EXPECTED_SHA" >"$deployed"
@@ -552,13 +586,26 @@ PYMANIFEST
             export FAKE_LOAD=1
             args=(--peers-only)
             case "$scenario" in
-                peers-only) expected_rc=0; reason='migrations already applied' ;;
+                peers-only)
+                    expected_rc=0; reason='migrations already applied'
+                    expected_leg='peer-leg profile=release fast=0'
+                    ;;
+                peers-only-fast)
+                    expected_rc=0; reason='migrations already applied'
+                    expected_leg='peer-leg profile=release-fast fast=1'
+                    printf '{"repo_head":"%s","build_profile":"release-fast"}\n' "$EXPECTED_SHA" >"$deployed"
+                    ;;
                 peers-only-wrong-head)
                     printf '{"repo_head":"%s"}\n' "${EXPECTED_SHA//0/1}" >"$deployed"
                     reason='deployed head'
                     ;;
                 peers-only-migration) export FAKE_PENDING='[2]'; reason='pending=\[2\]' ;;
+                peers-only-checksum) export FAKE_CHECKSUM_MISMATCHES='[{}]'; reason='checksum_mismatches=1' ;;
                 peers-only-bad-signature) export FAKE_SIGNATURE=bad; reason='signature verification failed' ;;
+                peers-only-no-source)
+                    rm -f "$source.source.json"
+                    reason='source or digest does not match'
+                    ;;
                 *) fail "unknown entry case $scenario" ;;
             esac
             ;;
@@ -584,10 +631,10 @@ PYMANIFEST
         *) ! grep -Ex 'stage|restart' "$TRACE" || fail "$scenario reached local staging or restart" ;;
     esac
     ! grep -Ex 'build|dashboard-build' "$TRACE" || fail "$scenario unexpectedly built"
-    if [ "$scenario" = peers-only ]; then
-        [ "$(grep -cx peer-leg "$TRACE")" = 1 ] || fail "$scenario did not run exactly one peer stage"
+    if [ -n "$expected_leg" ]; then
+        [ "$(grep '^peer-leg ' "$TRACE")" = "$expected_leg" ] || fail "$scenario did not run exactly one peer stage with the deployed profile"
     else
-        ! grep -qx peer-leg "$TRACE" || fail "$scenario unexpectedly dispatched peers"
+        ! grep -q '^peer-leg ' "$TRACE" || fail "$scenario unexpectedly dispatched peers"
     fi
     echo "PASS $scenario"
 )
@@ -604,7 +651,9 @@ if [ "$#" -gt 0 ]; then
 else
     count=0
     for scenario in success codesign-verbosity hash arch transfer stages size signature execute runtime toolchain os format source profile signature-meta optimized-hash concurrency detach leader-staged leader-live witness-mismatch unavailable launch-fail peer-platform head-target \
-        high-load-install high-load-source high-load-dashboard no-fallback direct-peer peers-only peers-only-wrong-head peers-only-migration peers-only-bad-signature; do
+        high-load-install high-load-source high-load-dashboard no-fallback no-fallback-unavailable no-fallback-old-checkout \
+        direct-peer peers-only peers-only-fast peers-only-wrong-head peers-only-migration peers-only-checksum \
+        peers-only-bad-signature peers-only-no-source; do
         run_scenario "$scenario"
         count=$((count + 1))
     done

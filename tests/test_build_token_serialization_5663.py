@@ -380,11 +380,9 @@ class DeployLockTimeoutTests(unittest.TestCase):
 
 
 class DeployPreflightTokenTests(unittest.TestCase):
-    def test_source_build_queues_but_artifact_and_host_pressure_refuse(self) -> None:
+    def test_source_build_queues_and_refuses_host_pressure(self) -> None:
         # Execute the actual preflight/build branches, never the full deployment.
         deploy = (SCRIPTS / "deploy-release.sh").read_text()
-        preflight = deploy.split('if [ "$DEPLOY_TEST_MODE" != "1" ]; then', 1)[1]
-        preflight = 'if [ "$DEPLOY_TEST_MODE" != "1" ]; then' + preflight.split("# #743:", 1)[0]
         build_start = 'if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ] && [ "$PEER_BINARY_ACCEPTED" != 1 ]; then'
         self.assertEqual(deploy.count(build_start), 1)
         build = build_start + deploy.split(build_start, 1)[1].split("# Rebuild dashboard", 1)[0]
@@ -405,7 +403,6 @@ raise SystemExit(bt.main(sys.argv[2:8] + command))
             script = root / "scenario.sh"
             script.write_text("""set -eu
 . "$1/_defaults.sh"
-DEPLOY_TEST_MODE=0
 REPO="$1/.."
 SCRIPT_DIR="$6"
 SOURCE_BINARY="$4"
@@ -413,6 +410,9 @@ export TMPDIR="$6"
 DEPLOY_BUILD_PROFILE="$5"
 DEPLOY_LOCK_TIMEOUT_SECS="${TEST_LOCK_TIMEOUT:-1800}"
 PEER_BINARY_ACCEPTED=0
+_require_deploy_source_builder() { :; }
+setup_sccache_env() { return 1; }
+_resolve_default_release_binary() { echo "$MARKER"; }
 _binary_would_revert_o_ledger() { return 1; }
 _preflight_builder_pids() { case "$1" in cargo|rustc) echo 55555;; esac; }
 _preflight_cpu_count() { echo 8; }
@@ -422,7 +422,7 @@ _preflight_high_cpu_processes() { :; }
 _preflight_deploy_target_pids() { :; }
 DRIVER="$2"; TOKEN="$3"; MARKER="$4"
 python3() { command "$TEST_PYTHON" "$DRIVER" "$TOKEN" "$@" "$MARKER"; }
-""" + preflight + build)
+""" + build)
             # Real default guard and real high-CPU classifier, only OS data mocked.
             defaults = root / "_defaults.sh"
             defaults.write_text((SCRIPTS / "_defaults.sh").read_text() + """
@@ -485,7 +485,6 @@ ps() {
                         self.assertTrue(marker.exists())
             for extra, reason in (({"TEST_LOAD": "99"}, "load average"),
                                   ({"TEST_PRESSURE": "4"}, "memory pressure"),
-                                  ({"AGENTDESK_DEPLOY_BINARY": "artifact"}, "concurrent build tool"),
                                   ({"AFTER_BUILDER": "cargo"}, "concurrent build tool"),
                                   ({"AFTER_BUILDER": "rustc"}, "concurrent build tool"),
                                   ({"AFTER_HOT": "1"}, "SUSTAINED runaway"),

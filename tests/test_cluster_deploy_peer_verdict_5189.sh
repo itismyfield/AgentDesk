@@ -499,6 +499,14 @@ PY
         printf '%s\n' "$rc" "$out"
     }
 
+    printf '%s\n' '✗ DEPLOY_FAILED_PEER: verification failed: SHA256' \
+        '═══ DEPLOY FAILED (exit=1) ═══' >"$TMP_ROOT/peer-binary-failed.log"
+    binary_verdict="$(run_probed_verdict "$TMP_ROOT/peer-binary-failed.log" "$READY_PORT")"
+    if [ "${binary_verdict%%$'\n'*}" != 1 ] \
+        || ! grep -Fq 'DEPLOY_FAILED_PEER: verification failed: SHA256' <<<"$binary_verdict"; then
+        fail_test "detached peer verification failure must reach the verdict with its reason"
+    fi
+
     # (a) The log names the port the target deploy health-checked, and the
     # pre-read names a DIFFERENT one. Green -- and green through the real
     # probe, which is what makes the emptied-body mutation
@@ -707,7 +715,7 @@ export DEPLOY_SSH_CONNECT_TIMEOUT=10
 # Test: _deploy_to_one_peer with failing verdict should return non-zero
 # Verify rc propagates from verdict call, not from an earlier failure path.
 peer_deploy_rc=0
-peer_deploy_out=$(_deploy_to_one_peer "test-peer" 2>&1) || peer_deploy_rc=$?
+peer_deploy_out=$(AGENTDESK_DEPLOY_PEER_BUILD_FALLBACK=1 _deploy_to_one_peer "test-peer" 2>&1) || peer_deploy_rc=$?
 if [ "$peer_deploy_rc" -eq 0 ]; then
     fail_test "_deploy_to_one_peer must fail (rc≠0) when _wait_for_peer_deploy_verdict fails; got rc=$peer_deploy_rc"
 elif grep -q 'deploy verified' <<<"$peer_deploy_out"; then

@@ -1,5 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Automation: retry peers with AGENTDESK_DEPLOY_TARGET_SHA=<sha> deploy-release.sh --peers-only on the primary after that target is deployed.
+for _adk_deploy_arg in "$@"; do
+    [ "$_adk_deploy_arg" = --help ] || continue
+    cat <<'EOF'
+Usage: deploy-release.sh [--all-nodes|--cluster|--peers-only] [--peer <alias>] [--fast] [--strict-prompts]
+Automation: retry peers with AGENTDESK_DEPLOY_TARGET_SHA=<sha> deploy-release.sh --peers-only on the primary after that target is deployed.
+AGENTDESK_DEPLOY_PEER_BUILD_FALLBACK=1 explicitly enables peer source builds.
+EOF
+    exit 0
+done
+unset _adk_deploy_arg
 . "$(dirname "$0")/lib/deploy_allow_degraded.sh"
 _deploy_allow_degraded_validate "$@" || exit 2
 # --strict-prompts: prompt 0건 = inspection unavailable(exit 2); release deploy stops.
@@ -55,8 +66,8 @@ fi
 #   AGENTDESK_DEPLOY_ALLOW_DIRTY=1     allow deploying with local changes.
 #   AGENTDESK_DEPLOY_TARGET_SHA=<sha>  deploy this CI-Main-green origin/main ancestor, not the tip.
 # Cluster schema order: Postgres is shared and an old binary cannot boot on a
-# schema newer than it embeds. Every --all-nodes peer builds the source built here,
-# never a newer origin/main; a deploy that advances the schema deploys the single
+# schema newer than it embeds. Cluster peers install the signed binary for the
+# pinned source. A deploy that advances the schema deploys the single
 # peer BEFORE this node migrates or restarts, and without --all-nodes it is refused
 # when peers exist.
 #   AGENTDESK_DEPLOY_ALLOW_SCHEMA_AHEAD_OF_PEERS=1  skip that pin and order (peers
@@ -138,6 +149,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=_defaults.sh
 . "$SCRIPT_DIR/_defaults.sh"
 . "$SCRIPT_DIR/_deploy_policy_generation.sh"
+. "$SCRIPT_DIR/lib/deploy_peers_only.sh"
 ADK_REL="${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"
 POST_DEPLOY_SMOKE_SCOPE="${AGENTDESK_POST_DEPLOY_SMOKE_SCOPE:-full}"
 case "$POST_DEPLOY_SMOKE_SCOPE" in
@@ -195,6 +207,7 @@ PG_TUNNEL_ROLLBACK_MANUAL_KIND="none"
 PG_TUNNEL_ROLLBACK_MANUAL_CONFIG=""
 PG_TUNNEL_ROLLBACK_WRAPPER_SOURCE=""
 DEPLOY_ALL_NODES="${AGENTDESK_DEPLOY_ALL_NODES:-0}"
+DEPLOY_PEERS_ONLY="${AGENTDESK_DEPLOY_PEERS_ONLY:-0}"
 DEPLOY_PEERS_OVERRIDE=()
 DEPLOY_PEERS_FILE="${AGENTDESK_DEPLOY_PEERS_FILE:-$ADK_REL/config/deploy-peers.txt}"
 DEPLOY_PEER_INVOCATION="${AGENTDESK_DEPLOY_PEER_INVOCATION:-0}"
@@ -250,6 +263,10 @@ while [ "$_idx" -lt "${#_args[@]}" ]; do
         --all-nodes|--cluster)
             DEPLOY_ALL_NODES=1
             export AGENTDESK_DEPLOY_ALL_NODES=1
+            ;;
+        --peers-only)
+            DEPLOY_PEERS_ONLY=1
+            export AGENTDESK_DEPLOY_PEERS_ONLY=1
             ;;
         --peer)
             _idx=$((_idx + 1))
@@ -688,7 +705,7 @@ PY
 
 _clean_release_build_cache_after_staging() {
     [ "${AGENTDESK_DEPLOY_SKIP_BUILD_CACHE_CLEANUP:-0}" != "1" ] || return 0
-    [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ] || return 0
+    [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ] && [ "${PEER_BINARY_ACCEPTED:-0}" != 1 ] || return 0
 
     local -a clean_cmd
     echo "▸ Cleaning ${DEPLOY_BUILD_PROFILE} build cache after staging binary (under build token)..."
@@ -1644,10 +1661,11 @@ _resolve_deploy_peers() {
 }
 
 _deploy_peer_env_prelude() {
-    printf 'AGENTDESK_DEPLOY_PEER_INVOCATION=1'
+    printf 'AGENTDESK_DEPLOY_PEER_INVOCATION=1 AGENTDESK_DEPLOY_PEERS_ONLY=0 AGENTDESK_DEPLOY_PEER_BUILD_FALLBACK=%q' \
+        "${AGENTDESK_DEPLOY_PEER_BUILD_FALLBACK:-0}"
     local name value
     # Host-local paths (binary, repo, root, lock) are deliberately absent: the peer resolves
-    # its own, so it builds its synced checkout under the root its verdict is read from.
+    # its own under the root its verdict is read from.
     for name in \
         AGENTDESK_CODESIGN_IDENTITY \
         AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN \
@@ -1713,6 +1731,7 @@ def clean(value):
 
 marker_status = "missing"
 marker_detail = "no terminal marker"
+peer_binary_failure = ""
 # #5071 S0b r2 F2: the port the health body is read from must come from the SAME
 # log the terminal marker comes from, because that log is one deploy runs whole
 # transcript (deploy-release.sh re-execs itself detached with stdout redirected to
@@ -1732,7 +1751,9 @@ try:
                 marker_detail = line
             elif re.fullmatch(r"═══ DEPLOY FAILED \\(exit=[0-9]+\\) ═══", line):
                 marker_status = "failure"
-                marker_detail = line
+                marker_detail = peer_binary_failure or line
+            elif line.startswith("✗ DEPLOY_FAILED_PEER: "):
+                peer_binary_failure = line[len("✗ "):]
             else:
                 port_match = re.fullmatch(
                     r"▸ Waiting for release health on :([0-9]+)\\.\\.\\.", line
@@ -2116,8 +2137,12 @@ _select_peer_binary() {
     if [ "$PEER_BINARY_ACCEPTED" = 1 ]; then
         echo "✓ [peer-binary] verified; using signed release binary (source=$head)"
     else
-        echo "▸ [peer-binary] fallback: $PEER_BINARY_FAILURE; building on peer"
         _cleanup_peer_binary
+        if [ "${AGENTDESK_DEPLOY_PEER_BUILD_FALLBACK:-0}" != 1 ]; then
+            echo "✗ DEPLOY_FAILED_PEER: $PEER_BINARY_FAILURE" >&2
+            return 1
+        fi
+        echo "▸ [peer-binary] fallback: $PEER_BINARY_FAILURE; building on peer"
     fi
     echo "▸ [timing] phase=peer-verify seconds=$((SECONDS - started)) accepted=$PEER_BINARY_ACCEPTED"
 }
@@ -2249,6 +2274,14 @@ git fetch --quiet origin main
 git checkout --quiet main
 git merge --quiet --ff-only origin/main"
     fi
+    if [ "${AGENTDESK_DEPLOY_PEER_BUILD_FALLBACK:-0}" != 1 ]; then
+        # The pinned checkout must honor the binary-only policy.
+        remote_presync_command="$remote_presync_command"'
+if [ ! -r scripts/lib/deploy_peers_only.sh ]; then
+    echo "✗ DEPLOY_FAILED_PEER: target checkout does not support binary-only peer deploys." >&2
+    exit 1
+fi'
+    fi
     echo "▸ [peer:$peer] Pre-syncing repo (fast-forward only)..."
     if ! ssh -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" "$peer" "bash -lc $(printf '%q' "$remote_presync_command")"; then
         echo "✗ [peer:$peer] Pre-sync failed (diverged, fetch error, or unreachable within ${DEPLOY_SSH_CONNECT_TIMEOUT}s). Resolve on the peer and retry."
@@ -2298,9 +2331,13 @@ echo \"\$port\"")"'')"; then
     if _prepare_peer_binary "$peer" "$remote_cd_command" "$peer_adk_rel" "$expected_repo_head"; then
         env_prelude="$env_prelude $PEER_BINARY_ENV"
     else
+        if [ "${AGENTDESK_DEPLOY_PEER_BUILD_FALLBACK:-0}" != 1 ]; then
+            echo "✗ [peer:$peer] DEPLOY_FAILED_PEER: $PEER_BINARY_FAILURE" >&2
+            return 1
+        fi
         echo "▸ [peer-binary] fallback: $PEER_BINARY_FAILURE; building on peer $peer"
     fi
-    # The child builds the checkout the cd above selected and pre-synced, whatever the peer login env says.
+    # Run the pre-synced peer checkout under its own release root.
     remote_deploy_command="${remote_cd_command} && AGENTDESK_REPO_DIR=\"\$PWD\" ${env_prelude} AGENTDESK_DEPLOY_LOG=$(printf '%q' "$peer_log_path") bash scripts/deploy-release.sh${quoted_args}"
 
     PEER_LEG_LAUNCHED=1
@@ -2395,11 +2432,11 @@ _schema_order_guard_before_build() {
 }
 
 _doctor_migration_snapshot() {
-    # One comparable line of the shared schema as this binary sees it; rc 1 = unknown.
-    local binary="$1" json_tmp
+    # Snapshot the shared schema; rc 1 means unknown, rc 2 means drift in require-current mode.
+    local binary="$1" mode="${2:-}" json_tmp rc=0
     json_tmp=$(mktemp "${TMPDIR:-/tmp}/agentdesk-schema-snapshot.XXXXXX") || return 1
     "$binary" doctor --json >"$json_tmp" 2>/dev/null || true
-    python3 - "$json_tmp" <<'PY'
+    python3 - "$json_tmp" "$mode" <<'PY' || rc=$?
 import json
 import sys
 
@@ -2420,13 +2457,23 @@ if not isinstance(pending, list) or not isinstance(applied, int):
 def versions(key):
     return json.dumps(sorted(evidence.get(key) or []), separators=(",", ":"))
 
-print(
+snapshot = (
     f"applied_count={applied} pending={versions('pending_versions')}"
     f" missing={versions('missing_from_resolved')}"
     f" unsuccessful={versions('unsuccessful_versions')}"
 )
+if sys.argv[2] == "require-current":
+    resolved = evidence.get("resolved_count")
+    checksums = evidence.get("checksum_mismatches")
+    missing = evidence.get("missing_from_resolved", [])
+    unsuccessful = evidence.get("unsuccessful_versions", [])
+    if type(applied) is not int or type(resolved) is not int or min(applied, resolved) < 0 \
+            or not all(isinstance(value, list) for value in (checksums, missing, unsuccessful)):
+        sys.exit(1)
+    print(f"{snapshot} resolved_count={resolved} checksum_mismatches={len(checksums)}")
+    sys.exit(2 if applied != resolved or any((pending, missing, unsuccessful, checksums)) else 0)
+print(snapshot)
 PY
-    local rc=$?
     rm -f "$json_tmp"
     return "$rc"
 }
@@ -2608,6 +2655,7 @@ export AGENTDESK_DEPLOY_SKIP_FRESHNESS=$(printf '%q' "${AGENTDESK_DEPLOY_SKIP_FR
 export AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS=$(printf '%q' "${AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS:-0}")
 export AGENTDESK_DEPLOY_TARGET_SHA=$(printf '%q' "${AGENTDESK_DEPLOY_TARGET_SHA:-}")
 export AGENTDESK_DEPLOY_ALLOW_SCHEMA_AHEAD_OF_PEERS=$(printf '%q' "${AGENTDESK_DEPLOY_ALLOW_SCHEMA_AHEAD_OF_PEERS:-0}")
+export AGENTDESK_DEPLOY_PEER_BUILD_FALLBACK=$(printf '%q' "${AGENTDESK_DEPLOY_PEER_BUILD_FALLBACK:-0}")
 export AGENTDESK_DEPLOY_FORCE_RESOURCE_PREFLIGHT=$(printf '%q' "${AGENTDESK_DEPLOY_FORCE_RESOURCE_PREFLIGHT:-0}")
 $(if [ "${AGENTDESK_DEPLOY_ALLOW_DEGRADED+x}" = x ]; then printf 'export AGENTDESK_DEPLOY_ALLOW_DEGRADED=%q' "$AGENTDESK_DEPLOY_ALLOW_DEGRADED"; fi)
 export AGENTDESK_DEPLOY_MAX_LOADAVG=$(printf '%q' "${AGENTDESK_DEPLOY_MAX_LOADAVG:-}")
@@ -2621,6 +2669,7 @@ export AGENTDESK_DEPLOY_LOCK_FILE=$(printf '%q' "$DEPLOY_LOCK_FILE")
 export AGENTDESK_DEPLOY_LOCK_TIMEOUT_SECS=$(printf '%q' "$DEPLOY_LOCK_TIMEOUT_SECS")
 export AGENTDESK_DEPLOY_PEER_VERDICT_TIMEOUT_SECS=$(printf '%q' "$DEPLOY_PEER_VERDICT_TIMEOUT_SECS")
 export AGENTDESK_DEPLOY_PEER_VERDICT_POLL_INTERVAL_SECS=$(printf '%q' "$DEPLOY_PEER_VERDICT_POLL_INTERVAL_SECS")
+export AGENTDESK_DEPLOY_PEERS_ONLY=$(printf '%q' "${AGENTDESK_DEPLOY_PEERS_ONLY:-0}")
 export AGENTDESK_DEPLOY_ALL_NODES=$(printf '%q' "${AGENTDESK_DEPLOY_ALL_NODES:-0}")
 export AGENTDESK_DEPLOY_PEERS=$(printf '%q' "${AGENTDESK_DEPLOY_PEERS:-}")
 export AGENTDESK_DEPLOY_PEERS_FILE=$(printf '%q' "${AGENTDESK_DEPLOY_PEERS_FILE:-}")
@@ -2671,23 +2720,10 @@ fi
 _acquire_release_deploy_lock "$@"
 DEPLOY_RUN_STARTED="$SECONDS"
 
-# #4255: resource-contention pre-flight — refuse (or, with the force hatch,
-# warn) BEFORE any expensive build work when the machine is already saturated by
-# another builder / high-load process, which twice KILLED a mid-flight deploy
-# (07-05 concurrent UE build, 07-07 runaway ugrep). Runs on EVERY node: each
-# peer invokes this same script under its own lock, so it checks its own local
-# resources. Exact-name builder matching (pgrep -x) means the ssh client, sshd,
-# and the deploy script itself are never mistaken for contention, and the
-# high-CPU scan excludes this deploy's own process group. Skipped in the
-# detached-helper dry run (DEPLOY_TEST_MODE=1), which never builds.
-if [ "$DEPLOY_TEST_MODE" != "1" ]; then
-    # Only source builds below enter the canonical build_token.py queue (#5818).
-    # External artifacts do not acquire that token and keep the original guard.
-    if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
-        _preflight_resource_contention canonical-build-token || exit 1
-    else
-        _preflight_resource_contention || exit 1
-    fi
+if [ "$DEPLOY_PEERS_ONLY" = 1 ] && [ "$DEPLOY_TEST_MODE" != 1 ]; then
+    _run_peers_only "$@" || exit 1
+    echo "═══ Deploy Complete ═══"
+    exit 0
 fi
 
 # #743: Zero-inflight gate for create-pr dispatches on the release runtime.
@@ -2748,29 +2784,13 @@ _schema_order_guard_before_build || exit 1
 # Ensure release dir exists
 mkdir -p "$ADK_REL"/{bin,config,data,logs}
 
-export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-15G}"
-if setup_sccache_env; then
-    echo "▸ sccache cache: $SCCACHE_DIR (size $SCCACHE_CACHE_SIZE)"
-else
-    echo "⚠ sccache not found in PATH; continuing without rustc wrapper"
-    echo "  Install it first for faster release builds (for example: brew install sccache)"
-    echo "  See docs/ci/sccache-setup.md"
-    # Explicitly clear any rustc-wrapper coming from .cargo/config.toml so we
-    # don't fail the build when the binary is missing.
-    export RUSTC_WRAPPER=""
-    export CARGO_BUILD_RUSTC_WRAPPER=""
-fi
-
 # Build the release binary from HEAD by default; an external AGENTDESK_DEPLOY_BINARY is
 # deployed only while it reports both its O writer and OperatorResume off.
-_ensure_dashboard_dependencies
 _check_repo_remote_freshness
 if _external_artifact_would_skip_o_writer; then
     exit 1
 elif [ -n "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
     SOURCE_BINARY="$AGENTDESK_DEPLOY_BINARY"
-else
-    SOURCE_BINARY="$(_resolve_default_release_binary "$DEPLOY_BUILD_PROFILE")"
 fi
 # Cluster peers are pinned to this commit, so record it before building; an
 # external artifact has no source to record.
@@ -2780,8 +2800,23 @@ fi
 echo "▸ [timing] phase=release-preflight seconds=$((SECONDS - DEPLOY_RUN_STARTED))"
 BINARY_PHASE_STARTED="$SECONDS"
 DEPLOY_BINARY_PLATFORM="$(_peer_binary_platform)" || DEPLOY_BINARY_PLATFORM=""
-_select_peer_binary
+_select_peer_binary || exit 1
 if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ] && [ "$PEER_BINARY_ACCEPTED" != 1 ]; then
+    _require_deploy_source_builder || exit 1
+    _preflight_resource_contention canonical-build-token || exit 1
+    SOURCE_BINARY="$(_resolve_default_release_binary "$DEPLOY_BUILD_PROFILE")"
+    export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-15G}"
+    if setup_sccache_env; then
+        echo "▸ sccache cache: $SCCACHE_DIR (size $SCCACHE_CACHE_SIZE)"
+    else
+        echo "⚠ sccache not found in PATH; continuing without rustc wrapper"
+        echo "  Install it first for faster release builds (for example: brew install sccache)"
+        echo "  See docs/ci/sccache-setup.md"
+        # Explicitly clear any rustc-wrapper coming from .cargo/config.toml so we
+        # don't fail the build when the binary is missing.
+        export RUSTC_WRAPPER=""
+        export CARGO_BUILD_RUSTC_WRAPPER=""
+    fi
     # Cap token wait duration by the deploy-lock wait; this is not a shared absolute deadline.
     # An explicit operator override still wins.
     export ADK_BUILD_TOKEN_WAIT_TIMEOUT_SECS="${ADK_BUILD_TOKEN_WAIT_TIMEOUT_SECS:-$DEPLOY_LOCK_TIMEOUT_SECS}"
@@ -2840,6 +2875,8 @@ if _dashboard_build_commit keep "$REPO" "$ADK_REL/dashboard/dist"; then
     KEEP_DEPLOYED_DASHBOARD=1
     STAGING_PHASE_STARTED="$SECONDS"
 else
+    _preflight_resource_contention || exit 1
+    _ensure_dashboard_dependencies
     echo "▸ Building dashboard..."
     DASHBOARD_BUILD_COMMIT="$(_dashboard_build_commit capture "$REPO")" || DASHBOARD_BUILD_COMMIT=""
     (cd "$REPO/dashboard" && npm run build --silent)

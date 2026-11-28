@@ -48,6 +48,8 @@ npm() {
     rm -f "$REPO/dashboard/dist/.build-commit"
     printf 'rebuilt\n' >"$REPO/dashboard/dist/index.html"
 }
+_preflight_resource_contention() { :; }
+_ensure_dashboard_dependencies() { :; }
 _resolve_dashboard_source() { printf '%s\n' "$REPO/dashboard/dist"; }
 
 run_case() (

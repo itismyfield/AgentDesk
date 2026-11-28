@@ -232,6 +232,8 @@ raise SystemExit(bt.run(sys.argv[7:], path={str(self.root / 'token')!r}, release
                                 ("deploy-release.sh", "release-fast")):
             source = (REPO / "scripts" / script).read_text()
             start = 'export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-15G}"'
+            if script == "deploy-release.sh":
+                start = 'if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ] && [ "$PEER_BINARY_ACCEPTED" != 1 ]; then'
             end = ('echo "[2/3] Dashboard' if script == "build-release.sh" else
                    '# Rebuild dashboard unless a newer deployed build is known.')
             self.assertEqual(source.count(start), 1)
@@ -258,6 +260,8 @@ _ensure_dashboard_dependencies() {{ :; }}
 _check_repo_remote_freshness() {{ :; }}
 _external_artifact_would_skip_o_writer() {{ return 1; }}
 _resolve_default_release_binary() {{ echo "$REPO/artifact"; }}
+_require_deploy_source_builder() {{ :; }}
+PEER_BINARY_ACCEPTED=0
 # Exercise the source-build consumer without peers, transfers or a ledger floor.
 _schema_order_peers() {{ :; }}
 _peer_binary_platform() {{ return 1; }}

@@ -68,7 +68,7 @@ HOST_LOCK="$HOST_ROOT/runtime/deploy-release.lock"
 mkdir -p "$HOST_ROOT/routines" "$HOST_REPO/scripts" "$TMP_ROOT/host-home"
 printf '#!/bin/sh\n' >"$HOST_ROOT/routines/routine.sh"
 export HOME="$TMP_ROOT/host-home"
-export AGENTDESK_DEPLOY_FAST=1
+export AGENTDESK_DEPLOY_FAST=1 AGENTDESK_DEPLOY_PEER_BUILD_FALLBACK=1
 # shellcheck disable=SC2034  # Read by the production functions loaded through eval.
 REPO="$HOST_REPO"
 # shellcheck disable=SC2034
@@ -119,7 +119,7 @@ write_peer_checkout() {
     mkdir -p "$dir/scripts/lib"
     # The resolution block sources the deploy helpers next to the script.
     cp "$REPO_ROOT"/scripts/_*.sh "$dir/scripts/"
-    cp "$REPO_ROOT/scripts/lib/deploy_allow_degraded.sh" "$dir/scripts/lib/"
+    cp "$REPO_ROOT/scripts/lib/"{deploy_allow_degraded,deploy_peers_only}.sh "$dir/scripts/lib/"
     cat >"$dir/scripts/resolve-config-path.sh" <<'RESOLVER'
 #!/bin/bash
 printf '%s\n' "$1/selected.yaml"

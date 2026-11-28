@@ -385,7 +385,10 @@ echo "== switch on: only this source's own build is deployed =="
 # Buffer the bounded selection range so a missing boundary cannot include later deploy steps.
 selection="$(awk '
     /^_check_repo_remote_freshness$/ { collecting = 1; next }
-    collecting && /^# Cluster peers are pinned to this commit,/ { print body; exit }
+    collecting && /^[[:space:]]+SOURCE_BINARY="\$\(_resolve_default_release_binary / {
+        printf "%s%s\nfi\n", body, $0
+        exit
+    }
     collecting { body = body $0 ORS }
 ' "$DEPLOY_SH")"
 if [ -z "$selection" ] || ! bash -n <<<"$selection" 2>/dev/null; then
@@ -418,7 +421,15 @@ run_selection() {
     AGENTDESK_DEPLOY_BINARY="$1" REPO="$REPO" ADK_REL="$ADK_REL" TMP_ROOT="$TMP_ROOT" \
         DEPLOY_BUILD_PROFILE=release bash -euo pipefail -c "$(declare -f _binary_build_flag \
         _external_artifact_would_skip_o_writer _resolve_default_release_binary)
+DEPLOY_RUN_STARTED=\$SECONDS
+_schema_order_peers() { :; }
+_peer_binary_platform() { return 1; }
+_select_peer_binary() { PEER_BINARY_ACCEPTED=0; }
+_require_deploy_source_builder() { :; }
+_preflight_resource_contention() { :; }
+{
 $selection
+} >&2
 echo \"\$SOURCE_BINARY\""
 }
 ARTIFACT="$TMP_ROOT/artifact"

@@ -312,6 +312,11 @@ run_peer() {
 leader_at "$SHA_B"
 DEPLOY_TARGET_SHA="$SHA_B"
 peer_at "$SHA_A"
+unset AGENTDESK_DEPLOY_PEER_BUILD_FALLBACK
+run_peer "older target cannot promise an install-only peer" refused "DEPLOY_FAILED_PEER"
+
+export AGENTDESK_DEPLOY_PEER_BUILD_FALLBACK=1
+peer_at "$SHA_A"
 run_peer "peer behind the target fast-forwards to it" ok ""
 [ "$(git -C "$PEER" rev-parse HEAD)" = "$SHA_B" ] \
     || fail_test "peer must stop at the target $SHA_B, not the origin/main tip; got $(git -C "$PEER" rev-parse HEAD)"
@@ -335,7 +340,7 @@ if [ "$rc" -eq 0 ] || ! grep -qF "is not AGENTDESK_DEPLOY_TARGET_SHA" <<<"$out";
 fi
 [ ! -s "$SSH_CALLS_FILE" ] || fail_test "a leader/target mismatch must be refused before any ssh call"
 
-# No target: the legacy pre-sync command, byte for byte, still advancing to the tip.
+# With fallback enabled and no target, the pre-sync command still advances to the tip.
 # shellcheck disable=SC2034  # Read by the production functions loaded through eval.
 DEPLOY_TARGET_SHA=""
 leader_at "$SHA_C"
