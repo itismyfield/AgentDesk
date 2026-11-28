@@ -65,6 +65,7 @@ async fn server(router: Router) -> (String, Server, std::net::SocketAddr) {
 
 #[tokio::test(flavor = "current_thread")]
 async fn due_census_tick_collects_both_hosts_and_posts_one_verdict_pg() {
+    crate::services::discord::outbound::install_engine_ports();
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;

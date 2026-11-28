@@ -757,7 +757,7 @@ async fn a_runtime_clear_refuses_another_hosts_session_before_any_change_pg() {
     .await
     .unwrap();
     let ids: Vec<u64> = threads.iter().map(|thread| thread.get()).collect();
-    let after = crate::ke_assembly_tests::slot_reset_host_pg_tests::runtime_clears_after_done;
+    let after = crate::ke_assembly_test_host::slot_reset_host_pg_tests::runtime_clears_after_done;
     let clears = after(&ids).await;
     assert!(
         matches!(clears.as_slice(), [(thread, Ok(_))] if *thread == ids[2]),
