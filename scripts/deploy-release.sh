@@ -2,9 +2,20 @@
 set -euo pipefail
 # Automation: retry peers with AGENTDESK_DEPLOY_TARGET_SHA=<sha> deploy-release.sh --peers-only on the primary after that target is deployed.
 for _adk_deploy_arg in "$@"; do
+    if [ "$_adk_deploy_arg" = --check-role ]; then
+        [ "$#" = 1 ] || { echo '✗ --check-role must be used by itself.' >&2; exit 2; }
+        SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+        . "$SCRIPT_DIR/_defaults.sh"
+        . "$SCRIPT_DIR/lib/deploy_peers_only.sh"
+        _init_deploy_service_paths
+        _check_deploy_source_roles --report
+        exit
+    fi
     [ "$_adk_deploy_arg" = --help ] || continue
     cat <<'EOF'
 Usage: deploy-release.sh [--all-nodes|--cluster|--peers-only] [--peer <alias>] [--fast] [--strict-prompts]
+       deploy-release.sh --check-role
+--check-role prints the source-build role verdict and candidate paths without changing files or services.
 Automation: retry peers with AGENTDESK_DEPLOY_TARGET_SHA=<sha> deploy-release.sh --peers-only on the primary after that target is deployed.
 AGENTDESK_DEPLOY_PEER_BUILD_FALLBACK=1 explicitly enables peer source builds.
 EOF
@@ -150,7 +161,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/_defaults.sh"
 . "$SCRIPT_DIR/_deploy_policy_generation.sh"
 . "$SCRIPT_DIR/lib/deploy_peers_only.sh"
-ADK_REL="${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"
+_init_deploy_service_paths
 POST_DEPLOY_SMOKE_SCOPE="${AGENTDESK_POST_DEPLOY_SMOKE_SCOPE:-full}"
 case "$POST_DEPLOY_SMOKE_SCOPE" in
     full|api) ;;
@@ -160,11 +171,7 @@ POST_DEPLOY_SMOKE_WEDGE_COVERAGE="not run: wedge check did not execute"
 # Set before the health gates: their channels are the deploy-nonblocking reader alarms.
 POST_DEPLOY_SMOKE_RELAY_CELL="${AGENTDESK_POST_DEPLOY_SMOKE_RELAY_CELL:-claude-tui}"
 POST_DEPLOY_SMOKE_CODEX_TURNS_CELL="${AGENTDESK_POST_DEPLOY_SMOKE_CODEX_CELL:-codex-tui}"
-# The Rust dcserver reads AGENTDESK_DCSERVER_LABEL for the plist Label; honor it first
-# so launchd Label and plist filename never diverge when the operator overrides one side.
-PLIST_REL="${AGENTDESK_DCSERVER_LABEL:-${AGENTDESK_PLIST_REL:-com.agentdesk.release}}"
 BUNDLE_ID="${AGENTDESK_BUNDLE_ID:-com.itismyfield.agentdesk}"
-REL_LAUNCHD_ENV_FILE="$ADK_REL/config/launchd.env"
 REPO="${AGENTDESK_REPO_DIR:-}"
 if [ -z "$REPO" ]; then
     REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -1330,8 +1337,8 @@ _rollback_release_binary() {
         _restore_policy_generation "$ADK_REL"
         echo "↩ Previous binary restored — restarting release..."
     fi
-    xattr -d com.apple.quarantine "$HOME/Library/LaunchAgents/$plist.plist" 2>/dev/null || true
-    if ! launchctl bootstrap "$domain" "$HOME/Library/LaunchAgents/$plist.plist"; then
+    xattr -d com.apple.quarantine "$RELEASE_PLIST_PATH" 2>/dev/null || true
+    if ! launchctl bootstrap "$domain" "$RELEASE_PLIST_PATH"; then
         echo "⚠ launchd bootstrap failed during rollback — using tmux fallback"
         start_release_tmux_fallback || true
     fi
@@ -3749,7 +3756,7 @@ if [ "$PLIST_REL" = "com.agentdesk.release" ]; then
     echo "▸ Regenerating release launchd plist..."
     python3 "$SCRIPT_DIR/refresh_release_launchd_plist.py" \
         --binary "$ADK_REL/bin/agentdesk" \
-        --home "$HOME" \
+        --home "$RELEASE_PLIST_HOME" \
         --root-dir "$ADK_REL"
 else
     echo "⚠ Skipping launchd plist regeneration for custom label: $PLIST_REL"
@@ -3904,14 +3911,14 @@ echo "▸ Ensuring global agentdesk CLI..."
 
 if [ -f "$REL_LAUNCHD_ENV_FILE" ]; then
     echo "▸ Syncing release launchd env..."
-    sync_launchd_plist_environment_from_file "$HOME/Library/LaunchAgents/$PLIST_REL.plist" "$REL_LAUNCHD_ENV_FILE"
+    sync_launchd_plist_environment_from_file "$RELEASE_PLIST_PATH" "$REL_LAUNCHD_ENV_FILE"
 fi
 
 # Start release
 echo "▸ Starting release..."
-xattr -d com.apple.quarantine "$HOME/Library/LaunchAgents/$PLIST_REL.plist" 2>/dev/null || true
+xattr -d com.apple.quarantine "$RELEASE_PLIST_PATH" 2>/dev/null || true
 LAUNCHD_DOMAIN="$(_launchd_domain)"
-if ! launchctl bootstrap "$LAUNCHD_DOMAIN" "$HOME/Library/LaunchAgents/$PLIST_REL.plist"; then
+if ! launchctl bootstrap "$LAUNCHD_DOMAIN" "$RELEASE_PLIST_PATH"; then
     echo "⚠ launchd bootstrap failed for $LAUNCHD_DOMAIN/$PLIST_REL — using tmux fallback"
     start_release_tmux_fallback
 fi

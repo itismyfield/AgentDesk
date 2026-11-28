@@ -50,7 +50,7 @@ resolution_block="$(awk '
     printing && /^DEPLOY_LOCK_FILE=/ { exit }
 ' "$DEPLOY_SH")"
 case "$resolution_block" in
-    *$'\nADK_REL='*$'\nREPO='*$'\nDEPLOY_LOCK_FILE='*) : ;;
+    *$'\n_init_deploy_service_paths\n'*$'\nREPO='*$'\nDEPLOY_LOCK_FILE='*) : ;;
     *) resolution_block="" ;;
 esac
 case "$(printf '%s\n' "$resolution_block" | tail -n 1)" in

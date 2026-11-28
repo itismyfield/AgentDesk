@@ -64,6 +64,9 @@ SCRIPT_DIR="$FIXTURE_ROOT/scripts"
 REPO="$FIXTURE_ROOT/src"
 SOURCE_BINARY="$REPO/target/release/agentdesk"
 PLIST_REL="${FIXTURE_PLIST_REL:-com.agentdesk.test}"
+RELEASE_PLIST_HOME="$HOME"
+RELEASE_PLIST_PATH="$RELEASE_PLIST_HOME/Library/LaunchAgents/$PLIST_REL.plist"
+export HOME="$FIXTURE_ROOT/other-home"
 REL_PORT=18791
 DEPLOY_HEALTH_RETRIES=1
 DEPLOY_HEALTH_DELAY_SECS=1
@@ -95,6 +98,7 @@ launchctl() {
         print) return 1 ;;
         bootout) return 0 ;;
         bootstrap)
+            [ "$3" = "$RELEASE_PLIST_PATH" ] || return 99
             echo "bin=$(cat "$ADK_REL/bin/agentdesk") policies=$(cat "$ADK_REL/policies/generation" 2>/dev/null || echo none)" \
                 >>"$FIXTURE_ROOT/boots"
             return 0 ;;
@@ -105,6 +109,7 @@ launchctl() {
 python3() {
     case "${1:-}" in
         */refresh_release_launchd_plist.py)
+            [ "$5" = "$RELEASE_PLIST_HOME" ] || return 99
             if [ "${FIXTURE_FAIL_PLIST:-0}" = 1 ]; then echo "plist stub failed" >&2; return 1; fi
             return 0 ;;
     esac

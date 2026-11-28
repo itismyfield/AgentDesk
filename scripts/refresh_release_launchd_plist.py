@@ -23,13 +23,20 @@ def read_plist(path: Path) -> dict:
 
 def exec_role_context(path: Path, label: str, command: list[str]) -> None:
     try:
+        if not path.is_file():
+            raise ValueError("release plist must be a regular file")
         plist = read_plist(path)
         cwd = Path(plist["WorkingDirectory"])
         env = plist["EnvironmentVariables"]
+        arguments = plist["ProgramArguments"]
         if plist.get("Label") != label or not cwd.is_absolute() or not isinstance(env, dict):
             raise ValueError("invalid service context")
         if not all(isinstance(key, str) and isinstance(value, str) for key, value in env.items()):
             raise ValueError("invalid service environment")
+        if (not isinstance(arguments, list) or len(arguments) != 2 or arguments[1] != "dcserver"
+                or not Path(arguments[0]).is_absolute() or Path(arguments[0]).name != "agentdesk"
+                or plist.get("Program", arguments[0]) != arguments[0]):
+            raise ValueError("unsupported release launcher")
         # Leave an absent PATH detectable after the shell applies the deployment overrides.
         env.setdefault("PATH", "")
         os.chdir(cwd)

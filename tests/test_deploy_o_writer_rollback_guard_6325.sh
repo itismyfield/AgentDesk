@@ -104,6 +104,7 @@ PY
 
 # shellcheck disable=SC2034  # Read by the production functions loaded through eval.
 PLIST_REL="com.agentdesk.test"
+export RELEASE_PLIST_PATH="$TMP_ROOT/release.plist"
 # shellcheck disable=SC2034
 REL_PORT="18791"
 # shellcheck disable=SC2034

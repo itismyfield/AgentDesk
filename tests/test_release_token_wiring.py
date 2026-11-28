@@ -35,8 +35,9 @@ class ReleaseTokenWiringTests(unittest.TestCase):
 
     def inject(self, script, command):
         source = (REPO / "scripts" / script).read_text()
-        source = source.replace('. "$SCRIPT_DIR/_defaults.sh"',
-                                '. "$SCRIPT_DIR/_defaults.sh"\n' + command, 1)
+        anchor = '\n. "$SCRIPT_DIR/_defaults.sh"\n'
+        self.assertEqual(source.count(anchor), 1)
+        source = source.replace(anchor, anchor + command + "\n", 1)
         (self.repo / "scripts" / script).write_text(source)
         return source
 

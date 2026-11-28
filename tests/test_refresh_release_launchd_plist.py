@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from scripts.refresh_release_launchd_plist import refresh
+from scripts.refresh_release_launchd_plist import exec_role_context, refresh
 
 
 class RefreshLaunchdPlistTests(unittest.TestCase):
@@ -62,3 +62,25 @@ class RefreshLaunchdPlistTests(unittest.TestCase):
                 refresh(self.binary, self.home, self.root)
             emit.assert_not_called()
         self.assertEqual(self.plist.read_bytes(), b"malformed")
+
+    def test_role_context_validates_plist_and_executes_with_its_environment(self):
+        label = "com.agentdesk.release"
+        command = ["/bin/bash", "--noprofile", "--norc", "-p", "-s"]
+        env = {"HOME": str(self.home), "PATH": "/usr/bin:/bin", "AGENTDESK_CONFIG": "relative.yml"}
+        service = dict(Label=label, WorkingDirectory=str(self.home), EnvironmentVariables=env,
+                       ProgramArguments=[str(self.binary), "dcserver"])
+        with patch("scripts.refresh_release_launchd_plist.os.chdir") as chdir, \
+                patch("scripts.refresh_release_launchd_plist.os.execve") as launch:
+            for fmt in (plistlib.FMT_XML, plistlib.FMT_BINARY):
+                self.plist.write_bytes(plistlib.dumps(service, fmt=fmt))
+                exec_role_context(self.plist, label, command)
+                chdir.assert_called_with(self.home)
+                launch.assert_called_with(command[0], command, env)
+            for invalid in ({key: value for key, value in service.items() if key != "WorkingDirectory"},
+                            {**service, "Label": "service.other"},
+                            {**service, "Program": "/bin/bash"}):
+                launch.reset_mock()
+                self.plist.write_bytes(plistlib.dumps(invalid))
+                with self.assertRaises(SystemExit):
+                    exec_role_context(self.plist, label, command)
+                launch.assert_not_called()

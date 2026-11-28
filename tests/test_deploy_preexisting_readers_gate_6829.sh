@@ -209,6 +209,7 @@ rollback_with_body() {
         export REL_BINARY="$TMP_ROOT/current-binary"
         export REL_BINARY_BACKUP="$TMP_ROOT/previous-binary"
         export PLIST_REL=fixture-release
+        export RELEASE_PLIST_PATH="$TMP_ROOT/release.plist"
         export ADK_REL="$TMP_ROOT"
         export DEPLOY_HEALTH_RETRIES=1
         export DEPLOY_HEALTH_DELAY_SECS=0

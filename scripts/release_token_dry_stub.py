@@ -91,14 +91,16 @@ elif NAME == "python3":
 elif NAME == "env":
     shell = ["/bin/bash", "--noprofile", "--norc", "-s", "--"]
     keys = ("HOME", "PATH", "AGENTDESK_ROOT_DIR", "AGENTDESK_DCSERVER_LABEL")
-    if (len(ARGS) != 12 or ARGS[0] != "-i" or ARGS[5:10] != shell
+    if (len(ARGS) != 16 or ARGS[0] != "-i" or ARGS[5:10] != shell
             or tuple(arg.partition("=")[0] for arg in ARGS[1:5]) != keys):
         blocked(f"unexpected env call: {ARGS}")
     child_env = dict(arg.split("=", 1) for arg in ARGS[1:5])
     if (local(child_env["HOME"]) != ROOT / "home"
             or local(child_env["AGENTDESK_ROOT_DIR"]) != ROOT / "release"
             or local(ARGS[10]) not in (ROOT / "repo/scripts", ROOT / "tools/scripts")
-            or local(ARGS[11]) != ROOT / "release/config/launchd.env"):
+            or local(ARGS[11]) != ROOT / "release/config/launchd.env"
+            or ARGS[12] not in ("planned", "tmux")
+            or ARGS[13:] != ["com.agentdesk.release", "_check_deploy_role", ARGS[12]]):
         blocked(f"unexpected isolated role paths: {ARGS}")
     child_env.update(PATH=str(ROOT / "bin"), DRY_ROOT=str(ROOT), BASH_ENV=str(ROOT / "shell-env"))
     os.execve(shell[0], ARGS[5:], child_env)

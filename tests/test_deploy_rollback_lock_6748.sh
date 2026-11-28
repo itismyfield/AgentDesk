@@ -55,6 +55,7 @@ ADK_REL="$TMP_ROOT/release"
 REL_BINARY="$ADK_REL/bin/agentdesk"
 REL_BINARY_BACKUP="$ADK_REL/bin/agentdesk.prev"
 PLIST_REL="com.agentdesk.test"
+export RELEASE_PLIST_PATH="$TMP_ROOT/release.plist"
 REL_PORT=18791
 DEPLOY_HEALTH_RETRIES=1
 DEPLOY_HEALTH_DELAY_SECS=1

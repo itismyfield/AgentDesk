@@ -24,6 +24,7 @@ mkdir -p "$ADK_REL/o_store" "$ADK_REL/runtime"
 REL_BINARY_BACKUP="$TEST_ROOT/target"
 export REL_BINARY="$TEST_ROOT/current"
 export PLIST_REL=fixture
+export RELEASE_PLIST_PATH="$TEST_ROOT/release.plist"
 export ADK_DEFAULT_LOOPBACK=127.0.0.1
 export AGENTDESK_DEPLOY_FORCE_ROLLBACK=1
 # Deliberately stale manifest cannot make an incompatible actual binary compatible.
