@@ -4,12 +4,13 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 
-use super::super::{
-    CatchUpRetryState, new_retry_state, take_catch_up_retry_checkpoint_after_queue_drain,
-};
+use super::super::new_retry_state;
 use super::*;
 use crate::services::discord::outbound::completed_turn_ledger;
 use crate::services::discord::queue_io::mailbox_enqueue_observed_intervention as observed_enqueue;
+use crate::services::discord::shared_state::catch_up_retry::{
+    CatchUpRetryState, take_catch_up_retry_checkpoint_after_queue_drain,
+};
 use crate::services::discord::{self as discord, MailboxEnqueueOutcome, SharedData};
 use crate::services::turn_orchestrator::{ClaimObservation, EnqueueRefusalReason};
 #[path = "frontier_sweep_tests/dispatch_retirement_tests.rs"]
