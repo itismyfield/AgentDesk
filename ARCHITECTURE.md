@@ -2278,6 +2278,7 @@ src/
 │   │   │   ├── raw_output.rs
 │   │   │   ├── reaction_control.rs
 │   │   │   ├── receipt_index.rs
+│   │   │   ├── restart_report_types.rs
 │   │   │   ├── result.rs
 │   │   │   ├── send_api.rs
 │   │   │   ├── send_gate.rs
@@ -2357,7 +2358,8 @@ src/
 │   │   │   ├── cancel_backstop_race_support_tests.rs
 │   │   │   ├── input_effect_tests.rs
 │   │   │   ├── ke_retry_sweep_tests.rs
-│   │   │   └── kickoff.rs
+│   │   │   ├── kickoff.rs
+│   │   │   └── owner_race_hook_tests.rs
 │   │   ├── queue_io/
 │   │   │   ├── decision_drain/
 │   │   │   │   ├── queued.rs
@@ -3065,6 +3067,7 @@ src/
 │   │   │   ├── validation.rs
 │   │   │   └── write.rs
 │   │   ├── shared_state/
+│   │   │   ├── catch_up_retry.rs
 │   │   │   ├── g7_host.rs
 │   │   │   ├── g7_host_tests.rs
 │   │   │   └── health_ports.rs
@@ -3491,6 +3494,7 @@ src/
 │   │   │   │   └── preparation_notice.rs
 │   │   │   ├── headless_delivery/
 │   │   │   │   ├── durable_outbox.rs
+│   │   │   │   ├── durable_outbox_tests.rs
 │   │   │   │   ├── intake_outbox_argument.rs
 │   │   │   │   ├── observation_tests.rs
 │   │   │   │   ├── outcome.rs
@@ -3501,7 +3505,9 @@ src/
 │   │   │   │   ├── delivery_rewind.rs
 │   │   │   │   └── replay.rs
 │   │   │   ├── runtime_handoff_loop/
+│   │   │   │   ├── codex_replacement_fixture_tests.rs
 │   │   │   │   ├── codex_replacement_tests.rs
+│   │   │   │   ├── gateway_ready_hook_tests.rs
 │   │   │   │   ├── guarded_save.rs
 │   │   │   │   ├── herdr_owner_tests.rs
 │   │   │   │   ├── read_error_fallback_tests.rs
@@ -3545,6 +3551,7 @@ src/
 │   │   │   │   ├── output.rs
 │   │   │   │   ├── reclaim.rs
 │   │   │   │   ├── rollover_guard.rs
+│   │   │   │   ├── rollover_guard_tests.rs
 │   │   │   │   ├── routine_stream_tests.rs
 │   │   │   │   └── runtime.rs
 │   │   │   ├── terminal_controller_cutover/
@@ -3582,6 +3589,7 @@ src/
 │   │   │   │   ├── delivery_epilogue_tests.rs
 │   │   │   │   ├── empty_response_recovery.rs
 │   │   │   │   ├── foreign_o_settlement_tests.rs
+│   │   │   │   ├── foreign_terminal_custody_tests.rs
 │   │   │   │   ├── foreign_terminal_handoff.rs
 │   │   │   │   ├── prompt_too_long_guidance.rs
 │   │   │   │   ├── queue_retry_silence.rs
@@ -3613,13 +3621,16 @@ src/
 │   │   │   │   ├── process_force_kill_tests.rs
 │   │   │   │   ├── process_table.rs
 │   │   │   │   ├── session_stop.rs
+│   │   │   │   ├── session_stop_hook_tests.rs
 │   │   │   │   ├── session_stop_tests.rs
 │   │   │   │   ├── stop_host.rs
+│   │   │   │   ├── stop_host_fixture_tests.rs
 │   │   │   │   └── stop_host_tests.rs
 │   │   │   ├── activity_heartbeat.rs
 │   │   │   ├── before_start_stop.rs
 │   │   │   ├── before_start_stop_clear_order_tests.rs
 │   │   │   ├── before_start_stop_disk_gate_tests.rs
+│   │   │   ├── before_start_stop_hook_tests.rs
 │   │   │   ├── before_start_stop_o_reply_tests.rs
 │   │   │   ├── before_start_stop_policy_tests.rs
 │   │   │   ├── before_start_stop_protected_tests.rs
@@ -3642,6 +3653,7 @@ src/
 │   │   │   ├── current_message_anchor.rs
 │   │   │   ├── early_tui_completion.rs
 │   │   │   ├── entry_abort_cold_error_tests.rs
+│   │   │   ├── entry_abort_fixture_tests.rs
 │   │   │   ├── entry_abort_mailbox_tests.rs
 │   │   │   ├── finalize_epilogue.rs
 │   │   │   ├── followup_requeue.rs
@@ -3653,12 +3665,14 @@ src/
 │   │   │   ├── native_input.rs
 │   │   │   ├── output_lifecycle.rs
 │   │   │   ├── panel_lifecycle.rs
+│   │   │   ├── panel_mode_hook_tests.rs
 │   │   │   ├── post_loop_finalize.rs
 │   │   │   ├── recall_feedback.rs
 │   │   │   ├── recovery_text.rs
 │   │   │   ├── recovery_text_snapshot_tests.rs
 │   │   │   ├── replay_policy.rs
 │   │   │   ├── response_delivery.rs
+│   │   │   ├── resume_pin_hook_tests.rs
 │   │   │   ├── resume_pin_tests.rs
 │   │   │   ├── retry_prompt_store.rs
 │   │   │   ├── retry_state.rs
@@ -3674,6 +3688,7 @@ src/
 │   │   │   ├── stream_tick.rs
 │   │   │   ├── streaming_edit_text.rs
 │   │   │   ├── task_notification_lifecycle.rs
+│   │   │   ├── terminal_body_delivery_tests.rs
 │   │   │   ├── terminal_controller_cutover.rs
 │   │   │   ├── terminal_delivery.rs
 │   │   │   ├── terminal_outcome_delivery.rs
@@ -3892,6 +3907,10 @@ src/
 │   │   ├── destructive_cancel_gate.rs
 │   │   ├── discord_io.rs
 │   │   ├── dispatch_policy.rs
+│   │   ├── dl_turn_bridge_tests.rs
+│   │   ├── dl_turn_bridge_unix_tests.rs
+│   │   ├── dl_turn_presence_tests.rs
+│   │   ├── dl_turn_presence_unix_tests.rs
 │   │   ├── e2e_control.rs
 │   │   ├── execution_identity.rs
 │   │   ├── footer_retirement.rs
@@ -4006,6 +4025,7 @@ src/
 │   │   ├── shared_data.rs
 │   │   ├── shared_memory.rs
 │   │   ├── shared_state.rs
+│   │   ├── shared_state_rest_hook_tests.rs
 │   │   ├── sidecar_interaction.rs
 │   │   ├── single_message_panel.rs
 │   │   ├── single_message_panel_tests.rs
