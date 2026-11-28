@@ -393,52 +393,46 @@ async fn production_resume_lock_blocks_effective_intake_snapshot_until_rebind_fi
         let (probe, events) = ResumeOwnerWakeProbe::install(&shared, channel_id, &owner);
         (owner, probe, events)
     };
-    let resume_pool = pool.clone();
-    let resume_registry = registry;
-    let resume_target_cwd = target_cwd.clone();
-    let resume_key = session_key.clone();
-    let resume = tokio::spawn(async move {
-        perform_resume_rebind(
-            &resume_pool,
-            Some(&resume_registry),
-            &resume_key,
+    let outcome = {
+        let opts = ResumePreviousOptions {
+            session_id: Some(target_session_id.to_string()),
+            cwd: Some(target_cwd.clone()),
+        };
+        let mut resume = std::pin::pin!(perform_resume_rebind(
+            &pool,
+            Some(&registry),
+            &session_key,
             Some(ProviderKind::Claude),
             Some(channel_id),
             tmux,
-            &ResumePreviousOptions {
-                session_id: Some(target_session_id.to_string()),
-                cwd: Some(resume_target_cwd),
-            },
-        )
-        .await
-    });
-    tokio::task::yield_now().await;
-    assert!(
-        !resume.is_finished(),
-        "production resume must acquire the channel lock"
-    );
-    #[cfg(unix)]
-    assert!(
-        wakes.try_recv().is_err(),
-        "no owner wake while the lock is held"
-    );
-    drop(held);
+            &opts,
+        ));
+        assert!(
+            futures::poll!(resume.as_mut()).is_pending(),
+            "production resume must acquire the channel lock"
+        );
+        #[cfg(unix)]
+        assert!(
+            wakes.try_recv().is_err(),
+            "no owner wake while the lock is held"
+        );
+        drop(held);
 
-    let resume_lock = session_transition_lock(&shared, channel_id);
-    let resume_guard = resume_lock.lock().await;
-    let busy_transition = crate::services::discord::try_intake_runtime_transition_after_redirect(
-        &shared,
-        channel_id,
-        (None, false, old_cwd.clone()),
-    )
-    .await;
-    assert!(
-        busy_transition.is_err(),
-        "production intake must defer immediately while resume holds the lock"
-    );
-    drop(resume_guard);
-
-    let outcome = resume.await.unwrap().expect("production resume succeeds");
+        // Poll resume into its critical section without queuing another lock waiter.
+        assert!(futures::poll!(resume.as_mut()).is_pending());
+        let busy_transition =
+            crate::services::discord::try_intake_runtime_transition_after_redirect(
+                &shared,
+                channel_id,
+                (None, false, old_cwd.clone()),
+            )
+            .await;
+        assert!(
+            busy_transition.is_err(),
+            "production intake must defer immediately while resume holds the lock"
+        );
+        resume.await.expect("production resume succeeds")
+    };
     assert!(outcome.in_memory_rebound);
     #[cfg(unix)]
     {
