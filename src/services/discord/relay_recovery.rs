@@ -56,8 +56,7 @@ mod auto_heal_attempts;
 mod auto_heal_confirm;
 #[path = "relay_recovery_circuit_breaker.rs"]
 mod circuit_breaker;
-#[path = "relay_recovery_circuit_evidence.rs"]
-pub(in crate::services::discord) mod circuit_evidence;
+pub(in crate::services::discord) use super::inflight::relay_circuit_evidence as circuit_evidence;
 #[path = "relay_recovery_completion_footer.rs"]
 mod completion_footer;
 mod decision;

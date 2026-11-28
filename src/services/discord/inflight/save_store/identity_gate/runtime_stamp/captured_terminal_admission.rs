@@ -235,7 +235,7 @@ impl CapturedTerminalAdmission {
                 proof.identity = range.identity.clone();
                 Box::new(proof)
             });
-            crate::services::discord::tui_prompt_relay::preserve_admitted_source(
+            crate::services::discord::inflight::synthetic_claim::preserve_admitted_source(
                 &before_admission,
                 baseline,
                 &captured,

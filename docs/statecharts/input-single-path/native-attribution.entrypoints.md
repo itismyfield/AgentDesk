@@ -118,7 +118,7 @@ main `984d802d9f`에서 아래 4개 시험 파일이 삭제됐다. 이 파일의
 | `src/services/discord/tui_prompt_relay/synthetic_start/bridge_handoff.rs:196` | `admit_kinded` | Inject(배타 lease claim) |
 | `src/services/discord/tui_prompt_relay/synthetic_start/bridge_handoff.rs:201` | `admit_kinded` | BootRestore / Reconstruct |
 | `src/services/discord/tui_prompt_relay/synthetic_start/bridge_handoff.rs:374` | `release_unrecorded_actor` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
-| `src/services/discord/tui_prompt_relay/synthetic_start/bridge_handoff.rs:888` | `capture_dormant` | Inject(배타 lease claim) |
+| `src/services/discord/tui_prompt_relay/synthetic_start/bridge_handoff.rs` | `capture_dormant` | Inject(배타 lease claim) |
 | `src/services/discord/turn_bridge/finalize_epilogue.rs:156` | `finalize_and_drain_queued_turns` | BootRestore / Reconstruct |
 | `src/services/discord/turn_bridge/mod.rs:521` | `spawn_turn_bridge_with_pin` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |
 | `src/services/discord/turn_finalizer/cleanup/already_finalized.rs:55` | `already_finalized_active_state` | Settle / AdjacentEnd(nonce/actor 조건은 본문 표) |

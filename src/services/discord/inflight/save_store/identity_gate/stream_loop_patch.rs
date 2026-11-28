@@ -403,7 +403,7 @@ fn save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
             // #5981: this write can be the first to land the native SID on the
             // durable row. Carry the allocation witness with it so the dormant
             // claim still recognizes the episode after a lost source.
-            crate::services::discord::tui_prompt_relay::preserve_stamped_source(
+            crate::services::discord::inflight::synthetic_claim::preserve_stamped_source(
                 &before_tick,
                 &persisted,
             );

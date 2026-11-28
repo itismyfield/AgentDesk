@@ -7,7 +7,7 @@ use super::*;
 use crate::services::agent_protocol::TaskNotificationKind;
 
 mod circuit_evidence;
-use crate::services::discord::relay_recovery::circuit_evidence::CircuitPendingEvidence;
+use super::relay_circuit_evidence::CircuitPendingEvidence;
 use circuit_evidence::mix_finalizer_hash;
 mod identity;
 mod legacy_replay_coordinate;

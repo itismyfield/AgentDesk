@@ -258,7 +258,7 @@ token 등록(`mailbox_try_start_turn*`, `try_start_turn_with_stale_busy_heal`, `
 |---|---|---|---|---|---|
 | 1 | router/turn_start.rs:142-179 `claim_reserved_headless_turn` | token | `acquire`(:151) | 예 | 이미 배제 |
 | 2 | intake_turn.rs:663 → 1011 사람 intake(`try_start_turn_with_stale_busy_heal`, message_handler.rs:110-150) | token | intake guard | 예 | 이미 배제, recovery는 borrow |
-| 3 | tui_prompt_relay/synthetic_start/claim/admitted.rs:279 → tui_direct_pending_start/state.rs:403, bridge_handoff.rs:889 | inflight·token | AdmissionFence lease(admission_fence.rs:40-44) | 예 | 이미 배제 |
+| 3 | tui_prompt_relay/synthetic_start/claim/admitted.rs:279 → tui_direct_pending_start/state.rs:403, bridge_handoff.rs `capture_dormant` | inflight·token | AdmissionFence lease(admission_fence.rs:40-44) | 예 | 이미 배제 |
 | 4 | recovery_engine/runtime.rs:189-386 `reregister_active_turn_from_inflight(_under_episode_guard)` | token | 없음 | caller별: (a) 부팅 inflight 복원 restore_inflight.rs:793·1962(`restore_inflight_states`, 아래 #11의 부팅 barrier 안), (b) 운영자 rebind의 episode handoff manual_rebind/episode_handoff.rs:97(`LockedInflightEpisode`를 쥐고, 살아 있는 tmux 세션 확인이 먼저), (c) runtime.rs:885는 시험 | 모두 기존 inflight 행을 전제로 하므로 ③ inflight 판독이 먼저 막는다 |
 | 5 | provider_isolation.rs:278 `save_intake_inflight` | inflight | (#2 뒤) | token 등록 뒤 | ③ token 판독이 먼저 막음 |
 | 6 | foreign_row.rs:47, headless_turn/replay_start.rs:73, headless_turn.rs:1015 | inflight | (#1 뒤) | token 등록 뒤 | ③ token 판독이 먼저 막음 |

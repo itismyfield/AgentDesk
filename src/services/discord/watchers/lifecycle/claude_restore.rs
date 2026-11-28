@@ -12,12 +12,10 @@ pub(crate) fn claude_tui_transcript_fallback_path(
     if *provider != crate::services::provider::ProviderKind::Claude {
         return None;
     }
-    let scan_context = claude_tui_restore_scan_context(tmux_session_name, restored_cwd, workspace)?;
+    let scan_context =
+        claude_tui_restore_scan_context(tmux_session_name, restored_cwd, workspace, shared)?;
     let mut claimed_by_other_sessions =
-        super::super::super::tui_prompt_relay::other_session_claimed_transcripts(
-            shared,
-            tmux_session_name,
-        );
+        (shared.router_ports.other_session_claimed_claude_transcripts)(shared, tmux_session_name);
     claimed_by_other_sessions.extend(restore_claimed_transcripts.iter().cloned());
     claude_tui_transcript_fallback_path_for_context(
         provider,
@@ -38,9 +36,9 @@ fn claude_tui_restore_scan_context(
     tmux_session_name: &str,
     restored_cwd: Option<&str>,
     workspace: Option<&str>,
+    shared: &SharedData,
 ) -> Option<ClaudeTuiRestoreScanContext> {
-    let launch_context =
-        super::super::super::tui_prompt_relay::claude_tui_launch_context(tmux_session_name);
+    let launch_context = (shared.router_ports.claude_tui_launch_context)(tmux_session_name);
     let fallback_modified_since = if launch_context.is_none() {
         claude_tui_restore_fallback_modified_since(tmux_session_name)
     } else {

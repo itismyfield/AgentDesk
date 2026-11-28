@@ -4,6 +4,71 @@
 use super::*;
 use serde_json::{Value, json};
 
+#[cfg(unix)]
+use std::collections::BTreeMap;
+
+#[cfg(unix)]
+use super::relay_circuit_evidence::{
+    CircuitCoordinateBinding, CircuitDeliveryEvidence, CircuitEvidenceOrigin,
+    CircuitSourceDescriptor, episode_key,
+};
+
+#[cfg(unix)]
+impl CircuitEvidenceOrigin {
+    fn capture(
+        state: &InflightTurnState,
+        source: CircuitSourceDescriptor,
+        delivery_authority: &str,
+        open_obligation_id: Option<i64>,
+    ) -> Self {
+        Self {
+            episode_key: episode_key(state),
+            provider: state.provider.clone(),
+            channel_id: state.channel_id,
+            offset_authority_channel_id: state.delivery_record_owner_channel_id(),
+            open_obligation_id,
+            open_baseline: None,
+            open_generation: None,
+            open_reason: None,
+            admission_id: Some(uuid::Uuid::new_v4()),
+            source,
+            delivery_authority: delivery_authority.into(),
+            binding: CircuitCoordinateBinding::Unresolved,
+            extra: BTreeMap::new(),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl CircuitDeliveryEvidence {
+    fn from_success(
+        origin: CircuitEvidenceOrigin,
+        range: (u64, u64),
+        producer: &str,
+        confirmed_at: String,
+    ) -> Option<Self> {
+        if range.1 <= range.0 {
+            return None;
+        }
+        let admission = origin.admission_id?;
+        let mut identity = blake3::Hasher::new();
+        identity.update(admission.as_bytes());
+        identity.update(&range.0.to_be_bytes());
+        identity.update(&range.1.to_be_bytes());
+        identity.update(producer.as_bytes());
+        Some(Self {
+            version: 1,
+            evidence_id: identity.finalize().to_hex().to_string(),
+            origin,
+            range_start: range.0,
+            confirmed_end_exclusive: range.1,
+            producer: producer.into(),
+            confirmed_at: Some(confirmed_at),
+            extra: BTreeMap::new(),
+        })
+    }
+}
+
 pub(crate) fn seed(root: &Path, channel: u64) -> (InflightTurnState, Value) {
     let mut row = InflightTurnState::new(
         ProviderKind::Claude,
@@ -223,10 +288,6 @@ fn alpha_unknown_evidence_version_preserved() {
 #[cfg(unix)]
 #[test]
 fn alpha_origin_and_range_survive_path_reuse() {
-    use crate::services::discord::relay_recovery::circuit_evidence::{
-        CircuitCoordinateBinding, CircuitDeliveryEvidence, CircuitEvidenceOrigin,
-        CircuitSourceDescriptor,
-    };
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("runtime/discord_inflight");
     let (mut row, seed) = seed(&root, 57159);
@@ -276,13 +337,10 @@ fn alpha_origin_and_range_survive_path_reuse() {
     row.current_msg_id = 44;
     fs::write(&output, "").unwrap();
     fs::write(&output, "replacement output").unwrap();
-    assert_ne!(
-        crate::services::discord::relay_recovery::circuit_evidence::episode_key(&row),
-        original_key
-    );
+    assert_ne!(episode_key(&row), original_key);
     let runtime = root.parent().unwrap();
-    crate::services::discord::relay_recovery::circuit_evidence::handoff(runtime, &proof).unwrap();
-    crate::services::discord::relay_recovery::circuit_evidence::handoff(runtime, &proof).unwrap();
+    relay_circuit_evidence::handoff(runtime, &proof).unwrap();
+    relay_circuit_evidence::handoff(runtime, &proof).unwrap();
     let directory = runtime.join("discord_circuit_evidence/claude/57159");
     let files: Vec<_> = fs::read_dir(directory)
         .unwrap()

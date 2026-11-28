@@ -15,7 +15,6 @@ use crate::db::dispatched_sessions::hosted_execution::{
 use crate::services::discord::herdr_terminate::root_replaced::{
     self, Recovery, RootReplacedCandidate, missing_marker,
 };
-use crate::services::discord::tui_prompt_relay::herdr_source::attach_restarted_herdr_source;
 use crate::services::provider::ProviderKind;
 use crate::services::session_host::HerdrExecutionMatch;
 use crate::services::session_host::NoHerdrEndpoint;
@@ -447,7 +446,7 @@ fn reconnect_unless_pending(
         }
         #[cfg(test)]
         ATTACHES.with(|attaches| attaches.set(attaches.get() + 1));
-        let attached = reconnect(pool, record).await;
+        let attached = reconnect(shared, pool, record).await;
         if matches!(attached, HerdrSourceAttach::Refused(HostReconcile::Missing)) {
             use crate::services::herdr_launch::retire::{self, Scope};
             return match retire::observed(pool, row, Scope::Missing).await {
@@ -472,13 +471,18 @@ fn reconnect_unless_pending(
     })
 }
 
-async fn reconnect(pool: &PgPool, record: &HostedExecution) -> HerdrSourceAttach {
+async fn reconnect(
+    shared: &crate::services::discord::SharedData,
+    pool: &PgPool,
+    record: &HostedExecution,
+) -> HerdrSourceAttach {
     let Ok(channel) = record.owner.channel_id.parse::<u64>() else {
         return HerdrSourceAttach::Refused(HostReconcile::Unresolved("channel id".into()));
     };
+    let attach = shared.router_ports.attach_restarted_herdr_source;
     let attached = match SocketHerdrReader::of(record) {
-        Some(reader) => attach_restarted_herdr_source(pool, &record.owner, channel, &reader).await,
-        None => attach_restarted_herdr_source(pool, &record.owner, channel, &NoHerdrEndpoint).await,
+        Some(reader) => attach(pool, &record.owner, channel, &reader).await,
+        None => attach(pool, &record.owner, channel, &NoHerdrEndpoint).await,
     };
     tracing::info!(channel, ?attached, "herdr reconnect after restart");
     attached

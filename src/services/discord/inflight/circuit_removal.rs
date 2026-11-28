@@ -1,3 +1,4 @@
+use super::relay_circuit_evidence;
 use super::*;
 
 pub(super) trait CircuitDiscardGuard {
@@ -26,7 +27,7 @@ pub(super) fn handoff_before_discard_locked(
     let Some(pending) = value.get("pending_circuit_evidence") else {
         return Ok(());
     };
-    let pending: Vec<super::super::relay_recovery::circuit_evidence::CircuitDeliveryEvidence> =
+    let pending: Vec<relay_circuit_evidence::CircuitDeliveryEvidence> =
         serde_json::from_value(pending.clone()).map_err(|error| error.to_string())?;
     let runtime = path
         .parent()
@@ -34,7 +35,7 @@ pub(super) fn handoff_before_discard_locked(
         .and_then(Path::parent)
         .ok_or("inflight path lacks runtime root")?;
     for evidence in &pending {
-        super::super::relay_recovery::circuit_evidence::handoff(runtime, evidence)?;
+        relay_circuit_evidence::handoff(runtime, evidence)?;
     }
     Ok(())
 }

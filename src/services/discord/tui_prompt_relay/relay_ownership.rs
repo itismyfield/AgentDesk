@@ -6,53 +6,10 @@ pub(super) enum RelayEmissionKind {
     ObservedPrompt,
 }
 
-pub(super) struct TuiDirectExternalInputLeaseGuard {
-    provider: ProviderKind,
-    tmux_session_name: String,
-    channel_id: ChannelId,
-    lease: ExternalInputRelayLease,
-    active: bool,
-}
-
-impl TuiDirectExternalInputLeaseGuard {
-    pub(super) fn new(
-        provider: ProviderKind,
-        tmux_session_name: &str,
-        channel_id: ChannelId,
-        lease: &ExternalInputRelayLease,
-    ) -> Self {
-        Self {
-            provider,
-            tmux_session_name: tmux_session_name.to_string(),
-            channel_id,
-            lease: lease.clone(),
-            active: true,
-        }
-    }
-
-    pub(super) fn disarm(&mut self) {
-        self.active = false;
-    }
-
-    fn clear_if_current(&self) -> bool {
-        clear_external_input_bridge_lease_if_current(
-            &self.provider,
-            &self.tmux_session_name,
-            self.channel_id,
-            &self.lease,
-        )
-    }
-}
-
-impl Drop for TuiDirectExternalInputLeaseGuard {
-    fn drop(&mut self) {
-        // Match the exact lease so a slow timeout cannot clear a newer direct-input turn
-        // that reused the same provider/session/channel after this tail started.
-        if self.active {
-            self.clear_if_current();
-        }
-    }
-}
+pub(super) use super::super::inflight::synthetic_claim::{
+    TuiDirectExternalInputLeaseGuard, bridge_adapter_owns_external_turn,
+    clear_external_input_bridge_lease_if_current,
+};
 
 /// Early-return RAII guard for [`relay_observed_prompt`]: armed right after
 /// [`record_observed_external_turn_lease`] records & stores a (possibly
@@ -126,23 +83,6 @@ impl Drop for TuiDirectObservedLeaseEarlyReturnGuard {
             self.generation,
         );
     }
-}
-
-pub(super) fn clear_external_input_bridge_lease_if_current(
-    provider: &ProviderKind,
-    tmux_session_name: &str,
-    channel_id: ChannelId,
-    lease: &ExternalInputRelayLease,
-) -> bool {
-    if !bridge_adapter_owns_external_turn(lease.relay_owner) {
-        return false;
-    }
-    crate::services::tui_prompt_dedupe::clear_external_input_relay_lease_if_matches(
-        provider.as_str(),
-        tmux_session_name,
-        channel_id.get(),
-        lease,
-    )
 }
 
 pub(super) fn record_observed_external_turn_lease(
@@ -546,10 +486,6 @@ pub(super) fn external_input_relay_owner_for_watchers(
     } else {
         ExternalInputRelayOwner::TmuxWatcher
     }
-}
-
-pub(super) fn bridge_adapter_owns_external_turn(owner: ExternalInputRelayOwner) -> bool {
-    matches!(owner, ExternalInputRelayOwner::BridgeAdapter)
 }
 
 /// #3154 P1-3 no-relay-GAP guard: may the OBSERVER loop spawn its own BridgeAdapter
