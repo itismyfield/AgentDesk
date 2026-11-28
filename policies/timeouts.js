@@ -80,7 +80,11 @@ timeouts.onTick5min = function(ev) {
   if (runSection("kv_ttl", function() {
     agentdesk.db.execute("DELETE FROM kv_meta WHERE expires_at IS NOT NULL AND expires_at < datetime('now')");
   }) || runSection("B", timeouts._section_B) || runSection("G", timeouts._section_G) ||
-      runSection("O", function() { return (idleSettled = timeouts._section_O()); })) {
+      runSection("O", function() {
+        var handledDeadline = timeouts._section_O();
+        idleSettled = true;
+        return handledDeadline;
+      })) {
     if (!idleSettled) timeouts._logIdleKillDeadline();
   }
   agentdesk.log.debug("[tick5min] total " + (Date.now() - start) + "ms");
