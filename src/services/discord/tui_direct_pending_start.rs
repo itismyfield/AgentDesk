@@ -33,9 +33,12 @@
 //!    The provider prompt is NEVER resubmitted.
 
 use super::SharedData;
+use crate::services::maintenance::runtime_retention;
+use crate::services::provider::ProviderKind;
 use crate::services::tui_prompt_dedupe::{TuiPromptAnchor, clear_prompt_anchor_for_response};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
+use std::{fs, io, path::Path};
 
 /// Request owner id stamped on TUI-direct synthetic turn rows in place of a Discord user.
 pub(in crate::services::discord) const TUI_DIRECT_SYNTHETIC_OWNER_USER_ID: u64 = 1;
@@ -78,6 +81,47 @@ use state::{
     stale_foreign_cancel_finalize_context, stale_foreign_inflight_is_reclaimable_at,
     stale_foreign_probe, take_retired, update_claim_attempt_count,
 };
+
+pub(super) fn holds_for_retention(
+    provider: &ProviderKind,
+    channel: u64,
+    anchor: Option<u64>,
+) -> io::Result<bool> {
+    let root = state::root().ok_or_else(|| io::Error::other("pending-start root unavailable"))?;
+    let provider = provider.as_str();
+    let prefix = format!("{provider}_{channel}_");
+    let checked = |path: &Path| {
+        runtime_retention::checked_owner_file(path, |record: &TuiDirectPendingStart| {
+            record.provider == provider
+                && record.channel_id == channel
+                && path.file_name().is_some_and(|name| {
+                    name == format!("{prefix}{}.json", record.anchor_message_id).as_str()
+                })
+        })
+    };
+    if let Some(anchor) = anchor {
+        return checked(&root.join(format!("{prefix}{anchor}.json")));
+    }
+
+    // An episode without an anchor ID can only be checked at channel scope.
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(&prefix) && name.ends_with(".json"))
+            && checked(&entry.path())?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
 
 #[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

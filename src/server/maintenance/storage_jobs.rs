@@ -206,11 +206,7 @@ impl MaintenanceJob for MemoryMementoConsolidationJob {
     fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
         Box::pin(async move {
             let _ = pool;
-            crate::services::maintenance::jobs::memento_consolidation::run(
-                crate::services::maintenance::jobs::memento_consolidation::Config::default_runtime(
-                ),
-            )
-            .await
+            crate::services::maintenance::jobs::memento_consolidation::run().await
         })
     }
 }

@@ -17,7 +17,6 @@ pub(crate) mod herdr;
 pub(crate) mod init;
 pub(crate) mod intake_outbox;
 pub(crate) mod json_output;
-pub(crate) mod migrate;
 pub(crate) mod monitoring;
 pub(crate) mod o;
 pub(crate) mod provider_cli;

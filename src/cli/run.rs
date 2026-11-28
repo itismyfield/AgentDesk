@@ -6,10 +6,9 @@ use super::args::{
     CodexHookRelayArgs, CodexTmuxWrapperArgs, Commands, ConfigAction, DcserverArgs, DiagArgs,
     DiscordSenddmArgs, DiscordSendfileArgs, DiscordSendmessageArgs, DispatchAction, DocsArgs,
     DoctorArgs, DoctorProfileArg, ForceKillArgs, GithubSyncArgs, IntakeOutboxAction, IsmcptoolArgs,
-    MigrateAction, MonitoringAction, PhaseAction, PhaseArgs, QueryAction, QueryArgs,
-    QwenTmuxWrapperArgs, ReportProvider, RestartDcserverArgs, ResumeArgs, ReviewDecisionArgs,
-    ReviewRecoverTargetArgs, ReviewVerdictArgs, SendArgs, SendToAgentArgs, ShowAction,
-    TerminationsArgs, TmuxWrapperArgs,
+    MonitoringAction, PhaseAction, PhaseArgs, QueryAction, QueryArgs, QwenTmuxWrapperArgs,
+    ReportProvider, RestartDcserverArgs, ResumeArgs, ReviewDecisionArgs, ReviewRecoverTargetArgs,
+    ReviewVerdictArgs, SendArgs, SendToAgentArgs, ShowAction, TerminationsArgs, TmuxWrapperArgs,
 };
 use crate::domain::agent_handoff::AgentHandoffChannelKind;
 
@@ -117,7 +116,6 @@ fn command_supports_json(command: &Commands) -> bool {
         | Commands::Ismcptool(_)
         | Commands::Addmcptool(_)
         | Commands::Deploy
-        | Commands::Migrate { .. }
         | Commands::ReleaseMigratePostgres
         | Commands::Herdr(..)
         | Commands::Show { .. } => false,
@@ -702,9 +700,6 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
                 exit_for_cli(super::doctor::cmd_doctor(options))
             }
         }
-        Commands::Migrate { action } => exit_for_cli(match action {
-            MigrateAction::Openclaw(args) => super::migrate::cmd_migrate_openclaw(args),
-        }),
         Commands::ReleaseMigratePostgres => exit_for_cli(super::direct::run_async(
             super::direct::cmd_release_migrate_postgres(),
         )),
