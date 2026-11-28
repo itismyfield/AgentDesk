@@ -84,12 +84,6 @@ impl ChannelMailboxRegistry {
         attempts
     }
 
-    pub(crate) fn remove_fixture_for_test(&self, channel: ChannelId) {
-        if let Some((_, handle)) = self.handles.remove(&channel) {
-            GLOBAL_CHANNEL_MAILBOXES.remove_if(&channel, |_, h| h.same_actor(&handle));
-        }
-    }
-
     pub(crate) fn insert_unreachable_for_test(&self, channel_id: ChannelId) {
         let handle = closed_handle();
         self.handles.insert(channel_id, handle.clone());

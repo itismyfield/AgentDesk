@@ -894,6 +894,9 @@ mod claim {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod root_test_support;
+
 #[cfg(test)]
 #[path = "queued_head_tests.rs"]
 mod tests;

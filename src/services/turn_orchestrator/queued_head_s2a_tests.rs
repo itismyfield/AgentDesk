@@ -1,79 +1,7 @@
+use super::root_test_support::{
+    GENERATION, TOKEN, bytes, ctx, human, path, queue, reserve, root, run,
+};
 use super::*;
-use crate::services::turn_orchestrator::test_support::lock_test_env;
-
-const TOKEN: &str = "queued-head-s2a";
-const GENERATION: u64 = 5;
-
-struct Root {
-    _dir: tempfile::TempDir,
-    previous: Option<std::ffi::OsString>,
-    _lock: std::sync::MutexGuard<'static, ()>,
-}
-
-impl Drop for Root {
-    fn drop(&mut self) {
-        unsafe {
-            match &self.previous {
-                Some(previous) => std::env::set_var("AGENTDESK_ROOT_DIR", previous),
-                None => std::env::remove_var("AGENTDESK_ROOT_DIR"),
-            }
-        }
-    }
-}
-
-fn root() -> Root {
-    let lock = lock_test_env();
-    let dir = tempfile::tempdir().unwrap();
-    let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
-    unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", dir.path()) };
-    Root {
-        _dir: dir,
-        previous,
-        _lock: lock,
-    }
-}
-
-fn run(work: impl std::future::Future<Output = ()>) {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(work);
-}
-
-fn ctx() -> QueuePersistenceContext {
-    QueuePersistenceContext::new(&ProviderKind::Claude, TOKEN, None)
-}
-
-fn human(id: u64, author: u64, text: &str) -> Intervention {
-    Intervention {
-        author_id: UserId::new(author),
-        author_is_bot: false,
-        message_id: MessageId::new(id),
-        queued_generation: GENERATION,
-        source_message_ids: vec![MessageId::new(id)],
-        source_message_queued_generations: vec![SourceMessageQueuedGeneration::user_instruction(
-            MessageId::new(id),
-            GENERATION,
-        )],
-        source_text_segments: Vec::new(),
-        text: text.into(),
-        mode: InterventionMode::Soft,
-        created_at: Instant::now(),
-        reply_context: None,
-        has_reply_boundary: false,
-        merge_consecutive: true,
-        pending_uploads: Vec::new(),
-    }
-}
-
-fn path(channel: ChannelId) -> std::path::PathBuf {
-    pending_queue_file_path(&ProviderKind::Claude, TOKEN, channel).unwrap()
-}
-
-fn bytes(channel: ChannelId) -> Vec<u8> {
-    std::fs::read(path(channel)).unwrap()
-}
 
 fn disk(channel: ChannelId) -> serde_json::Value {
     serde_json::from_slice(&bytes(channel)).unwrap()
@@ -88,16 +16,6 @@ fn payloads(mut items: serde_json::Value) -> serde_json::Value {
     items
 }
 
-async fn reserve(handle: &ChannelMailboxHandle, head: &Intervention) -> HeadTicket {
-    match handle
-        .claim_queued_head(QueueIdentity::of(head), ctx())
-        .await
-    {
-        QueuedHeadClaim::Reserved(ticket) => ticket,
-        _ => panic!("expected durable head reservation"),
-    }
-}
-
 async fn may_have_sent(handle: &ChannelMailboxHandle, ticket: HeadTicket) -> HeadTicket {
     match handle
         .settle_queued_head(ticket, HeadOutcome::MayHaveSent, ctx())
@@ -106,16 +24,6 @@ async fn may_have_sent(handle: &ChannelMailboxHandle, ticket: HeadTicket) -> Hea
         HeadSettle::Committed(Some(ticket)) => ticket,
         _ => panic!("expected durable MayHaveSent"),
     }
-}
-
-async fn queue(handle: &ChannelMailboxHandle) -> Vec<(u64, String)> {
-    handle
-        .snapshot()
-        .await
-        .intervention_queue
-        .into_iter()
-        .map(|item| (item.message_id.get(), item.text))
-        .collect()
 }
 
 #[test]
@@ -595,108 +503,6 @@ fn s2a_changed_metadata_refuses_a_queue_write_and_a_clear_replaces_it() {
             written["terminal_identities"],
             changed["terminal_identities"]
         );
-    });
-}
-
-#[test]
-fn s2a_force_purge_refusal_does_not_finalize_a_cancelled_holder() {
-    let _root = root();
-    run(async {
-        let channel = ChannelId::new(6_813_281);
-        let handle = ChannelMailboxRegistry::default().handle(channel);
-        let token = Arc::new(CancelToken::new());
-        handle
-            .restore_active_turn(token.clone(), UserId::new(9), MessageId::new(901))
-            .await;
-        let head = human(281, 7, "H");
-        assert!(handle.enqueue(head.clone(), ctx()).await.enqueued);
-        let ticket = reserve(&handle, &head).await;
-        assert!(matches!(
-            handle
-                .settle_queued_head(ticket, HeadOutcome::Unconfirmed, ctx())
-                .await,
-            HeadSettle::Unknown
-        ));
-        assert!(handle.enqueue(human(282, 8, "B"), ctx()).await.enqueued);
-        token.cancelled.store(true, Ordering::Relaxed);
-        let before = bytes(channel);
-        let target = crate::services::turn_lifecycle::TurnLifecycleTarget {
-            provider: Some(ProviderKind::Claude),
-            channel_id: Some(channel),
-            tmux_name: String::new(),
-        };
-        let key = format!("claude/{TOKEN}/test:inactive-fixture");
-        assert!(
-            crate::services::queue::force_purge_channel_mailbox(
-                None::<&std::sync::Arc<crate::services::discord::health::HealthRegistry>>,
-                &target,
-                Some(&key)
-            )
-            .await
-            .is_none()
-        );
-        assert_eq!(bytes(channel), before);
-        assert_eq!(queue(&handle).await, [(281, "H".into()), (282, "B".into())]);
-        assert!(Arc::ptr_eq(
-            handle.snapshot().await.cancel_token.as_ref().unwrap(),
-            &token
-        ));
-    });
-}
-
-#[test]
-fn s2a_actorless_purge_preserves_valid_unknown_and_terminal_namespaces() {
-    let _root = root();
-    run(async {
-        let channel = ChannelId::new(6_813_291);
-        let registry = ChannelMailboxRegistry::default();
-        let handle = registry.handle(channel);
-        let head = human(291, 7, "H");
-        assert!(handle.enqueue(head.clone(), ctx()).await.enqueued);
-        let ticket = reserve(&handle, &head).await;
-        assert!(matches!(
-            handle
-                .settle_queued_head(ticket, HeadOutcome::Unconfirmed, ctx())
-                .await,
-            HeadSettle::Unknown
-        ));
-        let unknown = bytes(channel);
-        let terminal = serde_json::to_vec(&serde_json::json!({
-            "version": 1, "items": [], "terminal_identities": [QueueIdentity::of(&head)],
-        }))
-        .unwrap();
-        let base = path(channel).parent().unwrap().parent().unwrap().to_owned();
-        let file = |token: &str| base.join(token).join(format!("{}.json", channel.get()));
-        let fixtures: [(&str, &[u8]); 4] = [
-            ("terminal", &terminal),
-            ("broken", b"[{"),
-            ("torn", b"{\"version\":1,\"items\":["),
-            ("legacy", b"[]"),
-        ];
-        for (token, body) in fixtures {
-            std::fs::create_dir_all(file(token).parent().unwrap()).unwrap();
-            std::fs::write(file(token), body).unwrap();
-        }
-        registry.remove_fixture_for_test(channel);
-        assert!(ChannelMailboxRegistry::global_handle(channel).is_none());
-        let target = crate::services::turn_lifecycle::TurnLifecycleTarget {
-            provider: Some(ProviderKind::Claude),
-            channel_id: Some(channel),
-            tmux_name: String::new(),
-        };
-        let purged = crate::services::queue::force_purge_channel_mailbox(
-            None::<&std::sync::Arc<crate::services::discord::health::HealthRegistry>>,
-            &target,
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(purged.disk_files_removed, 1);
-        assert_eq!(bytes(channel), unknown);
-        for (token, body) in fixtures.into_iter().filter(|(token, _)| *token != "legacy") {
-            assert_eq!(std::fs::read(file(token)).unwrap(), body);
-        }
-        assert!(!file("legacy").exists());
     });
 }
 

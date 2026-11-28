@@ -13,14 +13,15 @@ mod inflight_episode;
 #[cfg(test)]
 pub(crate) mod owner_boundary_tests;
 mod policy_maintenance;
+#[cfg(any(test, feature = "test-support"))]
 mod test_barriers;
 pub(crate) use inflight_episode::{
     InflightEpisodeIdentity, InflightEpisodeLookup, InflightEpisodeProbe,
 };
 pub(crate) use policy_maintenance::{PolicyMaintenanceIo, maintain_policy_sessions};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use test_barriers::await_stale_sweep_apply_barrier;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use test_barriers::{
     StaleSweepApplyBarrier, StaleSweepApplyBarrierPoint, install_stale_sweep_apply_barrier,
 };
@@ -463,8 +464,8 @@ where
         return Ok(CandidateApplyOutcome::Unchanged);
     }
 
-    #[cfg(test)]
-    await_stale_sweep_apply_barrier().await;
+    #[cfg(any(test, feature = "test-support"))]
+    await_stale_sweep_apply_barrier(&candidate.session_key).await;
 
     // Both external authorities are re-read here, immediately before the
     // destructive UPDATE. This path's candidate qualification already required
@@ -631,8 +632,8 @@ where
             continue;
         }
 
-        #[cfg(test)]
-        await_stale_sweep_apply_barrier().await;
+        #[cfg(any(test, feature = "test-support"))]
+        await_stale_sweep_apply_barrier(&candidate.session_key).await;
 
         // The correction this slice lands: this shared path used to read no
         // inflight record at all, on any of the three entry points that reach
@@ -1092,7 +1093,8 @@ mod tests {
         .await;
 
         let (barrier, reached, resume) = apply_barrier();
-        let guard = install_stale_sweep_apply_barrier(barrier);
+        let guard = install_stale_sweep_apply_barrier(key, barrier);
+        within_deadline(await_stale_sweep_apply_barrier("remote-host:unrelated")).await;
         let task_pool = pool.clone();
         let task = tokio::spawn(async move {
             reconcile_stale_turn_by_key_with_probes_pg(
@@ -1142,7 +1144,7 @@ mod tests {
         seed_session(&pool, key, "turn_active", None, 30).await;
 
         let (barrier, reached, resume) = apply_barrier();
-        let _guard = install_stale_sweep_apply_barrier(barrier);
+        let _guard = install_stale_sweep_apply_barrier(key, barrier);
         let task_pool = pool.clone();
         let task = tokio::spawn(async move {
             reconcile_stale_turn_by_key_with_probes_pg(
@@ -1215,7 +1217,7 @@ mod tests {
         crate::logging::test_capture::pin_callsite_interest();
         let _subscriber = tracing::subscriber::set_default(subscriber);
         let (barrier, reached, resume) = apply_barrier();
-        let _guard = install_stale_sweep_apply_barrier(barrier);
+        let _guard = install_stale_sweep_apply_barrier(key, barrier);
         let task_pool = pool.clone();
         let task = tokio::spawn(async move {
             reconcile_stale_turns_matching_with_warrant_pg(
@@ -1277,7 +1279,7 @@ mod tests {
                 .unwrap();
 
         let (barrier, reached, resume) = apply_barrier();
-        let _guard = install_stale_sweep_apply_barrier(barrier);
+        let _guard = install_stale_sweep_apply_barrier(key, barrier);
         let task_pool = pool.clone();
         let task = tokio::spawn(async move {
             reconcile_stale_turn_by_key_with_probes_pg(

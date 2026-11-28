@@ -1,4 +1,6 @@
 mod persistent_target;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 use anyhow::{Result, anyhow};
 use futures::future::BoxFuture;
 #[cfg(any(test, feature = "test-support"))]
@@ -709,9 +711,9 @@ pub fn provider_clear_behavior(provider: &ProviderKind) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use super::test_support::routine_with_thread;
     use super::*;
     use crate::services::discord::health::routine_ports::build_routine_session_controller;
-    use chrono::Utc;
     use serde_json::json;
 
     async fn routine_truth_result(remote: bool) {
@@ -755,76 +757,9 @@ mod tests {
         routine_truth_result(false).await;
     }
 
-    #[cfg(unix)]
-    #[tokio::test(flavor = "current_thread")]
-    async fn routine_actual_reset_rechecks_pin_after_legacy_verdict_pg() {
-        let fixture =
-            crate::services::auto_queue::runtime::verified_reset_pg_tests::Fixture::new(6_845_123);
-        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
-        let pool = db.connect_and_migrate().await;
-        sqlx::query("INSERT INTO agents (id, name, provider, discord_channel_cdx) VALUES ('agent-1', 'verified routine reset', 'codex', $1)")
-            .bind(fixture.channel.get().to_string()).execute(&pool).await.unwrap();
-        let (shared, registry, key) = fixture.shared(&pool).await;
-        let queue = fixture.queue_bytes(&shared);
-        let pin = fixture.pin_after_legacy_verdict();
-        let controller = build_routine_session_controller(Arc::new(pool.clone()), None);
-        let channel = fixture.channel.get().to_string();
-        let routine = routine_with_thread("persistent", Some(&channel));
-        seed_started_control_session(&pool, &routine, "codex", &channel, &key).await;
-        let actual = controller
-            .control_persistent_session(
-                &routine,
-                RoutineSessionCommand::Reset,
-                "verified pin race",
-                Some(registry.as_ref()),
-            )
-            .await
-            .unwrap();
-        assert_eq!(actual.lifecycle_path, "runtime-clear-refused");
-        assert!(!actual.runtime_cleared);
-        assert!(!actual.tmux_killed);
-        assert!(!actual.inflight_cleared);
-        assert_eq!(actual.disconnected_sessions, 0);
-        assert_eq!(
-            pin.load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "host approval precedes pin and apply"
-        );
-        fixture.assert_unchanged(&shared, &queue).await;
-        pool.close().await;
-        db.drop().await;
-    }
-
     #[tokio::test]
     async fn queue_truth_routine_remote_teardown_reports_unknown_pg() {
         routine_truth_result(true).await;
-    }
-
-    fn routine_with_thread(
-        execution_strategy: &str,
-        discord_thread_id: Option<&str>,
-    ) -> RoutineRecord {
-        RoutineRecord {
-            id: "routine-1".to_string(),
-            agent_id: Some("agent-1".to_string()),
-            fallback_agent_id: None,
-            max_retries: 0,
-            script_ref: "script".to_string(),
-            name: "Routine".to_string(),
-            status: "enabled".to_string(),
-            execution_strategy: execution_strategy.to_string(),
-            schedule: None,
-            next_due_at: None,
-            last_run_at: None,
-            last_result: None,
-            checkpoint: None,
-            discord_thread_id: discord_thread_id.map(ToOwned::to_owned),
-            timeout_secs: None,
-            in_flight_run_id: None,
-            pause_reason: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        }
     }
 
     #[test]

@@ -1,19 +1,24 @@
 use crate::config::TestEnvVarGuard;
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::services::auto_queue::runtime::clear_slot_threads_for_slot_pg;
 use crate::services::discord::SharedData;
 use crate::services::discord::admin_host_guard;
+use crate::services::discord::health::routine_ports::build_routine_session_controller;
 use crate::services::discord::health::{HealthRegistry, slot_row_host_refusal};
 use crate::services::provider::ProviderKind;
 use crate::services::provider_teardown::test_support::FakeTmux;
+use crate::services::routines::session_control::{
+    RoutineSessionCommand, seed_started_control_session, test_support::routine_with_thread,
+};
 use crate::services::tui_prompt_dedupe as dedupe;
 use poise::serenity_prelude::ChannelId;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-pub(crate) struct Fixture {
-    pub root: tempfile::TempDir,
-    pub tmux: String,
-    pub channel: ChannelId,
+struct Fixture {
+    root: tempfile::TempDir,
+    tmux: String,
+    channel: ChannelId,
     fake: FakeTmux,
     evidence: Vec<(std::path::PathBuf, Vec<u8>)>,
     pending_dispatch: std::cell::OnceCell<Vec<u8>>,
@@ -23,10 +28,11 @@ pub(crate) struct Fixture {
 }
 
 impl Fixture {
-    pub(crate) fn new(channel: u64) -> Self {
+    fn new(channel: u64) -> Self {
         let env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let dedupe_lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let (root, env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
+        let (root, env) =
+            dedupe::binding_context::test_support::fixture_after_shared_test_env_lock();
         dedupe::reset_state_for_tests();
         dedupe::binding_events::set_test_root(Some(root.path()));
         let tmux = format!(
@@ -71,10 +77,7 @@ impl Fixture {
         }
     }
 
-    pub(crate) async fn shared(
-        &self,
-        pool: &sqlx::PgPool,
-    ) -> (Arc<SharedData>, Arc<HealthRegistry>, String) {
+    async fn shared(&self, pool: &sqlx::PgPool) -> (Arc<SharedData>, Arc<HealthRegistry>, String) {
         let shared =
             crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
         shared.settings.write().await.provider = ProviderKind::Codex;
@@ -147,7 +150,7 @@ impl Fixture {
         (shared, registry, key)
     }
 
-    pub(crate) fn pin_after_legacy_verdict(&self) -> Arc<AtomicUsize> {
+    fn pin_after_legacy_verdict(&self) -> Arc<AtomicUsize> {
         let (name, root, channel) = (
             self.tmux.clone(),
             self.root.path().to_owned(),
@@ -162,7 +165,7 @@ impl Fixture {
         count
     }
 
-    pub(crate) fn queue_bytes(&self, shared: &SharedData) -> Vec<u8> {
+    fn queue_bytes(&self, shared: &SharedData) -> Vec<u8> {
         std::fs::read(
             self.root
                 .path()
@@ -173,7 +176,7 @@ impl Fixture {
         .unwrap()
     }
 
-    pub(crate) async fn assert_unchanged(&self, shared: &SharedData, queue: &[u8]) {
+    async fn assert_unchanged(&self, shared: &SharedData, queue: &[u8]) {
         assert_eq!(
             admin_host_guard::verified_reset_tests::accepted_queue_len(shared, self.channel).await,
             1
@@ -247,15 +250,10 @@ async fn autoqueue_actual_reset_rechecks_pin_after_legacy_verdict_pg() {
         .bind(serde_json::json!({"0":fixture.channel.get().to_string()}).to_string()).execute(&pool).await.unwrap();
     let queue = fixture.queue_bytes(&shared);
     let pin = fixture.pin_after_legacy_verdict();
-    let cleared = super::clear_slot_threads_for_slot_pg(
-        slot_row_host_refusal,
-        Some(registry),
-        &pool,
-        "agent-1",
-        0,
-    )
-    .await
-    .unwrap();
+    let cleared =
+        clear_slot_threads_for_slot_pg(slot_row_host_refusal, Some(registry), &pool, "agent-1", 0)
+            .await
+            .unwrap();
     assert_eq!(cleared, 1, "actual preflight admitted the legacy session");
     let observed =
         super::slot_reset_host_pg_tests::runtime_clears_after_done(&[fixture.channel.get()]).await;
@@ -264,6 +262,44 @@ async fn autoqueue_actual_reset_rechecks_pin_after_legacy_verdict_pg() {
         "apply must refuse the newly pinned execution: {observed:?}"
     );
     assert_eq!(pin.load(Ordering::SeqCst), 1);
+    fixture.assert_unchanged(&shared, &queue).await;
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn routine_actual_reset_rechecks_pin_after_legacy_verdict_pg() {
+    let fixture = Fixture::new(6_845_123);
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    sqlx::query("INSERT INTO agents (id, name, provider, discord_channel_cdx) VALUES ('agent-1', 'verified routine reset', 'codex', $1)")
+        .bind(fixture.channel.get().to_string()).execute(&pool).await.unwrap();
+    let (shared, registry, key) = fixture.shared(&pool).await;
+    let queue = fixture.queue_bytes(&shared);
+    let pin = fixture.pin_after_legacy_verdict();
+    let controller = build_routine_session_controller(Arc::new(pool.clone()), None);
+    let channel = fixture.channel.get().to_string();
+    let routine = routine_with_thread("persistent", Some(&channel));
+    seed_started_control_session(&pool, &routine, "codex", &channel, &key).await;
+    let actual = controller
+        .control_persistent_session(
+            &routine,
+            RoutineSessionCommand::Reset,
+            "verified pin race",
+            Some(registry.as_ref()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(actual.lifecycle_path, "runtime-clear-refused");
+    assert!(!actual.runtime_cleared);
+    assert!(!actual.tmux_killed);
+    assert!(!actual.inflight_cleared);
+    assert_eq!(actual.disconnected_sessions, 0);
+    assert_eq!(
+        pin.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "host approval precedes pin and apply"
+    );
     fixture.assert_unchanged(&shared, &queue).await;
     pool.close().await;
     db.drop().await;

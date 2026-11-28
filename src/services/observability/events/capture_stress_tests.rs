@@ -1,3 +1,7 @@
+use crate::ke_assembly_tests::policy_observability_root_tests::{
+    assert_noop_cancel_event,
+    cancel_observability_emits_unknown_noop_direct_fallback_scenario as noop_cancel,
+};
 use crate::services::observability::emit_fixtures::{
     ROOT_CAUSE_ACTIONS, every_emit_surface_records_one_recent_event_scenario as surfaces,
     invariant_severity_routes_to_exact_log_level_and_suffix_4422 as foreign_invariants,
@@ -6,10 +10,6 @@ use crate::services::observability::emit_fixtures::{
 use crate::services::observability::events::{
     EventLog, MAX_EVENTS, StructuredEvent, global, install_global_for_test, record, record_simple,
     test_capture::*,
-};
-use crate::services::turn_lifecycle::policy_observability_tests::{
-    assert_noop_cancel_event,
-    cancel_observability_emits_unknown_noop_direct_fallback_scenario as noop_cancel,
 };
 use serde_json::json;
 use std::sync::Arc;

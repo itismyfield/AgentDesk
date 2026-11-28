@@ -615,53 +615,6 @@ fn restore_cancel_and_purge_keep_a_reserved_head() {
     });
 }
 
-/// Without a live actor, force purge removes only namespaces whose file holds no head or
-/// submitted source and parses cleanly.
-#[test]
-fn an_actorless_force_purge_keeps_held_or_unreadable_snapshots() {
-    let _root = root();
-    block_on(async {
-        let channel = ChannelId::new(6_813_171);
-        let item = r#"{"author_id":7,"message_id":71,"text":"h"}"#;
-        let identity = r#"{"primary":71,"queued_generation":5,"sources":[{"message_id":71,"queued_generation":5}]}"#;
-        let unknown = format!(
-            r#"{{"version":1,"items":[{item}],"head_injection":{{"identity":{identity},"original":{item},"phase":"unknown"}}}}"#
-        );
-        let terminal = format!(r#"{{"version":1,"items":[],"terminal_identities":[{identity}]}}"#);
-        let base = crate::services::discord::runtime_store::discord_pending_queue_root().unwrap();
-        let file = |token: &str| {
-            base.join("claude")
-                .join(token)
-                .join(format!("{}.json", channel.get()))
-        };
-        for (token, body) in [
-            ("unknown", unknown.as_str()),
-            ("terminal", terminal.as_str()),
-            ("legacy", "[]"),
-            ("torn", r#"{"version":1,"items":["#),
-            ("broken", "[{"),
-        ] {
-            std::fs::create_dir_all(file(token).parent().unwrap()).unwrap();
-            std::fs::write(file(token), body).unwrap();
-        }
-        let target = crate::services::turn_lifecycle::TurnLifecycleTarget {
-            provider: Some(ProviderKind::Claude),
-            channel_id: Some(channel),
-            tmux_name: String::new(),
-        };
-        let purged = crate::services::queue::force_purge_channel_mailbox(
-            None::<&std::sync::Arc<crate::services::discord::health::HealthRegistry>>,
-            &target,
-            None,
-        )
-        .await;
-        assert_eq!(purged.map(|counts| counts.disk_files_removed), Some(1));
-        let kept = ["unknown", "terminal", "legacy", "torn"].map(|token| file(token).exists());
-        assert_eq!(kept, [true, true, false, true]);
-        assert_eq!(std::fs::read(file("broken")).unwrap(), b"[{");
-    });
-}
-
 /// A legacy queue file that does not parse is never read as empty: the enqueue fails and the
 /// file keeps its bytes, whether the actor meets it at start or after it was adopted.
 #[test]
