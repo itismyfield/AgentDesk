@@ -6,7 +6,7 @@
   audit           per-worker artifacts -> verdict JSON and Markdown summary; any gap is red
   base-diff       compare a plan with the plan of a fixed comparison base SHA (or, with --baseline-sha, of an
                   ancestor, adding the base sources' Linux losses); every lost test needs a
-                  matching scripts/ci/test-removal-justifications.txt row; landed rows only warn
+                  matching scripts/ci/test-removal-justifications.txt row; stale rows only warn
   required-gate, comparison-base, classify-worker   see nextest_required.py
 
 A missing or unreadable artifact fails the audit.
@@ -30,6 +30,9 @@ import xml.etree.ElementTree as ET
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import nextest_required  # noqa: E402
 import pr_nextest  # noqa: E402
+from nextest_removal import (  # noqa: E402
+    PLATFORMS, PlanError, check_id as _check_id, judge_justifications, load_justifications, row_text, warn_stale,
+)
 
 
 PLAN_KIND = "agentdesk-nextest-plan"
@@ -44,8 +47,6 @@ MAX_WORKERS = 32
 PER_TEST_OVERHEAD = 0.05
 UNIFORM_WEIGHT = 1.0
 FALLBACK_PERCENTILE = 0.9
-# IDs outside this alphabet would need filterset escaping that has not been verified.
-ID_RE = re.compile(r"^[A-Za-z0-9_:.\-]+$")
 ISSUE_RE = re.compile(r"^#\d+$")
 BUILD_OPTION_RE = re.compile(r"^[A-Z_][A-Z0-9_]*=[^\s]*$")
 DEFAULT_FILTER_LINE = 'default-filter = "all()"'
@@ -56,10 +57,6 @@ RETRY_TAGS = ("flakyFailure", "flakyError", "rerunFailure", "rerunError")
 # policy: only the retry policy entries get one retry. all-once: every test gets one retry and a retry
 # pass is green but listed as FLAKY.
 RETRY_MODES = ("policy", "all-once")
-
-
-class PlanError(ValueError):
-    pass
 
 
 def _sha256_file(path):
@@ -80,12 +77,6 @@ def _digest(value):
 
 def _id_text(test_id):
     return f"{test_id[0]} {test_id[1]}"
-
-
-def _check_id(binary_id, test_name):
-    if any(not isinstance(part, str) or not ID_RE.fullmatch(part) for part in (binary_id, test_name)):
-        raise PlanError(f"unsupported characters in test ID {binary_id!r} {test_name!r}")
-    return (binary_id, test_name)
 
 
 def _test_id(value, legacy_binary=None):
@@ -735,36 +726,9 @@ def cmd_audit(args):
     return 0 if verdict["verdict"] == "pass" else 1
 
 
-REMOVAL_KINDS = ("removed", "runnable->ignored")
-
-
-def load_justifications(path):
-    """Reasons keyed by test, kind and optional explicit platform scope."""
-    rows = {}
-    for n, line in enumerate(Path(path).read_text().splitlines(), 1):
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        parts = [part.strip() for part in line.split("|")]
-        if len(parts) != 3 or parts[1] not in REMOVAL_KINDS or not parts[2] or len(parts[0].split(" ")) != 2:
-            raise PlanError(f"{path}:{n}: need `<binary-id> <test> | removed|runnable->ignored | [platform=<os>] <reason>` (scope optional)")
-        _check_id(*parts[0].split(" "))
-        platform = None
-        reason = parts[2]
-        if reason.startswith("[platform="):
-            marker, separator, reason = reason.partition("] ")
-            if parts[1] != "removed" or marker not in ("[platform=linux", "[platform=macos", "[platform=windows") or not separator or not reason.strip():
-                raise PlanError(f"{path}:{n}: only removed rows may name platform=linux, platform=macos or platform=windows")
-            platform = marker.split("=", 1)[1]
-        if any(t == parts[0] and k == parts[1] and (p == platform or p is None or platform is None)
-               for t, k, p in rows):
-            raise PlanError(f"{path}:{n}: {parts[0]} {parts[1]} is listed twice")
-        rows[(parts[0], parts[1], platform)] = reason
-    return rows
-
-
 def source_losses(path, legacy_binary):
     """Read binary-qualified source losses, presence and verified relocations."""
-    platforms = ("linux", "macos", "windows")
+    platforms = PLATFORMS
     try:
         doc = json.loads(Path(path).read_text())
         if not isinstance(doc, dict):
@@ -875,40 +839,9 @@ def cmd_base_diff(args):
     for kind, field in (("removed", "removed"), ("runnable->ignored", "runnable_to_ignored")):
         for test in diff[field]:
             losses.setdefault((test, kind), set()).add("linux")
-    missing = {(t, kind) for (t, kind), platforms in losses.items()
-               if any((t, kind, None) not in justified and (t, kind, p) not in justified for p in platforms)}
+    missing, stale, landed, carried = judge_justifications(
+        justified, losses, removed, present_sources, base_ids, head_ids)
     diff["unjustified"] = sorted(f"{t} | {kind}" for t, kind in missing)
-    matched = {row for row in justified if row[:2] in losses
-               and (row[2] is None or row[2] in losses[row[:2]])}
-    stale = set(justified) - matched
-    present = base_ids | head_ids
-    # A platform exclusion remains meaningful only while another platform retains coverage.
-    def platform_exclusion_remains(row):
-        test, _kind, platform = row
-        if platform is None or present_sources is None or platform not in present_sources:
-            return False
-        test_id = tuple(test.split(" "))
-
-        def in_head(p):
-            # Source presence is base | head; subtract native removals to recover head.
-            current = present_sources.get(p, set()) - removed[p]
-            return current | head_ids if p == "linux" else current
-
-        target = in_head(platform)
-        others = set().union(*(in_head(p) for p in ("linux", "macos", "windows") if p != platform))
-        return test_id not in target and test_id in others
-
-    carried = {row for row in stale if platform_exclusion_remains(row)}
-    stale -= carried
-    # Legacy rows retain their existing whole-test removal and warning behavior.
-    native_union = present_sources["macos"] | present_sources["windows"] if present_sources is not None else None
-    landed = {row for row in stale if row[2] is None
-              and native_union is not None and tuple(row[0].split(" ")) not in present | native_union}
-
-    def row_text(row):
-        t, kind, platform = row
-        return f"{t} | {kind}" + (f" | platform={platform}" if platform else "")
-
     diff["stale_justifications"] = sorted(map(row_text, stale))
     diff["landed_justifications"] = sorted(map(row_text, landed))
     diff["platform_justifications"] = sorted(map(row_text, carried))
@@ -918,12 +851,9 @@ def cmd_base_diff(args):
           f"added {len(diff['added'])} · justified {len(losses) - len(diff['unjustified'])}")
     for row in diff["unjustified"]:
         print(f"ERROR lost without a justification row: {row}", file=sys.stderr)
-    for row in sorted(landed):
-        print(f"WARN justification row refers to a test absent from base and head; clear in any PR: "
-              f"{row_text(row)} | {justified[row]}", file=sys.stderr)
-    for row in sorted(stale - landed, key=row_text):
-        print(f"ERROR justification row matches no loss against {args.comparison_base_sha}: {row_text(row)}", file=sys.stderr)
-    return 1 if diff["unjustified"] or stale - landed else 0
+    warn_stale(justified, stale, landed, args.comparison_base_sha,
+               stream=sys.stderr, summary=os.environ.get("GITHUB_STEP_SUMMARY"))
+    return 1 if missing else 0
 
 
 # The plan and JUnit readers that nextest_required reuses.
