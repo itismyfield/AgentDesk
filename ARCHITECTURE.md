@@ -2115,6 +2115,7 @@ src/
 │   │   │   │   │   │   ├── before_start_stop_admission.rs
 │   │   │   │   │   │   ├── before_start_stop_admission_tests.rs
 │   │   │   │   │   │   ├── captured_terminal_admission.rs
+│   │   │   │   │   │   ├── claude_terminal_fixture_test_support.rs
 │   │   │   │   │   │   ├── claude_terminal_tests.rs
 │   │   │   │   │   │   ├── herdr_terminal_admission.rs
 │   │   │   │   │   │   ├── herdr_terminal_admission_tests.rs
@@ -2134,6 +2135,7 @@ src/
 │   │   │   │   ├── coordinate_merge_tests.rs
 │   │   │   │   ├── coordinate_replay.rs
 │   │   │   │   ├── coordinate_replay_tests.rs
+│   │   │   │   ├── create_monotonic_fixture_test_support.rs
 │   │   │   │   ├── create_monotonic_observer.rs
 │   │   │   │   ├── delivery_rewind.rs
 │   │   │   │   ├── durable_writers_tests.rs
@@ -2181,6 +2183,7 @@ src/
 │   │   │   ├── runtime_view.rs
 │   │   │   ├── save_store.rs
 │   │   │   ├── store.rs
+│   │   │   ├── synthetic_carry_forward_fixture_test_support.rs
 │   │   │   ├── synthetic_claim.rs
 │   │   │   ├── terminal_delivery_evidence_loss.rs
 │   │   │   ├── terminal_receipt_stamp.rs
@@ -2474,6 +2477,7 @@ src/
 │   │   │   ├── producer_resume/
 │   │   │   │   ├── custody.rs
 │   │   │   │   ├── entry_tests.rs
+│   │   │   │   ├── producer_resume_hook_test_support.rs
 │   │   │   │   ├── proof.rs
 │   │   │   │   ├── proof_tests.rs
 │   │   │   │   ├── witness.rs
@@ -2490,6 +2494,7 @@ src/
 │   │   │   │   ├── kickoff_identity.rs
 │   │   │   │   ├── kickoff_identity_tests.rs
 │   │   │   │   ├── output_paths.rs
+│   │   │   │   ├── ready_without_output_fixture_test_support.rs
 │   │   │   │   ├── ready_without_output_tests.rs
 │   │   │   │   ├── replay_decision.rs
 │   │   │   │   ├── replay_hold.rs
@@ -2513,6 +2518,7 @@ src/
 │   │   │   ├── herdr_row_end.rs
 │   │   │   ├── herdr_row_end_gate_tests.rs
 │   │   │   ├── herdr_row_end_guard_tests.rs
+│   │   │   ├── herdr_row_end_hook_test_support.rs
 │   │   │   ├── herdr_row_end_live.rs
 │   │   │   ├── herdr_row_end_rig_tests.rs
 │   │   │   ├── herdr_row_end_settle_tests.rs
@@ -2548,6 +2554,7 @@ src/
 │   │   │   ├── terminal_text_idempotency.rs
 │   │   │   ├── terminal_watcher.rs
 │   │   │   ├── tmux_probe.rs
+│   │   │   ├── tmux_probe_reader_hook_test_support.rs
 │   │   │   ├── turn_mode_restart_tests.rs
 │   │   │   └── turn_summary_recovery_tests.rs
 │   │   ├── recovery_paths/
@@ -3913,6 +3920,8 @@ src/
 │   │   ├── dispatch_policy.rs
 │   │   ├── dl_herdr_terminate_test_host.rs
 │   │   ├── dl_herdr_terminate_unix_test_host.rs
+│   │   ├── dl_recovery_engine_test_host.rs
+│   │   ├── dl_recovery_engine_unix_test_host.rs
 │   │   ├── dl_tmux_watcher_test_host.rs
 │   │   ├── dl_tmux_watcher_unix_test_host.rs
 │   │   ├── dl_turn_bridge_test_host.rs
