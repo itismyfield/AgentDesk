@@ -4,7 +4,7 @@ use super::*;
 use crate::services::discord::commands::control::codex_clear_relaunch_tests::settled_owner_observation;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
-use crate::services::discord::turn_presence::activity::unbound::live::publication_hook_tests::{
+use crate::services::discord::turn_presence::activity::unbound::live::publication_hook_test_support::{
     install_publication_hook, is_installed,
 };
 use crate::services::discord::turn_presence::activity::{activity_now, reading_now};

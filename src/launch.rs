@@ -96,6 +96,6 @@ where
 #[cfg(test)]
 mod ke_engine_tests;
 #[cfg(test)]
-mod ke_turn_tests;
+pub(crate) mod ke_turn_tests;
 #[cfg(all(test, unix))]
 mod ke_turn_unix_tests;

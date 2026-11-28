@@ -15,7 +15,7 @@ use crate::config::session_hosts::{ForcedSessionHosts, force_for_test};
 use crate::config::{Config, TestEnvVarGuard, TestRuntimeRootGuard};
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::engine::PolicyEngine;
-use crate::ke_assembly_tests::slot_reset_host_pg_tests::host::{
+use crate::ke_assembly_test_host::slot_reset_host_pg_tests::host::{
     exec, slot, slot_map, thread_row, thread_rows,
 };
 use crate::services::cluster::node_registry::ClusterRuntime;
