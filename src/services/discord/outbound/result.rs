@@ -5,9 +5,7 @@ use poise::serenity_prelude::{ChannelId, Message};
 use crate::domain::conversation::{ConversationId, MessageRef};
 use crate::services::discord::id_bridge::conversation_from_discord;
 
-pub(crate) use crate::domain::outbound::result::{
-    DeliveredMessage, DeliveryResult, DiscordTransportReceipt, FallbackUsed,
-};
+use crate::domain::outbound::result::DiscordTransportReceipt;
 
 pub(crate) fn transport_receipt_from_message(
     requested: ChannelId,

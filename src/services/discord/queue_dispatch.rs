@@ -3,6 +3,7 @@ use super::*;
 use crate::services::turn_orchestrator::registry_purge::retry_while_closed;
 use crate::services::turn_orchestrator::{QueueIdentity, TakeHeadCondition};
 
+pub(super) mod busy_followup_retry;
 #[cfg(unix)]
 mod canary_workspace;
 pub(super) mod kickoff;

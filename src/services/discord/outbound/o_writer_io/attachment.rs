@@ -17,7 +17,7 @@ pub(super) async fn post(
 ) -> PostOutcome {
     let message = super::super::notification_policy::scoped_message(channel)
         .content(caption)
-        .allowed_mentions(super::super::super::http::relay_allowed_mentions())
+        .allowed_mentions(crate::services::message_outbox::mentions::relay_allowed_mentions())
         .add_file(serenity::CreateAttachment::bytes(bytes, filename));
     let sent = crate::services::legacy_body_census::request_context::census_scope(
         None,

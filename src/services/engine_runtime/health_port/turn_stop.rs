@@ -118,8 +118,9 @@ pub(crate) trait TurnStopJudgement {
 }
 
 /// The runtime reads, host guards and stops a KE turn stop runs against the registry of
-/// provider runtimes. `S` is the runtime a guard admits; the registry owns its type.
-pub(crate) trait TurnStopPort<S>: Send + Sync {
+/// provider runtimes.
+pub(crate) trait TurnStopPort: Send + Sync {
+    type Shared: Send + Sync;
     type Judged: TurnStopJudgement + Send;
     type Snapshot: PendingQueueView + Send;
 
@@ -140,7 +141,7 @@ pub(crate) trait TurnStopPort<S>: Send + Sync {
     /// A turn stop on `shared`'s channel run on the session a force-kill verdict approved.
     fn stop_channel_runtime<'a>(
         &'a self,
-        shared: &'a Arc<S>,
+        shared: &'a Arc<Self::Shared>,
         provider: &'a ProviderKind,
         channel_id: ChannelId,
         reason: &'a str,
@@ -182,18 +183,18 @@ pub(crate) trait TurnStopPort<S>: Send + Sync {
         tmux_name: &'a str,
         explicit_key: Option<&'a str>,
         caller: &'a str,
-    ) -> BoxFuture<'a, (ChannelTeardown, Option<Arc<S>>)>;
+    ) -> BoxFuture<'a, (ChannelTeardown, Option<Arc<Self::Shared>>)>;
 
     fn nameless_runtime_teardown<'a>(
         &'a self,
         provider: &'a ProviderKind,
         channel_id: ChannelId,
         caller: &'a str,
-    ) -> BoxFuture<'a, Option<Arc<S>>>;
+    ) -> BoxFuture<'a, Option<Arc<Self::Shared>>>;
 
     /// Whether everything `channel_id`'s runtime would stop is the session a verdict approved.
     fn runtime_target_holds<'a>(
-        shared: &'a S,
+        shared: &'a Self::Shared,
         provider: &'a ProviderKind,
         channel_id: ChannelId,
         approved: Option<&'a str>,
@@ -211,12 +212,21 @@ pub(crate) trait TurnStopPort<S>: Send + Sync {
 
     /// The inflight finalizer backfill the cancel lookup writes, run only once the guard admits.
     fn backfill_inflight_after_guard(provider: &ProviderKind, channel_id: ChannelId);
+
+    fn record_stop_tombstone<'a>(
+        channel_id: ChannelId,
+        tmux_session_name: Option<&'a str>,
+        reason: &'a str,
+    ) -> BoxFuture<'a, ()>;
+
+    fn clear_inflight_by_channel(provider: &ProviderKind, channel_id: ChannelId) -> bool;
 }
 
 /// A shared registry answers as the registry it holds.
-impl<S, T: TurnStopPort<S>> TurnStopPort<S> for Arc<T> {
-    type Judged = <T as TurnStopPort<S>>::Judged;
-    type Snapshot = <T as TurnStopPort<S>>::Snapshot;
+impl<T: TurnStopPort> TurnStopPort for Arc<T> {
+    type Shared = <T as TurnStopPort>::Shared;
+    type Judged = <T as TurnStopPort>::Judged;
+    type Snapshot = <T as TurnStopPort>::Snapshot;
 
     fn judge_provider_channel_stop<'a>(
         &'a self,
@@ -237,7 +247,7 @@ impl<S, T: TurnStopPort<S>> TurnStopPort<S> for Arc<T> {
 
     fn stop_channel_runtime<'a>(
         &'a self,
-        shared: &'a Arc<S>,
+        shared: &'a Arc<Self::Shared>,
         provider: &'a ProviderKind,
         channel_id: ChannelId,
         reason: &'a str,
@@ -290,7 +300,7 @@ impl<S, T: TurnStopPort<S>> TurnStopPort<S> for Arc<T> {
         tmux_name: &'a str,
         explicit_key: Option<&'a str>,
         caller: &'a str,
-    ) -> BoxFuture<'a, (ChannelTeardown, Option<Arc<S>>)> {
+    ) -> BoxFuture<'a, (ChannelTeardown, Option<Arc<Self::Shared>>)> {
         (**self).runtime_teardown(provider, channel_id, tmux_name, explicit_key, caller)
     }
 
@@ -299,17 +309,17 @@ impl<S, T: TurnStopPort<S>> TurnStopPort<S> for Arc<T> {
         provider: &'a ProviderKind,
         channel_id: ChannelId,
         caller: &'a str,
-    ) -> BoxFuture<'a, Option<Arc<S>>> {
+    ) -> BoxFuture<'a, Option<Arc<Self::Shared>>> {
         (**self).nameless_runtime_teardown(provider, channel_id, caller)
     }
 
     fn runtime_target_holds<'a>(
-        shared: &'a S,
+        shared: &'a Self::Shared,
         provider: &'a ProviderKind,
         channel_id: ChannelId,
         approved: Option<&'a str>,
     ) -> BoxFuture<'a, bool> {
-        <T as TurnStopPort<S>>::runtime_target_holds(shared, provider, channel_id, approved)
+        <T as TurnStopPort>::runtime_target_holds(shared, provider, channel_id, approved)
     }
 
     fn row_gate<'a>(
@@ -320,7 +330,7 @@ impl<S, T: TurnStopPort<S>> TurnStopPort<S> for Arc<T> {
         tmux_name: &'a str,
         caller: &'a str,
     ) -> BoxFuture<'a, (ChannelTeardown, HostedLookup)> {
-        <T as TurnStopPort<S>>::row_gate(
+        <T as TurnStopPort>::row_gate(
             pool,
             stored_provider,
             channel_id,
@@ -331,6 +341,18 @@ impl<S, T: TurnStopPort<S>> TurnStopPort<S> for Arc<T> {
     }
 
     fn backfill_inflight_after_guard(provider: &ProviderKind, channel_id: ChannelId) {
-        <T as TurnStopPort<S>>::backfill_inflight_after_guard(provider, channel_id)
+        <T as TurnStopPort>::backfill_inflight_after_guard(provider, channel_id)
+    }
+
+    fn record_stop_tombstone<'a>(
+        channel_id: ChannelId,
+        tmux_session_name: Option<&'a str>,
+        reason: &'a str,
+    ) -> BoxFuture<'a, ()> {
+        <T as TurnStopPort>::record_stop_tombstone(channel_id, tmux_session_name, reason)
+    }
+
+    fn clear_inflight_by_channel(provider: &ProviderKind, channel_id: ChannelId) -> bool {
+        <T as TurnStopPort>::clear_inflight_by_channel(provider, channel_id)
     }
 }

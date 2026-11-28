@@ -256,6 +256,7 @@ jobs:
             cross_os_rust:
               - 'crates/*/Cargo.toml'
               - 'src/services/engine_runtime/mod.rs'
+              - 'src/services/engine_runtime/health_port/stale_sweep.rs'
               - 'src/services/engine_runtime/relay_state.rs'
               - 'src/services/engine_runtime/relay_state/coord.rs'
               - 'src/services/decision_gate/**'

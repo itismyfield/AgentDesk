@@ -15,7 +15,7 @@ pub(super) async fn interrupted(
 ) -> Result<i64, String> {
     let stable = serde_json::to_vec(&(provider, channel, episode)).map_err(|e| e.to_string())?;
     let key = format!("effort-restart:{:x}", Sha256::digest(stable));
-    let text = crate::services::discord::dispatch_policy::prepend_operational_alert_origin(TEXT);
+    let text = crate::domain::outbound::alert_origin::prepend_operational_alert_origin(TEXT);
     let message = OutboxMessage {
         target: &format!("channel:{channel}"),
         content: &text,

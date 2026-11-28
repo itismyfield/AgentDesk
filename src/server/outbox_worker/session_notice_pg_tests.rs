@@ -360,7 +360,7 @@ async fn eligible_lifecycle_notice_pins_provider_display_and_deduplicates_after_
         "stall provider POST must not escape the requester user mention"
     );
     let (visible, marked) =
-        crate::services::discord::dispatch_policy::strip_operational_alert_origin(content);
+        crate::domain::outbound::alert_origin::strip_operational_alert_origin(content);
     assert!(
         marked,
         "stall provider POST must retain its non-turn origin"

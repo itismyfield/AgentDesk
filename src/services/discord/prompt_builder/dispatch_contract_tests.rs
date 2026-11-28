@@ -5,7 +5,8 @@ use super::manifest::{
 };
 use super::*;
 use crate::db::prompt_manifests::PromptContentVisibility;
-use crate::services::discord::settings::{MemoryBackendKind, RoleBinding};
+use crate::domain::memory::MemoryBackendKind;
+use crate::services::discord::settings::RoleBinding;
 use crate::services::observability::recovery_audit::{
     RecoveryAuditRecord, recovery_context_sha256,
 };

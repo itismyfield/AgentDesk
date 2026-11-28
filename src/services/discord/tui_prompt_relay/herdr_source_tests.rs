@@ -12,16 +12,14 @@ use crate::db::dispatched_sessions::hosted_execution::{
     ExpectedExecution, HostedLocation, HostedState,
 };
 use crate::services::claude_tui::hook_server::observation_ingress::tests::{Ingress, events, uuid};
-use crate::services::discord::recovery_engine::host_reconcile::HerdrPaneEvidence;
-use crate::services::discord::tmux::execution_identity::herdr_observation::{
-    HerdrMismatch, HerdrUnknown,
-};
 use crate::services::herdr_launch::{
     EvidenceProbe, HerdrCreateOutcome, HerdrCreateRequest, HerdrLaunch, HerdrLaunchCommand,
     HerdrLaunchEndpoint, HerdrLaunchHost, HerdrLaunchOutcome, launch_herdr_session,
     unset_herdr_env_before_exec,
 };
+use crate::services::session_host::HerdrPaneEvidence;
 use crate::services::session_host::{EvidenceGap, RestoreResume, ServerWitness};
+use crate::services::session_host::{HerdrMismatch, HerdrUnknown};
 use crate::services::tui_o::shadow::capture::file_identity;
 use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
 use crate::services::tui_prompt_dedupe::binding_events::{

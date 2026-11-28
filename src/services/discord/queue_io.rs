@@ -1,6 +1,7 @@
 use super::*;
 mod backstop;
-pub(in crate::services::discord) mod input_owner;
+pub(super) mod held_sources;
+pub(crate) mod input_owner;
 #[cfg(test)]
 pub(in crate::services::discord) use input_owner::admission as input_admission;
 pub(in crate::services::discord) use input_owner::ingress as input_ingress;

@@ -254,10 +254,8 @@ pub(in crate::services::discord) async fn send_outbound_message_with_nonce_class
 #[cfg(test)]
 mod classified_post_tests {
     use super::*;
+    use crate::domain::outbound::port::{DispatchMessagePostError, DispatchMessagePostErrorKind};
     use crate::services::discord::outbound::OutboundDeduper;
-    use crate::services::dispatches::discord_delivery::{
-        DispatchMessagePostError, DispatchMessagePostErrorKind,
-    };
 
     struct FailingPostClient {
         status: Option<reqwest::StatusCode>,

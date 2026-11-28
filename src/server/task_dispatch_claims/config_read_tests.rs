@@ -2,9 +2,9 @@
 
 use super::{claim_after_reading, claim_task_dispatches};
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::db::pg_wire_proxy::PgWireProxy;
 use crate::server::task_dispatch_claims::TaskDispatchClaimRequest;
 use crate::server::task_dispatch_claims::task_dispatch_claims_pg_tests as fixture;
-use crate::services::health_diagnostics::pg_wire_proxy::PgWireProxy;
 use std::time::Duration;
 
 const OWNER: &str = "mac-book-release";

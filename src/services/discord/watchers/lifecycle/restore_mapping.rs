@@ -17,7 +17,7 @@ pub(super) fn add_configured_channel_bindings(
     agent_sessions: &[&str],
     provider: &ProviderKind,
     configured_bindings: impl IntoIterator<
-        Item = super::super::super::settings::RegisteredChannelBinding,
+        Item = crate::services::channel_roles::RegisteredChannelBinding,
     >,
     name_to_channel: &mut std::collections::HashMap<String, (ChannelId, String)>,
 ) {

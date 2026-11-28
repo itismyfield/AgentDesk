@@ -19,10 +19,9 @@ pub(crate) use thread_reuse::{
     validate_channel_thread_maps_on_startup_with_backends,
 };
 pub(crate) use transport::{
-    DispatchMessagePostError, DispatchMessagePostErrorKind, DispatchMessagePostOutcome,
-    DispatchNotifyDeliveryResult, DispatchTransport, ReviewFollowupKind,
-    archive_duplicate_slot_threads, discord_api_base_url, discord_api_url, edit_raw_message_once,
-    is_discord_length_error, maybe_add_owner_to_dispatch_thread,
+    DispatchMessagePostOutcome, DispatchNotifyDeliveryResult, DispatchTransport,
+    ReviewFollowupKind, archive_duplicate_slot_threads, discord_api_base_url, discord_api_url,
+    edit_raw_message_once, is_discord_length_error, maybe_add_owner_to_dispatch_thread,
     post_dispatch_message_to_channel_with_delivery, post_raw_message_once,
     reset_stale_slot_thread_if_needed,
 };

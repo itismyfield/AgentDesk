@@ -239,11 +239,16 @@ mod record_entry_dispatch_failure_tests {
         );
         let config = crate::config::Config::default();
         let engine = must_ok(
-            crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone())),
+            crate::engine::PolicyEngine::new_with_pg(
+                &config,
+                Some(pool.clone()),
+                crate::services::discord::health::slot_row_host_refusal,
+            ),
             "create test policy engine",
         );
         let deps = AutoQueueActivateDeps {
             pg_pool: Some(pool.clone()),
+            slot_row_guard: engine.slot_row_guard(),
             engine,
             config: Arc::new(config),
             health_registry: None,

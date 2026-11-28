@@ -11,7 +11,7 @@ pub(crate) const PLAIN_MESSAGE_SPLIT_LIMIT: usize = DISCORD_MSG_LIMIT - 10;
 ///
 /// Discord does not document a Unicode counting model, and this repository has
 /// no observed-delivery evidence that establishes one. The production-call
-/// inventory is: `formatting::delivery::{split_message, needs_multiple_messages}`;
+/// inventory is: `formatting::{split_message, needs_multiple_messages}`;
 /// the streaming split, snapshot, and status truncation helpers in this module;
 /// `outbound::decision::decide_length`; `outbound::manual_delivery`'s oversize routing;
 /// `outbound::delivery::{truncate_with_marker, split_content}`;

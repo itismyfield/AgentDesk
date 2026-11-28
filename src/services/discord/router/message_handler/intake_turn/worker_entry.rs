@@ -1,6 +1,6 @@
 use super::*;
 
-pub(crate) use crate::services::cluster::intake_turn::IntakeRequest;
+use crate::services::cluster::intake_turn::IntakeRequest;
 
 /// Claimed workers check canonical admission without routing another delivery row.
 /// Only their execution outcome may settle the original delivery.
@@ -95,6 +95,8 @@ async fn worker_replay_admission(
     shared: &Arc<SharedData>,
     request: &IntakeRequest,
 ) -> Option<IntakeExecution> {
+    use crate::domain::process_incarnation::incarnation;
+    use crate::services::cluster::intake_router_hook::owner_record::input_start;
     use crate::services::discord::router::intake_dispatch::replay_admission::{
         self as admission, ReplayAdmissionContext, ReplayPreflight,
     };
@@ -113,16 +115,13 @@ async fn worker_replay_admission(
         &request.user_text,
     );
     // Physical adapters must consume the owner permit before this producer can be enabled.
-    if crate::services::discord::router::intake_gate::input_start::has_custody(pool, &input)
-        .await
-        .unwrap_or(true)
-    {
+    if input_start::has_custody(pool, &input).await.unwrap_or(true) {
         return Some(IntakeExecution::Deferred);
     }
     let instance =
         crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
-    let ctx = ReplayAdmissionContext::production(pool, &instance, admission::incarnation())
-        .for_channel(&channel);
+    let ctx =
+        ReplayAdmissionContext::production(pool, &instance, incarnation()).for_channel(&channel);
     match admission::preflight_source(&ctx, &input).await {
         ReplayPreflight::Admit(_) | ReplayPreflight::LegacyUnprotected => None,
         ReplayPreflight::ConsumeProtected(_) => Some(IntakeExecution::ConsumedProtected),

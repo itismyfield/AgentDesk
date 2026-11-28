@@ -1,5 +1,5 @@
 use super::*;
-use crate::services::auto_queue::runtime::slot_runtime_health;
+use crate::services::engine_runtime::health_port::slot_runtime_health;
 
 #[derive(Clone, Copy)]
 enum LifecycleAction {
@@ -58,6 +58,7 @@ async fn run_lifecycle_command(
         LifecycleAction::Resume => crate::db::auto_queue::resume_run_on_pg(pool, &run_id).await,
         LifecycleAction::End => {
             crate::services::auto_queue::cancel_run::end_run_with_pg(
+                state.engine.slot_row_guard(),
                 slot_runtime_health(state.health_registry.clone()),
                 pool,
                 &run_id,

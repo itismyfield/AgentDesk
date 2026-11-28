@@ -2,7 +2,7 @@
 //! the input on the channel mailbox with the reason it could not start.
 
 pub(crate) mod decision_target;
-mod inject;
+pub(in crate::services) mod inject;
 #[cfg(all(test, unix))]
 mod inject_codex_tests;
 #[cfg(all(test, unix))]
@@ -21,7 +21,7 @@ use serenity::{ChannelId, UserId};
 
 use super::HealthRegistry;
 use super::runtime_resolve::resolve_direct_channel_shared;
-pub use crate::domain::human_input::{ExternalHold, HumanInputDelivery, HumanInputError};
+use crate::domain::human_input::{ExternalHold, HumanInputDelivery, HumanInputError};
 use crate::services::discord::{SharedData, router};
 use crate::services::imsg_reply::agy_input::{self, ADMITTED_DELIVERY};
 use crate::services::imsg_reply::{self, ReplyObligation, episode};

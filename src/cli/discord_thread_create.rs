@@ -316,7 +316,7 @@ async fn create_forum_post(
     let body = serde_json::to_vec(&json!({
         "name": name,
         "auto_archive_duration": auto_archive_minutes,
-        "message": crate::services::discord::http::relay_message_payload(starter),
+        "message": crate::services::message_outbox::mentions::relay_message_payload(starter),
         "applied_tags": applied_tags.iter().map(u64::to_string).collect::<Vec<_>>(),
     }))
     .map_err(|err| format!("serialize forum post {name:?}: {err}"))?;

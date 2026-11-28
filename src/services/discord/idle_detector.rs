@@ -43,7 +43,9 @@ use poise::serenity_prelude::ChannelId;
 
 use super::SharedData;
 use super::monitoring_status;
-use super::settings::{self, ResolvedMemorySettings, RoleBinding};
+use super::settings;
+use super::settings::RoleBinding;
+use crate::domain::memory::ResolvedMemorySettings;
 use crate::services::memory::{ReflectRequest, SessionEndReason};
 use crate::services::monitoring_store::global_monitoring_store;
 use crate::services::provider::ProviderKind;

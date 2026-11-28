@@ -3,13 +3,13 @@
 //! Herdr pane's gate (`herdr`) or, once enabled, `codex_tui::busy_inject`.
 
 mod catch_up_race;
-#[cfg(unix)]
-mod first_input;
+#[cfg(all(test, unix))]
+pub(in crate::services) mod first_input;
 pub(in crate::services::discord) mod herdr;
 mod names;
-mod queued_owner;
+pub(in crate::services) mod queued_owner;
 mod queued_provider;
-mod queued_reconcile;
+pub(in crate::services) mod queued_reconcile;
 mod queued_support;
 
 use futures::FutureExt;

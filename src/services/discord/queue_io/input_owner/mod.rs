@@ -3,6 +3,8 @@
 pub(crate) mod admission;
 pub(crate) mod claude_handoff;
 pub(crate) mod closed;
+#[cfg(unix)]
+pub(crate) mod cold;
 pub(crate) mod drive;
 pub(crate) mod effect;
 pub(crate) mod effort_continue;

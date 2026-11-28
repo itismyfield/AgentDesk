@@ -1,6 +1,8 @@
 use super::replay_admission::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::db::replay_disposition::write::{self, BeginFrom, EffectProjection, WriteError};
+use crate::db::replay_disposition::write::{
+    self, BeginFrom, CanonicalInput, EffectProjection, WriteError,
+};
 use crate::services::discord::replay_policy::live::{RawObservation, Seen};
 use crate::services::discord::replay_policy::permit::{
     EffectTarget, PermitRefusal, PreparedRetryStart, StartPermit,

@@ -465,6 +465,7 @@ async fn retry_first_keeps_run_slot_and_cancel_later_cleans_replacement_pg() {
     assert_eq!(completion_notifies, 0);
 
     crate::services::auto_queue::cancel_run::cancel_selected_runs_with_pg(
+        crate::services::discord::health::slot_row_host_refusal,
         None,
         &pool,
         std::slice::from_ref(&run_id),
@@ -501,6 +502,7 @@ async fn cancel_first_rejects_retry_and_retry_without_flag_preserves_finalizatio
     )
     .await;
     crate::services::auto_queue::cancel_run::cancel_selected_runs_with_pg(
+        crate::services::discord::health::slot_row_host_refusal,
         None,
         &pool,
         std::slice::from_ref(&run_id),

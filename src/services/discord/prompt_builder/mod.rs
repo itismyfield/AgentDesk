@@ -1,9 +1,11 @@
 use super::settings::{
-    ResolvedMemorySettings, discord_token_hash, load_review_tuning_guidance, load_role_prompt,
-    load_shared_prompt_for_profile, render_peer_agent_guidance,
+    load_review_tuning_guidance, load_role_prompt, load_shared_prompt_for_profile,
+    render_peer_agent_guidance,
 };
 use super::*;
 use crate::db::prompt_manifests::{PromptContentVisibility, PromptManifest};
+use crate::domain::memory::ResolvedMemorySettings;
+use crate::utils::discord::discord_token_hash;
 
 pub(crate) mod audit;
 mod channel_recent_context;

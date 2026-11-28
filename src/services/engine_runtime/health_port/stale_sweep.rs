@@ -3,6 +3,26 @@
 
 use futures::future::BoxFuture;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AxisBSite {
+    #[cfg(unix)]
+    ProbeAutoHealReattach,
+    WatchdogStaleIdle,
+    WatchdogExplicitBackground,
+    #[cfg(unix)]
+    RelayDeadReattach,
+    #[cfg(unix)]
+    ProbeAutoHeal,
+    PolicyTickStaleSweep,
+    BootReconcileSweep,
+}
+
+impl AxisBSite {
+    pub(crate) fn is_stale_sweep(self) -> bool {
+        matches!(self, Self::PolicyTickStaleSweep | Self::BootReconcileSweep)
+    }
+}
+
 /// Whether an automatic sweep at `Site` may clear one stale session, judged by the registry.
 pub(crate) trait StaleSweepPort<Site>: Sync {
     fn automatic_stale_sweep_warrants<'a>(

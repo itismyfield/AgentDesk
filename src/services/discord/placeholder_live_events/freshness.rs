@@ -55,7 +55,7 @@ pub(super) fn render_panel_activity_line(
         ) {
             tools
         } else {
-            let label = super::tool_summary::safe_section(&activity_line)
+            let label = crate::domain::tool_summary::safe_section(&activity_line)
                 .unwrap_or_else(|| "🔧 도구 활동".to_string());
             format!("{label}\n{tools}")
         };
