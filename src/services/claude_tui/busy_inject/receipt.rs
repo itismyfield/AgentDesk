@@ -11,7 +11,7 @@ const CLOSE: &str = "</pasted_content id=\"";
 const TOKEN_LEN: usize = 4;
 
 /// The frame verbatim, or in one whole paste block with Claude's measured outer separators.
-pub(crate) fn exact(body: &str, expected: &str) -> bool {
+pub fn exact(body: &str, expected: &str) -> bool {
     body == expected || pasted_inner(body) == Some(expected)
 }
 

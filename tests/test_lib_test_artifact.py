@@ -33,6 +33,8 @@ class LibTestArtifactTests(unittest.TestCase):
         self.executable.chmod(0o755)
         self.builds = 0
         self.executed = []
+        self.cwds = []
+        self.member = None
         self.live_plain = PLAIN
         self.live_ignored = IGNORED
         self.exit_code = 0
@@ -60,6 +62,8 @@ class LibTestArtifactTests(unittest.TestCase):
             return json.dumps({"reason": "compiler-artifact", "profile": self.profile,
                                "target": {"kind": ["lib"]},
                                "executable": str(self.executable)}) + "\n"
+        if self.member and "adk-runtime" in argv[0]:
+            return self.member[argv[-1] == "--ignored"]
         if argv[-2:] == ["--list", "--ignored"]:
             return self.live_ignored
         if argv[-1:] == ["--list"]:
@@ -68,6 +72,7 @@ class LibTestArtifactTests(unittest.TestCase):
 
     def execute(self, argv, cwd):
         self.executed.append(argv)
+        self.cwds.append(cwd)
         return self.exit_code
 
     def prepare(self):
@@ -288,24 +293,39 @@ class LibTestArtifactTests(unittest.TestCase):
         os.environ["GITHUB_RUN_ATTEMPT"] = "3"
         self.assertEqual(artifact.validate(self.directory, self.root), self.directory / "lib-tests")
 
-    def test_workspace_archive_validates_both_libs_and_packages_only_the_root(self):
+    def test_workspace_archive_runs_each_package_from_its_own_binary(self):
+        (self.root / "crates/adk-runtime").mkdir(parents=True)
+        (self.root / "Cargo.toml").write_text('[package]\nname = "agentdesk"\n[workspace]\nmembers = ["crates/adk-runtime"]\n')
+        (self.root / "crates/adk-runtime/Cargo.toml").write_text('[package]\nname = "adk-runtime"\n[lib]\npath = "lib.rs"\n')
+        (self.root / "crates/adk-runtime/lib.rs").write_text("")
         source, plan = self.nextest_source()
-        plan["workers"][0]["tests"].append(["adk-store", "alpha::test"])
+        plan["workers"][0]["tests"].append(["adk-runtime", "gamma::pg"])
         plan["universe_count"] = 2
         plan["universe_digest"] = nextest_ci._digest(sorted(plan["workers"][0]["tests"]))
         self.save_plan(source, plan)
         listing = self.nextest_list(source)
         with self.assertRaisesRegex(ValueError, "workspace plan"):
             self.import_nextest(source, listing)
-        child = source / "extract/target/debug/deps/adk-store-fixture"
+        child = source / "extract/target/debug/deps/adk-runtime-fixture"
         child.write_bytes(b"fake member executable\n")
-        listing["rust-suites"]["adk-store"] = {
-            "binary-id": "adk-store", "kind": "lib", "binary-path": str(child),
-            "testcases": {"alpha::test": {"ignored": False}},
+        child.chmod(0o755)
+        listing["rust-suites"]["adk-runtime"] = {
+            "binary-id": "adk-runtime", "kind": "lib", "binary-path": str(child),
+            "testcases": {"gamma::pg": {"ignored": False}},
         }
+        self.member = ("gamma::pg: test\n\n1 test, 0 benchmarks\n", "0 tests, 0 benchmarks\n")
         self.import_nextest(source, listing)
-        self.assertEqual((self.directory / "lib-tests").read_bytes(), self.executable.read_bytes())
-        listing["rust-suites"]["adk-store"]["testcases"]["alpha::test"]["ignored"] = True
+        member = self.directory / "packages/adk-runtime/lib-tests"
+        for command, binary in ((["-p", "adk-runtime", "--lib", "--", "--exact", "gamma::pg"], member),
+                                (["--lib", "--", "--exact", "alpha::test"], self.directory / "lib-tests")):
+            self.assertEqual(artifact.run(["cargo", "test", *command], self.root, require_artifact=True), 0)
+            self.assertEqual(self.executed[-1], [str(binary), "--exact", command[-1]])
+        self.assertEqual(self.cwds, [self.root / "crates/adk-runtime", self.root])
+        self.assertEqual(artifact.run(["cargo", "test", "-p", "adk-store", "--lib"], self.root, require_artifact=True), 1)
+        member.write_bytes(b"swapped\n")
+        self.assertEqual(artifact.run(["cargo", "test", "--lib"], self.root, require_artifact=True), 1)
+        self.assertEqual(len(self.executed), 2)
+        listing["rust-suites"]["adk-runtime"]["testcases"]["gamma::pg"]["ignored"] = True
         with self.assertRaisesRegex(ValueError, "workspace plan"):
             self.import_nextest(source, listing)
 

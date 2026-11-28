@@ -1,21 +1,21 @@
 use poise::serenity_prelude::ChannelId;
 use std::sync::Arc;
 
-pub(crate) const SESSION_TRANSITION_LOCK_WAIT_TIMEOUT: std::time::Duration =
+pub const SESSION_TRANSITION_LOCK_WAIT_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(3);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct SessionTransitionBusy;
+pub struct SessionTransitionBusy;
 
 /// The runtime whose channel transitions a lease stands for. A lease is told apart by the address
 /// of its host, so only the runtime object itself implements this, never a pointer to one.
-pub(crate) trait SessionTransitionHost {
+pub trait SessionTransitionHost {
     fn transition_locks(&self) -> &SessionTransitionLocks;
     fn transition_token_hash(&self) -> &str;
 }
 
 /// The exact channel lock held by a claim; a borrowed guard cannot release its caller's lock.
-pub(crate) struct SessionTransitionLease<'a, S> {
+pub struct SessionTransitionLease<'a, S> {
     shared: &'a S,
     channel: ChannelId,
     hold: TransitionHold<'a>,
@@ -27,10 +27,7 @@ enum TransitionHold<'a> {
 }
 
 impl<'a, S: SessionTransitionHost> SessionTransitionLease<'a, S> {
-    pub(crate) fn try_acquire(
-        shared: &'a S,
-        channel: ChannelId,
-    ) -> Result<Self, SessionTransitionBusy> {
+    pub fn try_acquire(shared: &'a S, channel: ChannelId) -> Result<Self, SessionTransitionBusy> {
         let guard = shared
             .transition_locks()
             .lock(channel)
@@ -43,7 +40,7 @@ impl<'a, S: SessionTransitionHost> SessionTransitionLease<'a, S> {
         })
     }
 
-    pub(crate) fn borrow(
+    pub fn borrow(
         shared: &'a S,
         channel: ChannelId,
         guard: &'a tokio::sync::OwnedMutexGuard<()>,
@@ -61,7 +58,7 @@ impl<'a, S: SessionTransitionHost> SessionTransitionLease<'a, S> {
         })
     }
 
-    pub(crate) fn matches(&self, shared: &S, channel: ChannelId) -> bool {
+    pub fn matches(&self, shared: &S, channel: ChannelId) -> bool {
         let guard = match &self.hold {
             TransitionHold::Owned(guard) => guard,
             TransitionHold::Borrowed(guard) => guard,
@@ -77,7 +74,7 @@ impl<'a, S: SessionTransitionHost> SessionTransitionLease<'a, S> {
 
 /// The channel's transition lock held for one unplaced-launch resolution, by the bot whose rows it
 /// may resolve.
-pub(crate) struct UnplacedLease {
+pub struct UnplacedLease {
     _guard: tokio::sync::OwnedMutexGuard<()>,
     token_hash: String,
     channel: ChannelId,
@@ -85,7 +82,7 @@ pub(crate) struct UnplacedLease {
 
 impl UnplacedLease {
     /// Waits as long as any transition claim does.
-    pub(crate) async fn acquire<S: SessionTransitionHost>(
+    pub async fn acquire<S: SessionTransitionHost>(
         shared: &S,
         channel: ChannelId,
     ) -> Result<Self, SessionTransitionBusy> {
@@ -93,7 +90,7 @@ impl UnplacedLease {
         Ok(Self::held(shared, channel, guard))
     }
 
-    pub(crate) fn try_acquire<S: SessionTransitionHost>(
+    pub fn try_acquire<S: SessionTransitionHost>(
         shared: &S,
         channel: ChannelId,
     ) -> Result<Self, SessionTransitionBusy> {
@@ -129,12 +126,12 @@ impl UnplacedLease {
 /// One runtime's channel transition locks. An entry is a `Weak`: the lock lives while a guard or a
 /// handle holds it, and dead entries are pruned when a new channel is inserted.
 #[derive(Default)]
-pub(crate) struct SessionTransitionLocks(
+pub struct SessionTransitionLocks(
     dashmap::DashMap<ChannelId, std::sync::Weak<tokio::sync::Mutex<()>>>,
 );
 
 impl SessionTransitionLocks {
-    pub(crate) fn lock(&self, channel_id: ChannelId) -> Arc<tokio::sync::Mutex<()>> {
+    pub fn lock(&self, channel_id: ChannelId) -> Arc<tokio::sync::Mutex<()>> {
         if let Some(lock) = self.0.get(&channel_id).and_then(|lock| lock.upgrade()) {
             return lock;
         }
@@ -159,7 +156,7 @@ impl SessionTransitionLocks {
         }
     }
 
-    pub(crate) async fn acquire(
+    pub async fn acquire(
         &self,
         channel_id: ChannelId,
     ) -> Result<tokio::sync::OwnedMutexGuard<()>, SessionTransitionBusy> {
@@ -173,7 +170,7 @@ impl SessionTransitionLocks {
 
     /// Whether the registry still carries an entry for `channel_id`, live or dead.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn has_entry(&self, channel_id: ChannelId) -> bool {
+    pub fn has_entry(&self, channel_id: ChannelId) -> bool {
         self.0.contains_key(&channel_id)
     }
 }

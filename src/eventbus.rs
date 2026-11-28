@@ -32,7 +32,7 @@ pub struct BroadcastEvent {
 }
 
 impl BroadcastEvent {
-    pub(crate) fn as_ws_message(&self) -> String {
+    pub fn as_ws_message(&self) -> String {
         json!({
             "id": self.id,
             "type": self.event,

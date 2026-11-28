@@ -2,9 +2,9 @@ use super::*;
 use crate::services::tui_prompt_dedupe::binding_context::BindingContext;
 
 #[path = "actual_submit_tests/source_io_tests.rs"]
-pub(crate) mod source_io;
+pub mod source_io;
 
-pub(crate) fn driver(
+pub fn driver(
     context: &BindingContext,
     native_session: &str,
     prompt: &str,
@@ -33,7 +33,7 @@ pub(crate) fn driver(
 }
 
 /// The production cold launch for an exact resume of `native_session` in `cwd`.
-pub(crate) fn cold_driver(
+pub fn cold_driver(
     cwd: &std::path::Path,
     native_session: &str,
     (tmux, channel): (&str, u64),
@@ -81,9 +81,8 @@ async fn s2b1b_actual_driver_missing_episode_refuses_before_transport() {
         crate::services::tmux_common::session_temp_path(&context.tmux_session, "spawn_nonce");
     std::fs::create_dir_all(std::path::Path::new(&path).parent().unwrap()).unwrap();
     std::fs::write(path, &context.execution_nonce).unwrap();
-    let fake = crate::services::provider_teardown::tests::test_support::FakeTmux::install(
-        &context.tmux_session,
-    );
+    let fake =
+        crate::services::provider_teardown::test_support::FakeTmux::install(&context.tmux_session);
     let _ = fake.take_calls();
     let (sender, _receiver) = std::sync::mpsc::channel();
     let result = tokio::task::spawn_blocking(move || {
@@ -100,7 +99,7 @@ async fn s2b1b_actual_driver_missing_episode_refuses_before_transport() {
     );
 }
 
-pub(crate) fn options(native: &str, cwd: &std::path::Path) -> CodexLaunchOptions {
+pub fn options(native: &str, cwd: &std::path::Path) -> CodexLaunchOptions {
     CodexLaunchOptions::new("first")
         .with_resume_session_id(Some(native))
         .with_reasoning_effort(codex_reasoning_effort_from_env().as_deref())
@@ -111,7 +110,7 @@ thread_local! {
     static FAIL_TAIL_ONCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-pub(crate) fn fail_tail_once() {
+pub fn fail_tail_once() {
     FAIL_TAIL_ONCE.with(|value| value.set(true));
 }
 
@@ -123,19 +122,19 @@ thread_local! {
     static BEFORE_CREATE_EFFECT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
-pub(crate) fn before_pane_effect(effect: Box<dyn FnOnce()>) {
+pub fn before_pane_effect(effect: Box<dyn FnOnce()>) {
     super::tui_session_launch::BEFORE_PANE_EFFECT.with_borrow_mut(|slot| *slot = Some(effect));
 }
 
-pub(crate) fn before_create_effect(effect: Box<dyn FnOnce()>) {
+pub fn before_create_effect(effect: Box<dyn FnOnce()>) {
     BEFORE_CREATE_EFFECT.with_borrow_mut(|slot| *slot = Some(effect));
 }
 
-pub(crate) fn after_initial_absence_capture(effect: Box<dyn FnOnce(bool)>) {
+pub fn after_initial_absence_capture(effect: Box<dyn FnOnce(bool)>) {
     super::absence_launch::AFTER_INITIAL_CAPTURE.with_borrow_mut(|slot| *slot = Some(effect));
 }
 
-pub(crate) fn observe_absence_admission(observer: super::absence_launch::AdmissionObserver) {
+pub fn observe_absence_admission(observer: super::absence_launch::AdmissionObserver) {
     super::absence_launch::ADMISSION_OBSERVER.with_borrow_mut(|slot| *slot = Some(observer));
 }
 
@@ -160,7 +159,7 @@ pub(crate) fn note_dead_temp_cleanup(tmux: &str, operation: &'static str) {
         .push(operation);
 }
 
-pub(crate) fn take_dead_temp_cleanup_trace(tmux: &str) -> Vec<&'static str> {
+pub fn take_dead_temp_cleanup_trace(tmux: &str) -> Vec<&'static str> {
     DEAD_TEMP_CLEANUP
         .lock()
         .unwrap()

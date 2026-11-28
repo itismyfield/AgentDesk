@@ -76,7 +76,7 @@ jobs:
           CARGO_PROFILE_TEST_DEBUG: "0"
         run: cargo check --workspace --all-targets
 
-      # Builds the lib test binary the PR exact-targets runner filters; runs nothing.
+      # Builds the lib test binaries the PR exact-targets runner filters; runs nothing.
       - name: Build lib test binary
         timeout-minutes: 40
         shell: bash
@@ -84,7 +84,7 @@ jobs:
           BASH_ENV: /dev/null
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
-        run: cargo test --lib --no-run
+        run: cargo test --workspace --lib --no-run
 
       - name: sccache stats
         if: always()

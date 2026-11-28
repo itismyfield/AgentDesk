@@ -611,6 +611,18 @@ pub(super) const MONITOR_AUTO_TURN_PREAMBLE_HINT: &str = "[system] 모니터 자
 const MONITOR_AUTO_TURN_MISSED_SIGNAL_FALLBACK: tokio::time::Duration =
     tokio::time::Duration::from_secs(30);
 
+/// The monitor auto-turn start a test races against a recovery; `true` once its token is registered.
+#[cfg(test)]
+pub(in crate::services::discord) async fn monitor_start_for_test(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> bool {
+    let provider = ProviderKind::Claude;
+    let start = start_monitor_auto_turn_when_available(shared, &provider, channel_id, 128, cancel);
+    start.await.acquired
+}
+
 async fn start_monitor_auto_turn_when_available(
     // #3016 phase-5a: `&Arc<SharedData>` (not `&SharedData`) so `register_start`
     // can downgrade a `Weak` into the `Start` message and prime the finalizer's
@@ -648,15 +660,23 @@ async fn start_monitor_auto_turn_when_available(
         // #3167 — the monitor auto-turn is a low-priority background relay; mark
         // it with the distinct monitor kind so queued external USER intervention
         // is not starved and synthetic stale-reclaim never preempts it.
-        let started = super::mailbox_try_start_turn_kinded(
-            shared,
-            channel_id,
-            token.clone(),
-            UserId::new(1),
-            synthetic_message_id,
-            crate::services::turn_orchestrator::ActiveTurnKind::MonitorAutoTurn,
-        )
-        .await;
+        // Like a headless claim, the start waits for the channel transition lock so a dead-Bound
+        // recovery's proof-to-CAS window never sees its token appear.
+        let transition = shared.session_transition_locks.acquire(channel_id).await;
+        let started = match transition {
+            Ok(_transition) => {
+                super::mailbox_try_start_turn_kinded(
+                    shared,
+                    channel_id,
+                    token.clone(),
+                    UserId::new(1),
+                    synthetic_message_id,
+                    crate::services::turn_orchestrator::ActiveTurnKind::MonitorAutoTurn,
+                )
+                .await
+            }
+            Err(_) => false,
+        };
         if started {
             super::increment_global_active(shared, "tmux_monitor_auto_turn");
             shared

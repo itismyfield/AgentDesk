@@ -585,6 +585,11 @@ impl IntakeRuntimeTransition {
         taken_cleared || self.recovered_fresh
     }
 
+    /// The held channel lock, lent to a recovery that must not block its own intake.
+    pub(in crate::services::discord) fn guard(&self) -> &tokio::sync::OwnedMutexGuard<()> {
+        &self._guard
+    }
+
     pub(crate) async fn complete_mailbox_claim<T>(self, claim: impl Future<Output = T>) -> T {
         let output = claim.await;
         drop(self);

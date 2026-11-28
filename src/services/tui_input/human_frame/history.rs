@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
-pub(crate) mod append;
+pub mod append;
 #[cfg(test)]
 mod checked_tests;
 mod compat;
@@ -13,18 +13,18 @@ mod compat_tests;
 #[cfg(all(test, unix))]
 mod input_notice_memo_tests;
 #[cfg(unix)]
-pub(crate) mod native_row;
-pub(crate) mod notice_owner;
+pub mod native_row;
+pub mod notice_owner;
 mod screen;
 #[cfg(test)]
 mod screen_tests;
 mod stamped;
-#[cfg(test)]
-pub(crate) use stamped::READS as HISTORY_READS;
+#[cfg(any(test, feature = "test-support"))]
+pub use stamped::READS as HISTORY_READS;
 pub(crate) use stamped::Token as KnownToken;
-pub(crate) mod v2;
+pub mod v2;
 
-pub(crate) const CAPACITY: usize = 4096;
+pub const CAPACITY: usize = 4096;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Event {
@@ -95,7 +95,7 @@ fn class_hashes(text: &str) -> Vec<String> {
 }
 
 fn path() -> Result<PathBuf, String> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
         // Test subprocesses reopen their parent's temporary ledger to verify restart replay.
         if let Some(path) = std::env::var_os("ADK_TEST_FRAME_LEDGER_PATH") {
@@ -115,7 +115,7 @@ fn path() -> Result<PathBuf, String> {
         }
         return Ok(ROOT.with(|root| root.path().join("injected_frames.json")));
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     crate::config::runtime_root()
         .map(|root| root.join("runtime/injected_frames.json"))
         .ok_or_else(|| "frame ledger root unavailable".into())
@@ -219,7 +219,7 @@ pub(crate) fn has_reader(provider: &str, session: &str, id: &str) -> bool {
         .any(|[p, s, i]| p == provider && s == session && i == id)
 }
 
-pub(crate) fn register(
+pub fn register(
     (provider, session, id, author): (&str, &str, &str, &str),
     transcript: &Path,
     offset: u64,
@@ -297,7 +297,7 @@ fn register_inner(
     })
 }
 
-pub(crate) fn withdraw(id: &str, transcript: &Path) {
+pub fn withdraw(id: &str, transcript: &Path) {
     // A scoped attempt keeps its registration and writes nothing; only the queue's exact
     // not-sent proof, projected as abandoned, releases its collision candidate.
     if v2::scoped() {
@@ -319,7 +319,7 @@ pub(crate) fn withdraw(id: &str, transcript: &Path) {
     }
 }
 
-pub(crate) fn registered(id: &str, transcript: &Path, frame: &str) -> bool {
+pub fn registered(id: &str, transcript: &Path, frame: &str) -> bool {
     if let Some(registered) = v2::scoped_registered(id, transcript, frame) {
         return registered;
     }
@@ -366,7 +366,7 @@ pub(crate) fn screen_pending(session: &str, text: &str) -> bool {
 }
 
 /// Claims a complete exact record once; a known record identity cannot move between attempts.
-pub(crate) fn receipt(
+pub fn receipt(
     id: &str,
     transcript: &Path,
     offset: u64,
@@ -420,7 +420,7 @@ pub(crate) fn receipt(
     .flatten()
 }
 
-pub(crate) enum ObservedAttempt {
+pub enum ObservedAttempt {
     Known(String),
     Pending,
     None,
@@ -436,7 +436,7 @@ pub(crate) fn observed_attempt(
 }
 
 /// Preserves unreadable evidence as an error; `logical_session` names the recorded input owner.
-pub(crate) fn observed_attempt_checked(
+pub fn observed_attempt_checked(
     provider: &str,
     logical_session: &str,
     prompts: &[String],
@@ -521,7 +521,7 @@ fn observed_at_checked(
 
 /// Who took a native row that carries a registered frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum RowOwner {
+pub enum RowOwner {
     /// A non-meta user row: the attempt opened its own turn.
     User(String),
     /// A queued command the running turn took for the attempt.
@@ -601,7 +601,7 @@ fn taken_record(record: &serde_json::Value, offset: u64) -> Option<Taken> {
 
 /// The attempt `row` took: a receipt's own row, else same-frame rows paired with attempts in
 /// registration order, read afresh each time so rescans and later identical inputs agree.
-pub(crate) fn row_owner(provider: &str, session: &str, prompts: &[String], row: &str) -> RowOwner {
+pub fn row_owner(provider: &str, session: &str, prompts: &[String], row: &str) -> RowOwner {
     let Ok(store) = path().and_then(|path| readable(&path)) else {
         return RowOwner::Unread;
     };
@@ -610,7 +610,7 @@ pub(crate) fn row_owner(provider: &str, session: &str, prompts: &[String], row: 
 }
 
 /// A queue-owned Discord registration remains proof after its display fields are compacted.
-pub(crate) fn discord_owner_attempt(
+pub fn discord_owner_attempt(
     session: &str,
     native_session: &str,
     transcript: &Path,
@@ -694,7 +694,7 @@ fn discord_stop_entries(
 }
 
 /// Enqueue positions pair once with exact, source-bound Discord registrations, never body text alone.
-pub(crate) fn discord_enqueue_owners(
+pub fn discord_enqueue_owners(
     session: &str,
     native_session: &str,
     transcript: &Path,
@@ -852,7 +852,7 @@ pub(crate) fn attempt_row(provider: &str, session: &str, id: &str) -> Option<(u6
         )
 }
 
-pub(crate) fn receipt_row(id: &str, transcript: &Path) -> Option<String> {
+pub fn receipt_row(id: &str, transcript: &Path) -> Option<String> {
     if let Some(row) = v2::scoped_receipt_row(id, transcript) {
         return row;
     }
@@ -867,7 +867,7 @@ pub(crate) fn receipt_row(id: &str, transcript: &Path) -> Option<String> {
         .find_map(|event| event.row.clone())
 }
 
-pub(crate) fn unique_attempt(id: &str, transcript: &Path, frame: &str) -> bool {
+pub fn unique_attempt(id: &str, transcript: &Path, frame: &str) -> bool {
     let Some(store) = path().ok().and_then(|path| readable(&path).ok()) else {
         return false;
     };

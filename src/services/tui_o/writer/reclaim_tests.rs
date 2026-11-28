@@ -153,7 +153,7 @@ async fn hook_refresh_recovers_one_cursor_and_reposts_nothing_after_interrupt() 
                 &payload,
                 &headers
             )
-            .refused()
+            .refused_for_test()
         );
         polls(4).await;
         assert!(task.is_finished(), "{step:?} must interrupt publication");
@@ -234,7 +234,7 @@ async fn hook_refresh_moves_the_cursor_to_the_live_device_without_repost() {
             &payload,
             &headers,
         );
-        assert!(!ingress.refused(), "{ingress:?}");
+        assert!(!ingress.refused_for_test(), "{ingress:?}");
         polls(4).await;
         let pinned = pane.history().current.unwrap().pin.unwrap();
         assert_eq!(pinned, live, "{event} must refresh the verified pin");
@@ -337,7 +337,7 @@ fn hook_refresh_rejects_a_delayed_hook_from_the_previous_path() {
             &headers,
         )
     };
-    assert!(!hook(&moved, 3).refused());
+    assert!(!hook(&moved, 3).refused_for_test());
     let pin = source_id_for(&session, &moved).unwrap();
     assert_eq!(pane.history().current.unwrap().pin, Some(pin.clone()));
     hook(&path, 2);

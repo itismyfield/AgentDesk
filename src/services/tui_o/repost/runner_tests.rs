@@ -110,7 +110,10 @@ impl RepostWriter for TestWriter {
     }
 
     fn prepare(&mut self, epoch: u64, permit: &DispatchPermit) -> Result<(), String> {
-        self.prepared.lock().unwrap().push((epoch, permit.slot()));
+        self.prepared
+            .lock()
+            .unwrap()
+            .push((epoch, permit.slot_for_test()));
         Ok(())
     }
 
@@ -440,7 +443,7 @@ async fn f5_t02_t25_gate_lost_after_grant_keeps_the_spent_slot_pg() {
     let Admission::Granted { permit, lease } = admission.await.unwrap() else {
         panic!("slot 2");
     };
-    assert_eq!(permit.slot(), 2);
+    assert_eq!(permit.slot_for_test(), 2);
     let wire = Wire::new(Answer::Uncertain, &writer);
     let started = start(&mut writer, permit, lease, &wire).await;
     started.finish(&mut writer, &pool).await.unwrap();
@@ -649,12 +652,8 @@ async fn f5_t18_t19_operator_and_auto_share_the_three_post_budget_pg() {
         native_key: "t18".into(),
         kind: UnitKind::Body,
     };
-    let approved = ApprovedRejected {
-        rejected_serial: 2,
-        key: PieceKey::new(unit, 0).unwrap(),
-        payload: "piece".into(),
-        anchor: 40,
-    };
+    let approved =
+        ApprovedRejected::for_test(2, PieceKey::new(unit, 0).unwrap(), "piece".into(), 40);
     let resume = |check| DispatchIntent::OperatorResume {
         approval_id: "approval-1".into(),
         approved: approved.clone(),
@@ -668,14 +667,22 @@ async fn f5_t18_t19_operator_and_auto_share_the_three_post_budget_pg() {
     let mut on = runner(&pool, &run);
     let stale = on.try_next_dispatch(&mut writer, resume(&Approves(false)));
     assert_eq!(turn_step(&stale.await.unwrap()), TurnStep::Stopped);
-    assert!(load(&pool, &approved.key).await.unwrap().is_none());
+    assert!(
+        load(&pool, approved.key_for_test())
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     // T18: the 403 original, the approved retry goes uncertain, Auto takes the last slot.
     let admission = on.try_next_dispatch(&mut writer, resume(&Approves(true)));
     let Admission::Granted { permit, lease } = admission.await.unwrap() else {
         panic!("the approved retry");
     };
-    assert_eq!((permit.slot(), permit.payload()), (1, "piece"));
+    assert_eq!(
+        (permit.slot_for_test(), permit.payload_for_test()),
+        (1, "piece")
+    );
     let wire = Wire::new(Answer::Uncertain, &writer);
     start(&mut writer, permit, lease, &wire)
         .await
@@ -687,16 +694,16 @@ async fn f5_t18_t19_operator_and_auto_share_the_three_post_budget_pg() {
     let Admission::Granted { permit, lease } = again.await.unwrap() else {
         panic!("slot 2");
     };
-    assert_eq!(permit.slot(), 2);
+    assert_eq!(permit.slot_for_test(), 2);
     start(&mut writer, permit, lease, &wire)
         .await
         .finish(&mut writer, &pool)
         .await
         .unwrap();
-    let intent = DispatchIntent::Auto(evidence(&pool, &approved.key, &run).await);
+    let intent = DispatchIntent::Auto(evidence(&pool, approved.key_for_test(), &run).await);
     let last = on.try_next_dispatch(&mut writer, intent);
     assert_eq!(turn_step(&last.await.unwrap()), TurnStep::Done);
-    let spent = slots(&pool, &approved.key).await;
+    let spent = slots(&pool, approved.key_for_test()).await;
     assert_eq!(spent.len(), 3);
     assert_eq!(spent[0], (0, Some(AttemptResult::Rejected)));
     assert_eq!(wire.posts(), 2);
@@ -720,7 +727,7 @@ async fn f5_present_is_not_automatically_a_receipt_pg() {
     let mut runner = runner(&pool, &run);
     let footer = |key: &PieceKey| {
         let ids = RepostIds::for_piece(&marker(key)).unwrap();
-        let envelope = RepostEnvelope::additional(CHANNEL, "p".into(), ids);
+        let envelope = RepostEnvelope::additional_for_test(CHANNEL, "p".into(), ids);
         let body = serde_json::to_value(envelope.message()).unwrap();
         body["embeds"][0]["footer"]["text"]
             .as_str()
@@ -741,7 +748,7 @@ async fn f5_present_is_not_automatically_a_receipt_pg() {
     let reader = Fake::with([message(900, BOT, "earlier"), found, damaged]);
     let settled = Instant::now().checked_sub(Duration::from_secs(60)).unwrap();
     let Tick::Ran(report) = runner
-        .tick(CHANNEL, &reader, &[900], settled)
+        .tick_for_test(CHANNEL, &reader, &[900], settled)
         .await
         .unwrap();
     assert_eq!(
@@ -773,7 +780,7 @@ fn live() -> Arc<dyn Fn() -> bool + Send + Sync> {
 
 fn envelope() -> RepostEnvelope {
     let key = super::repost_probe::key("handed");
-    RepostEnvelope::additional(
+    RepostEnvelope::additional_for_test(
         CHANNEL,
         "p".into(),
         RepostIds::for_piece(&marker(&key)).unwrap(),
@@ -791,7 +798,7 @@ async fn f5_a_request_dropped_after_its_first_pending_is_gone_and_stays_counted(
     assert!(first.is_pending());
     drop(request);
     assert_eq!(wire.dropped.load(Ordering::SeqCst), 1);
-    let report = counts.report(WireOutcome::TimedOut);
+    let report = counts.report_for_test(WireOutcome::TimedOut);
     assert_eq!((report.wire, report.counted, report.throttled), (1, 1, 0));
     wire.release.notify_one();
     tokio::task::yield_now().await;
@@ -815,7 +822,7 @@ async fn f5_aborting_the_owning_task_ends_the_request_without_a_retry() {
         owner.abort();
         assert!(owner.await.unwrap_err().is_cancelled());
         assert_eq!(wire.dropped.load(Ordering::SeqCst), 1, "{answer:?}");
-        let report = counts.report(WireOutcome::TimedOut);
+        let report = counts.report_for_test(WireOutcome::TimedOut);
         assert_eq!((report.wire, report.counted, report.throttled), counted);
         wire.release.notify_one();
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -832,7 +839,7 @@ async fn auto_missing_row_is_observe_only_pg() {
     let run = super::repost_probe::run("run-1");
     let mut writer = TestWriter::new();
     let gone = absent_evidence(super::repost_probe::scope(&[0]), run.clone());
-    let key = gone.scope().key.clone();
+    let key = gone.scope_for_test().key.clone();
     let mut runner = Runner::new(pool.clone(), BOT, run.clone());
     assert!(load(&pool, &key).await.unwrap().is_none());
     let intent = DispatchIntent::Auto(Box::new(gone));
@@ -856,7 +863,7 @@ async fn auto_row_gone_before_the_grant_lock_is_observe_only_pg() {
     let run = holder("a");
     let evidence = evidence(&pool, &key, &run).await;
     let mut blocker = pool.begin().await.unwrap();
-    let unit = key.unit();
+    let unit = key.unit_for_test();
     let piece = (unit.channel_id.to_string(), unit.native_key.clone());
     sqlx::query(
         "SELECT 1 FROM o_piece_delivery WHERE channel_id = $1 AND native_key = $2 FOR UPDATE",

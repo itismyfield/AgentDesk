@@ -1,5 +1,5 @@
 use super::*;
-use crate::db::dispatched_sessions::hosted_execution::tests::{owner, record};
+use crate::db::dispatched_sessions::hosted_execution::test_support::{owner, record};
 use crate::services::session_host::herdr::contract::{HerdrOutcome, Witnessed};
 use crate::services::session_host::herdr::model::{HerdrReply, HerdrResult, HerdrSnapshot};
 use crate::services::session_host::herdr::provenance::{ProcessStart, StartIdentity};
@@ -89,7 +89,7 @@ fn retired_record() -> HostedExecution {
     record
 }
 
-pub(crate) fn ended(record: &HostedExecution) -> RetiredEnd {
+pub fn ended(record: &HostedExecution) -> RetiredEnd {
     RetiredEnd::observe_with_os(
         &endpoint(),
         Arc::new(MissingPane),
@@ -99,7 +99,7 @@ pub(crate) fn ended(record: &HostedExecution) -> RetiredEnd {
     .unwrap()
 }
 
-pub(crate) fn provider_alive(record: &HostedExecution) -> Result<RetiredEnd, ReturnEndRefusal> {
+pub fn provider_alive(record: &HostedExecution) -> Result<RetiredEnd, ReturnEndRefusal> {
     RetiredEnd::observe_with_os(
         &endpoint(),
         Arc::new(MissingPane),

@@ -72,19 +72,19 @@ fn emit(message: u64, stage: &str, at_ms: u64, wait_ms: Option<u64>) {
     });
 }
 
-pub(crate) fn mark(message: u64, stage: &str, wait_ms: Option<u64>) {
+pub fn mark(message: u64, stage: &str, wait_ms: Option<u64>) {
     emit(message, stage, now_ms(), wait_ms);
 }
 
 /// Marks the gateway message running on this task, if any.
-pub(crate) fn mark_current(stage: &str) {
+pub fn mark_current(stage: &str) {
     if let Some(message) = GATEWAY_MESSAGE.try_with(|m| *m).ok().flatten() {
         mark(message, stage, None);
     }
 }
 
 /// Marks the user message of a `discord:<channel>:<message>` turn id.
-pub(crate) fn mark_turn(turn_id: &str, stage: &str) {
+pub fn mark_turn(turn_id: &str, stage: &str) {
     let message = turn_id
         .strip_prefix("discord:")
         .and_then(|rest| rest.rsplit_once(':'))
@@ -95,10 +95,7 @@ pub(crate) fn mark_turn(turn_id: &str, stage: &str) {
 }
 
 /// Runs a gateway event handler with `message` visible to [`mark_current`] and [`lock_wait`].
-pub(crate) fn gateway<F: Future>(
-    message: Option<u64>,
-    handler: F,
-) -> impl Future<Output = F::Output> {
+pub fn gateway<F: Future>(message: Option<u64>, handler: F) -> impl Future<Output = F::Output> {
     if let Some(message) = message {
         mark(message, "gateway", None);
     }
@@ -107,7 +104,7 @@ pub(crate) fn gateway<F: Future>(
 
 /// Runs a queued item's handling with its merged source ids, so each source gets the
 /// representative's lines.
-pub(crate) fn merged<F: Future>(
+pub fn merged<F: Future>(
     representative: u64,
     sources: Vec<u64>,
     run: F,
@@ -117,13 +114,13 @@ pub(crate) fn merged<F: Future>(
 
 /// Captures a line for the enclosing [`after`]; outside one it is dropped rather than written
 /// where a lock may be held.
-pub(crate) fn defer(message: u64, stage: &'static str, wait_ms: Option<u64>) {
+pub fn defer(message: u64, stage: &'static str, wait_ms: Option<u64>) {
     let line = (message, stage, now_ms(), wait_ms);
     let _ = DEFERRED.try_with(|lines| lines.lock().unwrap_or_else(|e| e.into_inner()).push(line));
 }
 
 /// Runs `locked`, which may hold locks, and writes the lines it deferred once it returns.
-pub(crate) async fn after<F: Future>(locked: F) -> F::Output {
+pub async fn after<F: Future>(locked: F) -> F::Output {
     let lines = Arc::new(Mutex::new(Vec::new()));
     let output = DEFERRED.scope(lines.clone(), locked).await;
     let lines = std::mem::take(&mut *lines.lock().unwrap_or_else(|e| e.into_inner()));
@@ -134,7 +131,7 @@ pub(crate) async fn after<F: Future>(locked: F) -> F::Output {
 }
 
 /// A lock guard that logs its acquisition wait after release, so the line never lengthens a hold.
-pub(crate) struct Waited<G> {
+pub struct Waited<G> {
     guard: Option<G>,
     line: Option<Line>,
 }
@@ -162,7 +159,7 @@ impl<G> Drop for Waited<G> {
 }
 
 /// Awaits `acquire`; under a gateway message the wait is logged as `stage` once the guard drops.
-pub(crate) async fn lock_wait<F: Future>(stage: &'static str, acquire: F) -> Waited<F::Output> {
+pub async fn lock_wait<F: Future>(stage: &'static str, acquire: F) -> Waited<F::Output> {
     let message = GATEWAY_MESSAGE.try_with(|m| *m).ok().flatten();
     let started = Instant::now();
     let guard = acquire.await;

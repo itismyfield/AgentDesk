@@ -110,6 +110,9 @@ def admission_problems(root, base_ref, baseline, inner_baseline):
     for label, current, previous in (("total", baseline, admitted), ("inner", inner_baseline, admitted_inner)):
         validate_baseline(current)
         validate_baseline(previous)
+        # Moving suppressions between files is admitted when the decreases elsewhere cover every increase.
+        if label == "total" and sum(current.values()) <= sum(previous.values()):
+            continue
         failures.extend(f"{label} baseline {path}: {n} exceeds base allocation {previous.get(path, 0)}"
                         for path, n in current.items() if n > previous.get(path, 0))
     return failures

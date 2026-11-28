@@ -14,7 +14,7 @@ use crate::services::tui_o::shadow::{MAX_READ_BYTES, ShadowProvider, UnitKey, Un
 use super::{CHECKPOINT, Failure, SEGMENT, STORE_DIR_NAME};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct AgyTarget {
+pub struct AgyTarget {
     pub(crate) destination: u64,
     pub(crate) logical_channel: u64,
 }
@@ -35,7 +35,7 @@ pub(crate) struct AgyOpen {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct AgyReplay {
+pub struct AgyReplay {
     pub(crate) key: AgyTurnKey,
     pub(crate) session_key: String,
     pub(crate) open: AgyOpen,
@@ -61,7 +61,7 @@ pub(crate) struct AgySeal {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, Deserialize)]
-pub(crate) struct AgyFrontier {
+pub struct AgyFrontier {
     pub(crate) path: PathBuf,
     pub(crate) dev: u64,
     pub(crate) ino: u64,

@@ -35,10 +35,10 @@ fn thread_children_outside_config_without_parent_writes_nothing() {
         .unwrap();
     let scope = crate::services::tui_o::cutover::boot_snapshot()
         .unwrap()
-        .init_scope_view();
+        .init_scope_view_for_test();
     assert!(
         store
-            .init_channel_as(&fixture(43), InitOrigin::Fresh, &scope)
+            .init_channel_as_for_test(&fixture(43), InitOrigin::Fresh, &scope)
             .is_err()
     );
     assert!(!store.has_channel_dir(43));
@@ -64,7 +64,7 @@ fn thread_children_old_reader_keeps_unbound_init_without_writes() {
     })).unwrap();
     let boot = BootChannels::validate(&config)
         .unwrap()
-        .seeded(&config, |selected, _| {
+        .seeded_for_test(&config, |selected, _| {
             let committed = store.channels_with_init()?;
             let channels = selected.union(&committed).copied().collect();
             Ok(channel_policy::stored(Some(root.path()), &channels))
@@ -100,7 +100,7 @@ fn surface(
         "id": "43", "parent_id": "42", "type": kind, "name": "fixture"
     }))
     .unwrap();
-    crate::services::session_host::surface_policy::VerifiedSurface::from_discord(
+    crate::services::session_host::surface_policy::VerifiedSurface::from_discord_for_test(
         &channel,
         RuntimeHandoffKind::ClaudeTui,
     )
@@ -115,7 +115,7 @@ fn init_child(store: &OStore, parent: bool, enabled: bool, proof: bool) -> Resul
     store.init_channel_checked_for_test(
         &init,
         InitOrigin::Fresh,
-        &boot().init_scope_view(),
+        &boot().init_scope_view_for_test(),
         proof.then_some(&verified),
         enabled,
     )
@@ -218,15 +218,15 @@ fn thread_children_production_capability_keeps_init_floor_writer_counts_zero() {
     init.policy_parent = Some(42);
     let scope = crate::services::tui_o::cutover::boot_snapshot()
         .unwrap()
-        .init_scope_view();
+        .init_scope_view_for_test();
     assert!(
         store
-            .init_channel_as(&init, InitOrigin::Fresh, &scope)
+            .init_channel_as_for_test(&init, InitOrigin::Fresh, &scope)
             .is_err()
     );
     assert!(
         store
-            .begin_era_as(&init, InitOrigin::Fresh, &scope, None)
+            .begin_era_as_for_test(&init, InitOrigin::Fresh, &scope, None)
             .is_err()
     );
     assert_eq!(store.channels_with_init().unwrap().len(), 0);
@@ -292,7 +292,7 @@ fn thread_children_raw_parent_and_wrong_provider_are_rejected_before_floor() {
                 .init_channel_checked_for_test(
                     &init,
                     InitOrigin::Fresh,
-                    &boot().init_scope_view(),
+                    &boot().init_scope_view_for_test(),
                     Some(&valid),
                     true
                 )
@@ -303,11 +303,12 @@ fn thread_children_raw_parent_and_wrong_provider_are_rejected_before_floor() {
         "id": "43", "parent_id": "42", "type": 10, "name": "fixture"
     }))
     .unwrap();
-    let wrong = crate::services::session_host::surface_policy::VerifiedSurface::from_discord(
-        &channel,
-        RuntimeHandoffKind::CodexTui,
-    )
-    .unwrap();
+    let wrong =
+        crate::services::session_host::surface_policy::VerifiedSurface::from_discord_for_test(
+            &channel,
+            RuntimeHandoffKind::CodexTui,
+        )
+        .unwrap();
     let mut init = fixture(43);
     init.policy_parent = Some(42);
     assert!(
@@ -315,7 +316,7 @@ fn thread_children_raw_parent_and_wrong_provider_are_rejected_before_floor() {
             .init_channel_checked_for_test(
                 &init,
                 InitOrigin::Fresh,
-                &boot().init_scope_view(),
+                &boot().init_scope_view_for_test(),
                 Some(&wrong),
                 true
             )
@@ -378,9 +379,9 @@ fn thread_children_store_admission_and_build_info_switch_together() {
     let mut init = fixture(43);
     init.policy_parent = Some(42);
     let verified = surface(poise::serenity_prelude::ChannelType::PublicThread).unwrap();
-    let scope = boot().init_scope_view();
+    let scope = boot().init_scope_view_for_test();
     let admitted = store
-        .begin_era_as(&init, InitOrigin::Fresh, &scope, Some(&verified))
+        .begin_era_as_for_test(&init, InitOrigin::Fresh, &scope, Some(&verified))
         .is_ok();
     let reported = crate::cli::build_info::build_info_json()["o_store_thread_children"] == true;
     // The deploy guard trusts build-info, so it must say exactly what the store admits.

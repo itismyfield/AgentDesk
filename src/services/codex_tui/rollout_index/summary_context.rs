@@ -12,9 +12,9 @@ use crate::services::agent_protocol::codex_payload_turn_id;
 
 const MAX_CONTEXT_SCAN_BYTES: u64 = 1024 * 1024;
 
-pub(crate) struct CodexModel {
-    pub(crate) model: Option<String>,
-    pub(crate) effort: Option<String>,
+pub struct CodexModel {
+    pub model: Option<String>,
+    pub effort: Option<String>,
 }
 
 pub(crate) fn context(value: &Value) -> Option<(&str, Option<&str>, Option<&str>)> {
@@ -34,7 +34,7 @@ fn text(value: Option<&Value>) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 
-pub(crate) fn read(
+pub fn read(
     path: &Path,
     session_id: &str,
     turn_start_offset: Option<u64>,

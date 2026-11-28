@@ -20,11 +20,13 @@ from rust_test_sources import (  # noqa: E402
     platform_split,
     rust_tokens as _rust_tokens,
     walk,
+    workspace_lib_roots,
 )
 
 
 POLICIES = frozenset({"required", "optional"})
 SEGMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+PACKAGE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
 RESULT = re.compile(
     r"^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; "
     r"[0-9]+ filtered out; finished in [0-9]+(?:\.[0-9]+)?s$"
@@ -60,6 +62,9 @@ class ProofPlan:
     pass_prefix: str
     gate: GateSpec
     owners: tuple[OwnerSpec, ...]
+    # Workspace package whose lib test binary owns the IDs; None keeps the root package's src/lib.rs.
+    package: str | None = None
+    lib_root: str = "src/lib.rs"
 
 
 @dataclass(frozen=True)
@@ -114,6 +119,22 @@ def _path(plan: ProofPlan, value: str, label: str) -> Path:
     return joined
 
 
+def _library(plan: ProofPlan) -> tuple[Path, str]:
+    """The package's manifest directory and repository-relative manifest; the package must own lib_root."""
+    root = _path(plan, plan.lib_root, "library root")
+    if plan.package is None:
+        if plan.lib_root != "src/lib.rs":
+            _fail("a library root other than src/lib.rs needs its package")
+        return plan.repo_root, "Cargo.toml"
+    try:
+        manifest, declared = workspace_lib_roots(plan.repo_root).get(plan.package, (None, None))
+    except (OSError, ValueError) as error:
+        _fail(f"workspace manifests are unreadable: {error}")
+    if declared is None or declared != root.resolve():
+        _fail(f"package {plan.package} does not own library root {plan.lib_root}")
+    return manifest.parent, manifest.relative_to(plan.repo_root.resolve()).as_posix()
+
+
 def _plan_digest(plan: ProofPlan) -> str:
     return hashlib.sha256(repr(plan).encode("utf-8")).hexdigest()
 def _identity(plan: ProofPlan) -> str:
@@ -126,7 +147,7 @@ def _identity(plan: ProofPlan) -> str:
     governed-source change and restore wholly within one child window is not
     detected and is outside this engine's guarantee.
     """
-    paths = ["Cargo.toml", "src/lib.rs", plan.gate.parent_source, plan.gate.child_source]
+    paths = ["Cargo.toml", plan.lib_root, _library(plan)[1], plan.gate.parent_source, plan.gate.child_source]
     paths += [value for owner in plan.owners for value in (owner.parent_source, owner.owner_source)]
     digest = hashlib.sha256()
     for value in sorted(set(paths)):
@@ -178,6 +199,9 @@ def _validate_spec(plan: ProofPlan) -> None:
         _fail(f"platform must be one of {sorted(PLATFORMS)}: {plan.platform}")
     if not SEGMENT.fullmatch(plan.pass_prefix):
         _fail("pass prefix must be one Rust-style identifier")
+    if plan.package is not None and not PACKAGE.fullmatch(plan.package):
+        _fail(f"package must be one Cargo package name: {plan.package}")
+    _relative(plan.lib_root, "library root")
     gate = plan.gate
     if gate.policy not in POLICIES:
         _fail(f"invalid gate policy: {gate.policy}")
@@ -226,11 +250,12 @@ def seal(plan: ProofPlan) -> SealedProof:
     """Validate the complete graph, then commit an independent execution tuple."""
     before = _plan_digest(plan)
     _validate_spec(plan)
+    manifest_dir, _ = _library(plan)
     try:
-        features = default_features(plan.repo_root)
+        features = default_features(manifest_dir)
     except (OSError, ValueError) as error:
         _fail(f"Cargo.toml features are unreadable: {error}")
-    inventory = walk(plan.repo_root / "src/lib.rs", plan.repo_root)
+    inventory = walk(_path(plan, plan.lib_root, "library root"), plan.repo_root, manifest_dir=manifest_dir)
     # Two oracles: every declaration the sources reach, and what the target platform compiles.
     compiled_ids = platform_split(inventory, PLATFORMS[plan.platform], features)[0]
     gate_parent = _path(plan, plan.gate.parent_source, "gate parent")
@@ -326,7 +351,8 @@ def run(plan: ProofPlan) -> ProofResult:
             raw = Path(scratch) / "raw"
             normalized = Path(scratch) / "normalized"
             completed = subprocess.run(
-                ["cargo", "test", "--lib", test_id, "--", "--exact", "--test-threads=1"],
+                ["cargo", "test", *(("-p", plan.package) if plan.package else ()), "--lib", test_id,
+                 "--", "--exact", "--test-threads=1"],
                 cwd=plan.repo_root,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -365,6 +391,7 @@ def parse_cli(argv: list[str] | None = None) -> ProofPlan:
     command.add_argument("--gate", nargs=5, required=True, metavar=("KEY", "PARENT", "MODULE", "CHILD", "POLICY"))
     command.add_argument("--owner", nargs=7, action="append", required=True, metavar=("KEY", "GATE", "PARENT", "MODULE", "SOURCE", "FAMILY", "POLICY"))
     command.add_argument("--owner-id", nargs=2, action="append", default=[], metavar=("OWNER", "ID"))
+    command.add_argument("--package", nargs=2, metavar=("NAME", "LIB_ROOT"))
     args = parser.parse_args(argv)
     ids: dict[str, list[str]] = {}
     for owner_key, test_id in args.owner_id:
@@ -372,7 +399,8 @@ def parse_cli(argv: list[str] | None = None) -> ProofPlan:
     owners = tuple(OwnerSpec(*values, tuple(ids.pop(values[0], ()))) for values in args.owner)
     if ids:
         parser.error(f"owner IDs reference unknown keys: {', '.join(sorted(ids))}")
-    return ProofPlan(Path(args.repo_root).resolve(), args.platform, args.pass_prefix, GateSpec(*args.gate), owners)
+    package = tuple(args.package) if args.package else (None, "src/lib.rs")
+    return ProofPlan(Path(args.repo_root).resolve(), args.platform, args.pass_prefix, GateSpec(*args.gate), owners, *package)
 
 
 def main(argv: list[str] | None = None) -> int:

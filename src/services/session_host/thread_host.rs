@@ -9,7 +9,7 @@ use crate::config::session_hosts::{self, ChannelEndpoint};
 
 /// The host a channel's next new execution follows. It grants no execution.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum PolicyHost {
+pub enum PolicyHost {
     /// `via_parent` is `None` for the channel's own boot entry.
     Herdr {
         endpoint: ChannelEndpoint,
@@ -21,7 +21,7 @@ pub(crate) enum PolicyHost {
 }
 
 /// The boot entry of `channel` itself, else of the parent a resolved child follows.
-pub(crate) fn parent_policy(channel: u64) -> PolicyHost {
+pub fn parent_policy(channel: u64) -> PolicyHost {
     // The one raw boot read of this judgement.
     let boot = |channel: u64| session_hosts::herdr_endpoint(channel);
     if let Some(endpoint) = boot(channel) {
@@ -45,7 +45,7 @@ pub(crate) fn parent_policy(channel: u64) -> PolicyHost {
 
 /// Whether boot policy routes neither `channel` nor its parent to Herdr. An unresolved child has
 /// not left: its policy is unknown, so what it holds for a Herdr host is kept.
-pub(crate) fn left_herdr(channel: u64) -> bool {
+pub fn left_herdr(channel: u64) -> bool {
     match parent_policy(channel) {
         PolicyHost::Tmux => true,
         PolicyHost::Herdr { .. } => false,
@@ -62,7 +62,7 @@ pub(crate) fn left_herdr(channel: u64) -> bool {
 
 /// The host of the execution a synchronous reader acts on now.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Execution {
+pub enum Execution {
     Herdr(ChannelEndpoint),
     Tmux,
     /// Nothing was judged for a thread whose parent runs Herdr, or its parent is unresolved; never
@@ -75,7 +75,7 @@ impl Execution {
         matches!(self, Self::Herdr(_))
     }
 
-    pub(crate) fn endpoint(self) -> Option<ChannelEndpoint> {
+    pub fn endpoint(self) -> Option<ChannelEndpoint> {
         match self {
             Self::Herdr(endpoint) => Some(endpoint),
             Self::Tmux | Self::Unknown => None,
@@ -87,7 +87,7 @@ impl Execution {
 static JUDGED: Mutex<BTreeMap<u64, bool>> = Mutex::new(BTreeMap::new());
 
 /// Records the turn host's final judgement of a thread; `None` (refused or returning) forgets it.
-pub(crate) fn record_judged(channel: u64, herdr: Option<bool>) {
+pub fn record_judged(channel: u64, herdr: Option<bool>) {
     if !matches!(relation(channel), Relation::Child { .. }) {
         return;
     }
@@ -100,7 +100,7 @@ pub(crate) fn record_judged(channel: u64, herdr: Option<bool>) {
 
 /// A channel's own boot entry is its host until restart. A thread under a Herdr parent reads what
 /// the turn host last judged for it in this process, and nothing judged is `Unknown`.
-pub(crate) fn current_execution_cached(channel: u64) -> Execution {
+pub fn current_execution_cached(channel: u64) -> Execution {
     match parent_policy(channel) {
         PolicyHost::Herdr {
             endpoint,
@@ -155,12 +155,12 @@ pub(crate) fn next_host_cached(channel: u64) -> NextHost {
 }
 
 /// Whether the next execution of `channel` runs on Herdr, by [`next_host_cached`].
-pub(crate) fn next_is_herdr(channel: u64) -> bool {
+pub fn next_is_herdr(channel: u64) -> bool {
     next_host_cached(channel).is_herdr()
 }
 
 /// Whether the execution a synchronous reader acts on runs on Herdr.
-pub(crate) fn runs_herdr(channel: u64) -> bool {
+pub fn runs_herdr(channel: u64) -> bool {
     current_execution_cached(channel).is_herdr()
 }
 

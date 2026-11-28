@@ -1,7 +1,7 @@
 use crate::config::session_hosts::approval_store::{ApprovalStore, FileApprovalStore};
 use crate::config::session_hosts::migration::{self, NoHoldStore, PgRows, RowSource};
 use crate::config::session_hosts::{self, BootSessionHosts};
-use crate::db::dispatched_sessions::hosted_execution::tests::{owner, record};
+use crate::db::dispatched_sessions::hosted_execution::test_support::{owner, record};
 use crate::db::dispatched_sessions::hosted_execution::{HostedRecord, HostedState};
 
 fn config(root: &std::path::Path, socket: &str) -> crate::config::Config {
@@ -233,7 +233,10 @@ fn boot_entries_select_approved_hosts_pg() {
                 let before = crate::services::session_host::HerdrRegistry::build(&old);
                 let after = crate::services::session_host::HerdrRegistry::build(boot);
                 assert_eq!(before.is_empty(), after.is_empty());
-                assert_eq!(before.sole_host().is_some(), after.sole_host().is_some());
+                assert_eq!(
+                    before.sole_host_for_test().is_some(),
+                    after.sole_host_for_test().is_some()
+                );
                 let mut row = record(&owner("41"), "registry", HostedState::Bound);
                 row.location.as_mut().unwrap().socket_addr =
                     root.join("old.sock").display().to_string();
@@ -288,7 +291,7 @@ fn boot_entries_select_approved_hosts_pg() {
                     true,
                 )
                 .await
-                .into_parts()
+                .into_parts_for_test()
                 .0;
                 assert_eq!(
                     cli.channels(),

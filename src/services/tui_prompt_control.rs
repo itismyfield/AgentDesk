@@ -9,10 +9,10 @@
 //! injection or execution, and the first marker is always retained.
 
 /// Claude TUI commands that complete locally: AgentDesk pass-throughs plus `/cost` and `/context`.
-pub(crate) const LOCAL_ONLY_SLASH_COMMANDS: [&str; 3] = ["/compact", "/cost", "/context"];
+pub const LOCAL_ONLY_SLASH_COMMANDS: [&str; 3] = ["/compact", "/cost", "/context"];
 
 /// Claude-native controls observed from a TUI that also complete locally.
-pub(crate) const OBSERVATION_ONLY_LOCAL_SLASH_COMMANDS: [&str; 3] = ["/model", "/effort", "/fast"];
+pub const OBSERVATION_ONLY_LOCAL_SLASH_COMMANDS: [&str; 3] = ["/model", "/effort", "/fast"];
 
 /// #5188: slash controls that RESET the provider session — Claude Code opens a
 /// brand-new transcript JSONL and stops writing to the current one.
@@ -33,7 +33,7 @@ pub(crate) const SESSION_RESETTING_SLASH_COMMANDS: [&str; 1] = ["/clear"];
 /// `local_only_whitelist_matches_passthrough_command_set` pins to the Claude
 /// passthrough variant set. The classification primitives below are shared
 /// across providers; the command registries are not.
-pub(crate) const CODEX_LOCAL_CONTROLS: [&str; 2] = ["/model", "/help"];
+pub const CODEX_LOCAL_CONTROLS: [&str; 2] = ["/model", "/help"];
 
 /// #5660 rule R3: single-segment filesystem roots that must reach the provider
 /// as prompt text instead of being read as a command. Stored lowercase and
@@ -65,7 +65,7 @@ pub(crate) const FS_ROOT_SEGMENTS: [&str; 20] = [
 
 /// #5660: how one raw Codex wrapper input line must be routed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum CodexInputClass {
+pub enum CodexInputClass {
     /// Forward to the provider as a turn, exactly as before this issue.
     ProviderPrompt,
     /// Completes locally in the wrapper; no provider turn is created.
@@ -76,15 +76,15 @@ pub(crate) enum CodexInputClass {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct LocalOnlySlashControl {
-    pub(crate) kind: String,
+pub struct LocalOnlySlashControl {
+    pub kind: String,
 }
 
 /// Returns the local-only control carried by `prompt`, if it is a complete,
 /// start-anchored local command representation. Unknown slash commands and
 /// `/loop` deliberately return `None`: they retain their normal external-turn
 /// lifecycle and raw/envelope dedupe behavior.
-pub(crate) fn classify_local_only_slash_control(prompt: &str) -> Option<LocalOnlySlashControl> {
+pub fn classify_local_only_slash_control(prompt: &str) -> Option<LocalOnlySlashControl> {
     let (normalized, peeled_caveat) = normalize_local_control_prompt(prompt);
     if peeled_caveat && normalized.is_empty() {
         return Some(LocalOnlySlashControl {
@@ -116,7 +116,7 @@ pub(crate) fn classify_local_only_slash_control(prompt: &str) -> Option<LocalOnl
     None
 }
 
-pub(crate) fn is_local_only_slash_command_kind(kind: &str) -> bool {
+pub fn is_local_only_slash_command_kind(kind: &str) -> bool {
     LOCAL_ONLY_SLASH_COMMANDS.contains(&kind)
         || OBSERVATION_ONLY_LOCAL_SLASH_COMMANDS.contains(&kind)
 }
@@ -271,7 +271,7 @@ fn first_xml_tag_token(text: &str, tag: &str) -> Option<String> {
 /// an allowlist does with everything it does not list. Terminal input (S2) and,
 /// once the upstream admission gate lands, Discord intake (S3) call this same
 /// function, so the two origins cannot drift on what counts as a command.
-pub(crate) fn classify_codex_input(text: &str) -> CodexInputClass {
+pub fn classify_codex_input(text: &str) -> CodexInputClass {
     let normalized = strip_terminal_controls(text);
     let normalized = normalized.trim();
     // External prompts are base64-framed and routinely multi-line. Only a
@@ -318,7 +318,7 @@ fn is_fs_path_token(raw_name: &str) -> bool {
 /// The split and start-anchoring rule of record. Returns the command token
 /// exactly as written; only [`raw_slash_invocation`] lowercases, so case
 /// normalization has a single home.
-pub(crate) fn raw_slash_invocation_parts(value: &str) -> Option<(String, String)> {
+pub fn raw_slash_invocation_parts(value: &str) -> Option<(String, String)> {
     let value = value.trim();
     let (name, args) = match value.split_once(char::is_whitespace) {
         Some((name, args)) => (name, args),

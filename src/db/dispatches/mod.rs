@@ -2,11 +2,11 @@
 // `outbox` re-exports the per-dispatch outbox-shaped queries so the route
 // layer / service layer / future #1694 work can depend on a narrow API
 // without further extraction.
-pub(crate) mod delivery_events;
+pub mod delivery_events;
 mod metadata;
-pub(crate) mod outbox;
+pub mod outbox;
 
-pub(crate) use metadata::{
+pub use metadata::{
     CardIssueInfo, DispatchDeliveryMetadata, dispatch_context_value,
     latest_completed_review_provider_pg, load_card_issue_info_pg,
     load_dispatch_delivery_metadata_pg,
@@ -18,32 +18,32 @@ use crate::db::auto_queue::slot_predicate::{
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SlotThreadBinding {
-    pub(crate) agent_id: String,
-    pub(crate) slot_index: i64,
-    pub(crate) thread_id: Option<String>,
+pub struct SlotThreadBinding {
+    pub agent_id: String,
+    pub slot_index: i64,
+    pub thread_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ReviewFollowupCard {
-    pub(crate) agent_id: String,
-    pub(crate) title: String,
-    pub(crate) issue_url: Option<String>,
+pub struct ReviewFollowupCard {
+    pub agent_id: String,
+    pub title: String,
+    pub issue_url: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct DispatchReactionRow {
-    pub(crate) status: String,
-    pub(crate) context: Option<String>,
+pub struct DispatchReactionRow {
+    pub status: String,
+    pub context: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SlotThreadNameInput<'a> {
-    pub(crate) dispatch_id: &'a str,
-    pub(crate) card_id: &'a str,
-    pub(crate) slot_index: i64,
-    pub(crate) issue_number: Option<i64>,
-    pub(crate) title: &'a str,
+pub struct SlotThreadNameInput<'a> {
+    pub dispatch_id: &'a str,
+    pub card_id: &'a str,
+    pub slot_index: i64,
+    pub issue_number: Option<i64>,
+    pub title: &'a str,
 }
 
 fn json_object_from_context(existing: Option<&str>) -> serde_json::Value {
@@ -133,7 +133,7 @@ async fn get_thread_for_channel_pg(
     Ok(None)
 }
 
-pub(crate) async fn persist_dispatch_message_target_pg(
+pub async fn persist_dispatch_message_target_pg(
     pool: &PgPool,
     dispatch_id: &str,
     channel_id: &str,
@@ -168,7 +168,7 @@ pub(crate) async fn persist_dispatch_message_target_pg(
     Ok(())
 }
 
-pub(crate) async fn persist_dispatch_thread_id_pg(
+pub async fn persist_dispatch_thread_id_pg(
     pool: &PgPool,
     dispatch_id: &str,
     thread_id: &str,
@@ -187,7 +187,7 @@ pub(crate) async fn persist_dispatch_thread_id_pg(
     Ok(())
 }
 
-pub(crate) async fn load_dispatch_reaction_row_pg(
+pub async fn load_dispatch_reaction_row_pg(
     pool: &PgPool,
     dispatch_id: &str,
 ) -> Result<Option<DispatchReactionRow>, String> {
@@ -357,7 +357,7 @@ async fn slot_has_active_dispatch_excluding_pg_tx(
         })
 }
 
-pub(crate) async fn read_slot_thread_binding_pg(
+pub async fn read_slot_thread_binding_pg(
     pool: &PgPool,
     agent_id: &str,
     slot_index: i64,
@@ -445,7 +445,7 @@ async fn recent_slot_thread_history_pg(
     Ok(candidates)
 }
 
-pub(crate) async fn collect_slot_thread_candidates_pg(
+pub async fn collect_slot_thread_candidates_pg(
     pool: &PgPool,
     agent_id: &str,
     card_id: &str,
@@ -521,7 +521,7 @@ pub(crate) async fn allocate_manual_slot_binding_pg(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn resolve_slot_thread_binding_pg(
+pub async fn resolve_slot_thread_binding_pg(
     pool: &PgPool,
     agent_id: &str,
     card_id: &str,
@@ -678,7 +678,7 @@ pub(crate) async fn resolve_slot_thread_binding_pg(
     allocate_manual_slot_binding_pg(pool, agent_id, dispatch_id, channel_id, max_slots).await
 }
 
-pub(crate) async fn upsert_slot_thread_id_pg(
+pub async fn upsert_slot_thread_id_pg(
     pool: &PgPool,
     agent_id: &str,
     slot_index: i64,
@@ -714,7 +714,7 @@ pub(crate) async fn upsert_slot_thread_id_pg(
     Ok(())
 }
 
-pub(crate) async fn clear_slot_thread_id_pg(
+pub async fn clear_slot_thread_id_pg(
     pool: &PgPool,
     agent_id: &str,
     slot_index: i64,
@@ -752,7 +752,7 @@ pub(crate) async fn clear_slot_thread_id_pg(
     Ok(())
 }
 
-pub(crate) async fn build_slot_thread_name_pg(
+pub async fn build_slot_thread_name_pg(
     pool: &PgPool,
     input: SlotThreadNameInput<'_>,
 ) -> Result<String, String> {
@@ -891,7 +891,7 @@ pub(crate) async fn build_slot_thread_name_pg(
     )
 }
 
-pub(crate) async fn latest_work_dispatch_thread_pg(
+pub async fn latest_work_dispatch_thread_pg(
     pool: &PgPool,
     card_id: &str,
 ) -> Result<Option<String>, String> {
@@ -969,7 +969,7 @@ pub(crate) async fn latest_work_dispatch_thread_pg(
     Ok(None)
 }
 
-pub(crate) async fn load_review_followup_card_pg(
+pub async fn load_review_followup_card_pg(
     pool: &PgPool,
     card_id: &str,
 ) -> Result<ReviewFollowupCard, String> {
@@ -1002,7 +1002,7 @@ pub(crate) async fn load_review_followup_card_pg(
     })
 }
 
-pub(crate) async fn load_dispatch_context_pg(
+pub async fn load_dispatch_context_pg(
     pool: &PgPool,
     dispatch_id: &str,
 ) -> Result<Option<String>, String> {
@@ -1016,7 +1016,7 @@ pub(crate) async fn load_dispatch_context_pg(
         .map(|value| value.flatten())
 }
 
-pub(crate) async fn review_followup_already_resolved_pg(pool: &PgPool, card_id: &str) -> bool {
+pub async fn review_followup_already_resolved_pg(pool: &PgPool, card_id: &str) -> bool {
     sqlx::query_scalar::<_, Option<String>>("SELECT review_status FROM kanban_cards WHERE id = $1")
         .bind(card_id)
         .fetch_optional(pool)

@@ -115,7 +115,7 @@ fn known() -> AttributionSnapshot {
 /// The footer an additional send of `key` carries, as the real envelope builds it.
 fn repost_footer(key: &PieceKey) -> String {
     let ids = RepostIds::for_piece(&marker(key)).unwrap();
-    let body = RepostEnvelope::additional(CHANNEL, PAYLOAD.into(), ids).message();
+    let body = RepostEnvelope::additional_for_test(CHANNEL, PAYLOAD.into(), ids).message();
     let body = serde_json::to_value(body).unwrap();
     body["embeds"][0]["footer"]["text"]
         .as_str()
@@ -222,7 +222,7 @@ pub(crate) fn absent_evidence(scope: EvidenceScope, run: RunScope) -> NotFoundEv
             .unwrap();
         runtime.block_on(async move {
             let proof = ObservedMessage {
-                channel_id: scope.key.unit().channel_id,
+                channel_id: scope.key.unit_for_test().channel_id,
                 ..message(900, scope.sender_id, "earlier")
             };
             let reader = Fake::with([proof]);
@@ -274,10 +274,10 @@ async fn f4_two_passes_wait_after_completion() {
     let Progress::Absent(evidence) = session.advance(&reader, &run, &known()).await else {
         panic!("two clean passes at the boundaries");
     };
-    let [first, second] = evidence.passes();
-    assert_eq!(first.started_at(), first_due);
-    assert_eq!(second.started_at(), second_due);
-    assert_eq!(first.proof().message_id(), 900);
+    let [first, second] = evidence.passes_for_test();
+    assert_eq!(first.started_at_for_test(), first_due);
+    assert_eq!(second.started_at_for_test(), second_due);
+    assert_eq!(first.proof_message_id_for_test(), 900);
 }
 
 #[tokio::test(start_paused = true)]
@@ -292,7 +292,7 @@ async fn f4_partial_resumes_only_in_its_run() {
     let mut same_run = ProbeSession::new(scope(&[0]), vec![900], settled);
     let partial = same_run.advance(&reader, &run_1, &known()).await;
     assert_eq!(partial, Progress::Partial);
-    assert!(!partial.covered());
+    assert!(!partial.covered_for_test());
     let resumed = same_run.advance(&reader, &run_1, &known()).await;
     assert!(
         matches!(resumed, Progress::FirstPassDone { .. }),
@@ -327,17 +327,17 @@ async fn f4_slot_two_requires_new_closed_attempt_evidence() {
     ]);
     let before = EvidenceScope::of(&row(3), &slot_0, &run_1).unwrap();
     let evidence = absent_evidence(before, run_1.clone());
-    assert!(evidence.validate_current(&row(3), &slot_0, &run_1));
-    assert!(!evidence.validate_current(&row(3), &slot_0, &run("run-2")));
+    assert!(evidence.validate_current_for_test(&row(3), &slot_0, &run_1));
+    assert!(!evidence.validate_current_for_test(&row(3), &slot_0, &run("run-2")));
 
     // Slot 1 was granted (revision 4) and settled (revision 5).
     assert_eq!(EvidenceScope::of(&row(4), &slot_1_open, &run_1), Err(1));
-    assert!(!evidence.validate_current(&row(4), &slot_1_open, &run_1));
-    assert!(!evidence.validate_current(&row(5), &slot_1_settled, &run_1));
+    assert!(!evidence.validate_current_for_test(&row(4), &slot_1_open, &run_1));
+    assert!(!evidence.validate_current_for_test(&row(5), &slot_1_settled, &run_1));
     let after = EvidenceScope::of(&row(5), &slot_1_settled, &run_1).unwrap();
     assert_eq!(after.checked_slots, [0, 1]);
     let fresh = absent_evidence(after, run_1.clone());
-    assert!(fresh.validate_current(&row(5), &slot_1_settled, &run_1));
+    assert!(fresh.validate_current_for_test(&row(5), &slot_1_settled, &run_1));
 }
 
 /// A mock Discord serving one channel's messages to GETs; records method and path.
@@ -454,9 +454,10 @@ async fn first_pass(discord: &Discord, mut scope: EvidenceScope) -> (Progress, A
 async fn f4_history_keeps_stable_ids_for_both_additional_slots() {
     let piece = key("f4");
     let ids = RepostIds::for_piece(&marker(&piece)).unwrap();
-    let slot_1 = RepostEnvelope::additional(CHANNEL, PAYLOAD.into(), ids.clone()).message();
+    let slot_1 =
+        RepostEnvelope::additional_for_test(CHANNEL, PAYLOAD.into(), ids.clone()).message();
     let rebuilt = RepostIds::for_piece(&marker(&piece)).unwrap();
-    let slot_2 = RepostEnvelope::additional(CHANNEL, PAYLOAD.into(), rebuilt).message();
+    let slot_2 = RepostEnvelope::additional_for_test(CHANNEL, PAYLOAD.into(), rebuilt).message();
     let (slot_1, slot_2) = (
         serde_json::to_value(slot_1).unwrap(),
         serde_json::to_value(slot_2).unwrap(),
@@ -479,8 +480,8 @@ async fn f4_history_keeps_stable_ids_for_both_additional_slots() {
     let found: Vec<_> = seen.found.keys().copied().collect();
     assert_eq!(found, [301, 302], "the marker names the piece");
     for receipt in seen.found.values() {
-        assert_eq!(receipt.receipt.method, ReceiptMethod::Marker);
-        assert_eq!(receipt.receipt.slot, None);
+        assert_eq!(receipt.receipt.method_for_test(), ReceiptMethod::Marker);
+        assert_eq!(receipt.receipt.slot_for_test(), None);
         assert_eq!(
             receipt.observed_marker.as_deref(),
             Some(marker(&piece).as_str())
@@ -617,7 +618,10 @@ async fn f4_timeout_budget_and_nonprogress_remain_incomplete() {
         session.advance(&budget, &run_1, &known()).await,
         Progress::Partial
     );
-    assert_eq!(budget.befores.lock().unwrap().len(), PAGES_PER_STEP);
+    assert_eq!(
+        budget.befores.lock().unwrap().len(),
+        PAGES_PER_STEP_FOR_TEST
+    );
 
     let mut repeating = Fake::with(proof_and_more);
     repeating.stuck = true;
@@ -635,7 +639,10 @@ async fn f4_timeout_budget_and_nonprogress_remain_incomplete() {
         matches!(progress, Progress::FirstPassDone { .. }),
         "{progress:?}"
     );
-    assert_eq!(bounded.befores.lock().unwrap().len(), PAGES_PER_STEP);
+    assert_eq!(
+        bounded.befores.lock().unwrap().len(),
+        PAGES_PER_STEP_FOR_TEST
+    );
 }
 
 #[tokio::test]
@@ -657,20 +664,24 @@ async fn f4_known_original_nonce_returns_original_recovered() {
     let recovered = &only_original.found[&201];
     assert_eq!(recovered.recovery, RecoveryKind::OriginalRecovered);
     assert_eq!(
-        (recovered.receipt.slot, recovered.receipt.method),
+        (
+            recovered.receipt.slot_for_test(),
+            recovered.receipt.method_for_test()
+        ),
         (Some(0), ReceiptMethod::Nonce)
     );
     assert_eq!(recovered.observed_nonce.as_deref(), Some(ids.nonce()));
     // An exact match without a nonce is the piece, but not provably its original.
     let exact = &only_original.found[&202];
     assert_eq!(exact.recovery, RecoveryKind::OriginUnknown);
-    assert_eq!(exact.receipt.slot, None);
+    assert_eq!(exact.receipt.slot_for_test(), None);
 
     let (_, after_a_repost) = first_pass(&discord, scope(&[0, 1])).await;
     let shared = &after_a_repost.found[&201];
     assert_eq!(shared.recovery, RecoveryKind::OriginUnknown);
     assert_eq!(
-        shared.receipt.slot, None,
+        shared.receipt.slot_for_test(),
+        None,
         "the nonce is shared by every send"
     );
     discord.gets();
@@ -701,16 +712,19 @@ fn f4_same_payload_claimants_are_not_arbitrarily_assigned() {
         receipts: BTreeMap::from([(301, rival.clone())]),
         same_payload: Vec::new(),
     };
-    assert!(attribute(theirs, &exact).is_clear());
+    assert!(attribute(theirs, &exact).is_clear_for_test());
     let rival_marked = ObservedMessage {
         footers: vec![repost_footer(&rival)],
         ..message(302, BOT, PAYLOAD)
     };
-    assert!(attribute(contested, &[rival_marked]).is_clear());
+    assert!(attribute(contested, &[rival_marked]).is_clear_for_test());
 
     let seen = attribute(known(), &exact);
-    assert_eq!(seen.found[&301].receipt.method, ReceiptMethod::ExactMatch);
-    assert_eq!(seen.found[&301].receipt.key, own.key);
+    assert_eq!(
+        seen.found[&301].receipt.method_for_test(),
+        ReceiptMethod::ExactMatch
+    );
+    assert_eq!(seen.found[&301].receipt.key_for_test(), &own.key);
 }
 
 #[tokio::test(start_paused = true)]
@@ -739,11 +753,11 @@ async fn f4_late_original_adds_a_second_distinct_id() {
     let seen = session.attribution();
     assert_eq!(seen.recorded.iter().copied().collect::<Vec<_>>(), [500]);
     assert_eq!(seen.found.keys().copied().collect::<Vec<_>>(), [450]);
-    assert_eq!(seen.distinct_ids(), 2);
+    assert_eq!(seen.distinct_ids_for_test(), 2);
     // Seeing the same two again adds nothing.
     tokio::time::advance(Duration::from_secs(10)).await;
     session.advance(&reader, &run_1, &recorded).await;
-    assert_eq!(session.attribution().distinct_ids(), 2);
+    assert_eq!(session.attribution().distinct_ids_for_test(), 2);
 }
 
 #[tokio::test(start_paused = true)]
@@ -760,12 +774,12 @@ async fn f4_partial_audit_preserves_known_ids_and_unknown_coverage() {
     tokio::time::advance(Duration::from_secs(10)).await;
     let partial = session.advance(&reader, &run_1, &known()).await;
     assert_eq!(partial, Progress::Partial);
-    assert!(!partial.covered(), "a partial audit is no zero");
-    assert_eq!(session.attribution().distinct_ids(), 1);
+    assert!(!partial.covered_for_test(), "a partial audit is no zero");
+    assert_eq!(session.attribution().distinct_ids_for_test(), 1);
 
     reader.failing.store(true, Ordering::SeqCst);
     let failed = session.advance(&reader, &run_1, &known()).await;
-    assert!(matches!(failed, Progress::Incomplete(_)) && !failed.covered());
+    assert!(matches!(failed, Progress::Incomplete(_)) && !failed.covered_for_test());
     assert_eq!(
         session
             .attribution()
@@ -961,15 +975,15 @@ async fn f4r_the_latest_snapshot_rejudges_everything_the_session_read() {
         matches!(resumed[0], Progress::FirstPassDone { .. }),
         "{resumed:?}"
     );
-    assert!(session.attribution().is_clear());
-    assert_eq!(session.attribution().distinct_ids(), 0);
+    assert!(session.attribution().is_clear_for_test());
+    assert_eq!(session.attribution().distinct_ids_for_test(), 0);
 
     // An exact match seen again with this piece's nonce is promoted, and still counts once.
     let reader = Fake::with([message(900, BOT, "earlier"), message(450, BOT, PAYLOAD)]);
     let mut session = ProbeSession::new(scope(&[0]), vec![900], Instant::now());
     drive(&mut session, &reader, &known(), 1).await;
     assert_eq!(
-        session.attribution().found[&450].receipt.method,
+        session.attribution().found[&450].receipt.method_for_test(),
         ReceiptMethod::ExactMatch
     );
     let nonce = RepostIds::for_piece(&marker(&key("f4")))
@@ -983,7 +997,7 @@ async fn f4r_the_latest_snapshot_rejudges_everything_the_session_read() {
     drive(&mut session, &reader, &known(), 1).await;
     let promoted = &session.attribution().found[&450];
     assert_eq!(promoted.recovery, RecoveryKind::OriginalRecovered);
-    assert_eq!(session.attribution().distinct_ids(), 1);
+    assert_eq!(session.attribution().distinct_ids_for_test(), 1);
 }
 
 #[tokio::test(start_paused = true)]
@@ -1018,7 +1032,7 @@ async fn f4r_a_proof_read_of_the_piece_is_an_observation() {
     let mut session = ProbeSession::new(scope(&[0]), vec![ANCHOR], Instant::now());
     let outcomes = drive(&mut session, &reader, &known(), 2).await;
     assert!(matches!(outcomes[1], Progress::Absent(_)), "{outcomes:?}");
-    assert!(session.attribution().is_clear());
+    assert!(session.attribution().is_clear_for_test());
 }
 
 #[test]
@@ -1060,8 +1074,10 @@ fn f4r_the_marker_names_the_channel_and_is_the_same_on_every_node_and_slot() {
     assert_eq!(marker(&node_a), marker(&here));
     let slot = |key: &PieceKey| {
         let ids = RepostIds::for_piece(&marker(key)).unwrap();
-        serde_json::to_value(RepostEnvelope::additional(CHANNEL, PAYLOAD.into(), ids).message())
-            .unwrap()
+        serde_json::to_value(
+            RepostEnvelope::additional_for_test(CHANNEL, PAYLOAD.into(), ids).message(),
+        )
+        .unwrap()
     };
     assert_eq!(
         slot(&node_a),
@@ -1113,7 +1129,7 @@ async fn f4r2_an_intact_marker_read_by_id_outlives_a_truncated_listing() {
         assert_eq!(progress, Progress::Present);
     }
     let found = &session.attribution().found[&450];
-    assert_eq!(found.receipt.method, ReceiptMethod::Marker);
+    assert_eq!(found.receipt.method_for_test(), ReceiptMethod::Marker);
 }
 
 /// The marker and nonce `key("f4")` had before the marker named its channel, fixed as data.
@@ -1154,13 +1170,13 @@ async fn f4r2_an_older_or_unreadable_identifier_is_never_absence() {
         author_id: OTHER,
         ..old_marked.clone()
     };
-    assert!(attribute(&known(), &other_author).is_clear());
-    assert!(attribute(&receipts(&[(450, key("f4-other"))]), &old_marked).is_clear());
+    assert!(attribute(&known(), &other_author).is_clear_for_test());
+    assert!(attribute(&receipts(&[(450, key("f4-other"))]), &old_marked).is_clear_for_test());
     let readable_other = ObservedMessage {
         footers: vec![repost_footer(&key("f4-other"))],
         ..old_marked
     };
-    assert!(attribute(&known(), &readable_other).is_clear());
+    assert!(attribute(&known(), &readable_other).is_clear_for_test());
 }
 
 #[tokio::test(start_paused = true)]
@@ -1191,7 +1207,7 @@ async fn f4r3_a_note_whose_marker_was_cut_off_is_never_absence() {
     };
     let mut into = Attribution::default();
     match_observations(&scope(&[0, 1]), &known(), [&card], &mut into);
-    assert!(into.is_clear());
+    assert!(into.is_clear_for_test());
 }
 
 #[tokio::test(start_paused = true)]
@@ -1213,7 +1229,7 @@ async fn f4r3_a_nonce_once_read_stays_without_any_other_evidence() {
         [Progress::Present]
     );
     let found = &session.attribution().found[&450];
-    assert_eq!(found.receipt.method, ReceiptMethod::Nonce);
+    assert_eq!(found.receipt.method_for_test(), ReceiptMethod::Nonce);
 }
 
 #[tokio::test(start_paused = true)]

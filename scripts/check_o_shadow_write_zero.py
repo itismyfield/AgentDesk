@@ -6,6 +6,10 @@ import sys
 from itertools import accumulate
 from pathlib import Path
 
+from generate_inventory_docs import ParseError as InventoryParseError, scan_balanced
+from rust_cfg import find_test_only_cfg_attributes
+from rust_lex import ParseError as LexParseError, cfg_item_end
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SHADOW_DIR = Path("src/services/tui_o/shadow")
 SHADOW_MODULE = "crate::services::tui_o::shadow"
@@ -41,7 +45,6 @@ TOKENS = [
     ("unchecked escape", r"\bunsafe\b|\bextern\b|#\[path\b|\binclude!|::\s*$|^\s*::|\bset_(len|permissions|modified|times)\b"),
 ]
 TOKEN = re.compile(r'//[^\n]*|/\*.*?\*/|r(#*)".*?"\1|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\\n])\'', re.S)
-TEST_MOD = re.compile(r"#\[cfg\(test\)\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{")
 USE = re.compile(r"\buse\s+([^;]+);")
 USE_GROUP = re.compile(r"((?:\w+::)*)\{([^{}]*)\}")
 PATH = re.compile(r"(?<![\w:])(?:::)?(?:[A-Za-z_]\w*::)+[A-Za-z_*]\w*")
@@ -50,6 +53,21 @@ blank = lambda text: re.sub(r"[^\n]", " ", text)  # noqa: E731
 def brace_end(text: str, open_at: int) -> int:
     depths = accumulate({"{": 1, "}": -1}.get(char, 0) for char in text[open_at:])
     return open_at + next((index for index, depth in enumerate(depths) if depth == 0), len(text) - open_at - 1)
+
+
+def test_gate_spans(code: str, source: str):
+    """Yield only test-only spans whose Rust boundaries the lexer can prove."""
+    for gate in find_test_only_cfg_attributes(code, source):
+        if gate.is_inner:
+            if not code[:gate.start()].strip():
+                yield 0, len(code)
+            continue
+        try:
+            end = cfg_item_end(code, gate.attribute_end(), scan_balanced)
+        except (InventoryParseError, LexParseError):
+            continue
+        yield gate.start(), end
+
 
 def expand(tree: str) -> list[tuple[str, str]]:
     """(path, local name) pairs of one `use` tree, flattened innermost braces first."""
@@ -91,10 +109,9 @@ def verdict(path: str, in_root: bool) -> str | None:
 def scan_text(name: str, text: str, module: str, in_root: bool) -> list[str]:
     code = TOKEN.sub(lambda m: m.group(0) if not m.group(0).startswith("/") else blank(m.group(0)), text)
     bare = TOKEN.sub(lambda m: blank(m.group(0)), text)
-    for match in TEST_MOD.finditer(bare):
-        end = brace_end(bare, match.end() - 1) + 1
-        code = code[:match.start()] + blank(code[match.start():end]) + code[end:]
-        bare = bare[:match.start()] + blank(bare[match.start():end]) + bare[end:]
+    for start, end in reversed(list(test_gate_spans(bare, text))):
+        code = code[:start] + blank(code[start:end]) + code[end:]
+        bare = bare[:start] + blank(bare[start:end]) + bare[end:]
     line = lambda offset: bare.count("\n", 0, offset) + 1  # noqa: E731
     hits = [f"{name}:{number}: {label}: {text_line.strip()}"
             for number, text_line in enumerate(code.split("\n"), 1)
@@ -141,6 +158,8 @@ BAD = [
     ("fn f() { let _ = std :: fs :: write(p, b); }", False),
     ('include!("../../elsewhere.rs");', False),
     ("#[cfg(test)]\nmod tests {\n}\nfn f() { std::fs::write(p, b); }\n", False),
+    ('#[cfg(any(test, feature = "production"))]\nmod fixture { fn t() { std::fs::write(p, b); } }', False),
+    ('#[cfg(feature = "test-support")]\nmod fixture { fn t() { std::fs::write(p, b); } }', False),
 ]
 GOOD = [
     ("struct C { turn: crate::services::tui_o::turn_mode::TurnConfig }", False),
@@ -150,6 +169,7 @@ GOOD = [
      "use super::root::file_identity;\nuse std::io;\nfn f() { let _ = std::fs::File::open(p); let _ = io::Error::other(e); }", False),
     ("// Http, mailbox and std::fs::write appear only in comments\nfn f() {}", False),
     ('#[cfg(test)]\nmod tests {\n    fn t() { std::fs::write(p, "}"); }\n}\n', False),
+    ('#[cfg(any(test, feature = "test-support"))]\nmod fixture { fn t() { std::fs::write(p, b); } }', False),
 ]
 
 def self_test() -> list[str]:

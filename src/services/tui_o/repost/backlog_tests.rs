@@ -87,7 +87,7 @@ async fn d4act3_channel_turn_reports_old_backlog_once_across_reopen_pg() {
         .await;
     let state = ProvenanceLog::open(&path).unwrap();
     assert!(
-        state.state().reported(0) && state.state().reported(1),
+        state.state().reported_for_test(0) && state.state().reported_for_test(1),
         "actual turn durably reports both old pieces"
     );
     assert_eq!(state.state().pending().count(), 0);
@@ -204,7 +204,7 @@ async fn d4act3_backlog_append_failure_blocks_ready_repost_and_retries_after_reo
         "failure is never a successful zero report"
     );
     let reopened = ProvenanceLog::open(&path).unwrap();
-    assert!(!reopened.state().reported(0) && !reopened.state().reported(1));
+    assert!(!reopened.state().reported_for_test(0) && !reopened.state().reported_for_test(1));
     drop(reopened);
     turn.turn(&mut writer).with_subscriber(subscriber).await;
     assert_eq!(
@@ -213,7 +213,7 @@ async fn d4act3_backlog_append_failure_blocks_ready_repost_and_retries_after_reo
         "reopened report succeeds before ready dispatch"
     );
     let reopened = ProvenanceLog::open(&path).unwrap();
-    assert!(reopened.state().reported(0) && reopened.state().reported(1));
+    assert!(reopened.state().reported_for_test(0) && reopened.state().reported_for_test(1));
     assert_eq!(
         reports.0.lock().unwrap().len(),
         2,

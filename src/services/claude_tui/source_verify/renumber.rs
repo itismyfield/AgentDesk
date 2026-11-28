@@ -27,7 +27,7 @@ pub(crate) fn under_new_device(pin: &SourceId, (dev, _): (u64, u64)) -> SourceId
 
 /// When this host booted, read once per process so a later clock change cannot move it.
 fn boot_time() -> Option<DateTime<Utc>> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(boot) = TEST_BOOT.with(std::cell::Cell::get) {
         return boot;
     }
@@ -76,23 +76,23 @@ fn os_boot_time() -> Option<DateTime<Utc>> {
     None
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// `Some(boot)` replaces this thread's boot time; `Some(None)` makes it unknown.
     static TEST_BOOT: std::cell::Cell<Option<Option<DateTime<Utc>>>> = const { std::cell::Cell::new(None) };
 }
 
 /// Sets this thread's boot time until the guard drops; `None` makes the boot time unknown.
-#[cfg(test)]
-pub(crate) fn boot_time_for_tests(boot: Option<DateTime<Utc>>) -> TestBootGuard {
+#[cfg(any(test, feature = "test-support"))]
+pub fn boot_time_for_tests(boot: Option<DateTime<Utc>>) -> TestBootGuard {
     TEST_BOOT.with(|cell| cell.set(Some(boot)));
     TestBootGuard
 }
 
-#[cfg(test)]
-pub(crate) struct TestBootGuard;
+#[cfg(any(test, feature = "test-support"))]
+pub struct TestBootGuard;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for TestBootGuard {
     fn drop(&mut self) {
         TEST_BOOT.with(|cell| cell.set(None));

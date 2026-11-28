@@ -128,7 +128,7 @@ pub(super) async fn reached(notification: &tokio::sync::Notify) {
 
 pub(super) struct PrivateHost {
     socket: PathBuf,
-    _namespace: crate::services::platform::tmux::session_inventory::tests::ChannelNamespace,
+    _namespace: crate::services::platform::tmux::session_inventory::test_support::ChannelNamespace,
 }
 impl PrivateHost {
     fn new(rig: &Rig) -> Self {
@@ -145,7 +145,7 @@ impl PrivateHost {
         )
         .unwrap();
         let namespace =
-            crate::services::platform::tmux::session_inventory::tests::ChannelNamespace::new(
+            crate::services::platform::tmux::session_inventory::test_support::ChannelNamespace::new(
                 rig.channel.get(),
                 socket.clone(),
             );

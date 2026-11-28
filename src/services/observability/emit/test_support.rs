@@ -3,7 +3,7 @@
 
 use super::*;
 
-pub(crate) fn every_emit_surface_records_one_recent_event_scenario(before_observe: impl FnOnce()) {
+pub fn every_emit_surface_records_one_recent_event_scenario(before_observe: impl FnOnce()) {
     let _guard = super::super::test_runtime_lock();
     super::super::reset_for_tests();
 
@@ -180,7 +180,7 @@ pub(crate) fn every_emit_surface_records_one_recent_event_scenario(before_observ
 /// of 1 for `offset_invariant_violation`, so the collapse left an alerting
 /// operator with no in-record discriminator to start from.
 
-pub(crate) fn invariant_severity_routes_to_exact_log_level_and_suffix_4422() {
+pub fn invariant_severity_routes_to_exact_log_level_and_suffix_4422() {
     let ((), logs) = super::invariant_log_test_capture::capture(|| {
         assert!(record_invariant_check_with_severity(
             true,
@@ -241,13 +241,13 @@ pub(crate) fn invariant_severity_routes_to_exact_log_level_and_suffix_4422() {
     assert_eq!(logs[1].rendered_message, "[invariant] persisted rewind");
 }
 
-pub(crate) const ROOT_CAUSE_ACTIONS: [fn(u64, &str); 3] = [
+pub const ROOT_CAUSE_ACTIONS: [fn(u64, &str); 3] = [
     metrics::record_relay_terminal_ack_timeout,
     metrics::record_relay_uncommitted_inflight_cleared,
     metrics::record_relay_owner_unknown,
 ];
 
-pub(crate) fn relay_root_cause_metric_wrappers_record_persistent_events_scenario(
+pub fn relay_root_cause_metric_wrappers_record_persistent_events_scenario(
     actions: &[fn(u64, &str)],
     before_observe: impl FnOnce(),
 ) {

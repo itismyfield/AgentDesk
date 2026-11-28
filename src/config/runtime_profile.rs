@@ -26,7 +26,7 @@ impl RuntimeProfile {
         matches!(self, Self::Full)
     }
 
-    pub(crate) fn standby_notice(self) -> String {
+    pub fn standby_notice(self) -> String {
         format!("  ▸ Cluster runtime {self:?}: keeping HTTP and runner heartbeat online")
     }
 

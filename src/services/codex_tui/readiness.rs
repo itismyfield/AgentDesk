@@ -24,7 +24,7 @@ const QUIET: Duration =
 const EVIDENCE_TTL: chrono::Duration = chrono::Duration::hours(24);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Verdict {
+pub enum Verdict {
     /// The process is alive and the latest turn of this execution is proven ended.
     Idle(Proof),
     Busy(Busy),
@@ -35,7 +35,7 @@ pub(crate) enum Verdict {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Busy {
+pub enum Busy {
     /// The latest turn is open and no valid Stop hook names it.
     OpenTurn(Option<String>),
     /// A UserPromptSubmit hook names a turn whose start the rollout does not show yet.
@@ -43,7 +43,7 @@ pub(crate) enum Busy {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Why {
+pub enum Why {
     ProbeError,
     /// The source is being replaced under a verified hold.
     SourceChanging,
@@ -81,7 +81,7 @@ pub(crate) enum Tier {
 
 /// What an Idle judgment stood on: the execution, the rollout file and the turn.
 #[derive(Clone, Debug)]
-pub(crate) struct Proof {
+pub struct Proof {
     key: Key,
     file: (u64, u64),
     turn: Option<String>,
@@ -221,7 +221,7 @@ pub(crate) fn judge(tmux: &str) -> Verdict {
 
 /// [`judge`] with the cwd the pane's rollout must belong to; `None` reads the pane's own. A bound
 /// rollout that another cwd owns is no source.
-pub(crate) fn judge_in(tmux: &str, cwd: Option<&str>) -> Verdict {
+pub fn judge_in(tmux: &str, cwd: Option<&str>) -> Verdict {
     if crate::services::tui_prompt_dedupe::codex_verified_input_blocked(tmux) {
         return Verdict::Unknown(Why::SourceChanging);
     }

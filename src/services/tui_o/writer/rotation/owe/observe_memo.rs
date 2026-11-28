@@ -26,6 +26,7 @@ struct Memo {
 pub(super) struct Seed {
     projection: Result<Projection, String>,
     memo: Mutex<Memo>,
+    pub(super) quiet: Option<super::QuietOffer>,
 }
 
 impl Seed {
@@ -33,6 +34,7 @@ impl Seed {
         Self {
             projection,
             memo: Mutex::default(),
+            quiet: None,
         }
     }
 
@@ -92,7 +94,7 @@ impl Seed {
 }
 
 /// Every field of every registration in order, as it is stored. Derived equality would fold
-/// path spellings that a barrier digest tells apart, and serialization alone skips three fields.
+/// path spellings that a barrier digest tells apart, and serialization alone skips derived fields.
 fn spelled(registrations: &[Registration]) -> Option<Vec<u8>> {
     let fields: Vec<_> = registrations
         .iter()
@@ -105,6 +107,7 @@ fn spelled(registrations: &[Registration]) -> Option<Vec<u8>> {
                 exact_frame_hash,
                 receipts,
                 candidate,
+                not_sent,
                 barrier,
             } = registration;
             (
@@ -114,6 +117,7 @@ fn spelled(registrations: &[Registration]) -> Option<Vec<u8>> {
                 exact_frame_hash,
                 receipts,
                 candidate,
+                not_sent,
                 barrier,
                 devices,
             )

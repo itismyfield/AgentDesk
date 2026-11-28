@@ -5,12 +5,12 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 /// Discord's hard per-message character limit.
-pub(crate) const DISCORD_MESSAGE_HARD_LIMIT_CHARS: usize = 2000;
+pub const DISCORD_MESSAGE_HARD_LIMIT_CHARS: usize = 2000;
 
 /// How to handle content beyond the Discord per-message limit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum LengthStrategy {
+pub enum LengthStrategy {
     Split,
     Compact,
     FileAttachment,
@@ -21,19 +21,19 @@ pub(crate) enum LengthStrategy {
 /// What to do when the primary target is unreachable, such as an archived thread.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum FallbackPolicy {
+pub enum FallbackPolicy {
     None,
     /// Retry a failed thread target against its parent channel.
     ThreadOrChannel,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct DiscordOutboundPolicy {
-    pub(crate) length_strategy: LengthStrategy,
-    pub(crate) fallback: FallbackPolicy,
+pub struct DiscordOutboundPolicy {
+    pub length_strategy: LengthStrategy,
+    pub fallback: FallbackPolicy,
     /// How long dedup entries are kept; zero leaves dedup to the caller.
     #[serde(with = "duration_secs")]
-    pub(crate) idempotency_window: Duration,
+    pub idempotency_window: Duration,
 }
 
 impl Default for DiscordOutboundPolicy {
@@ -47,7 +47,7 @@ impl Default for DiscordOutboundPolicy {
 }
 
 impl DiscordOutboundPolicy {
-    pub(crate) fn dispatch_outbox() -> Self {
+    pub fn dispatch_outbox() -> Self {
         Self {
             length_strategy: LengthStrategy::Compact,
             fallback: FallbackPolicy::None,
@@ -55,7 +55,7 @@ impl DiscordOutboundPolicy {
         }
     }
 
-    pub(crate) fn review_notification() -> Self {
+    pub fn review_notification() -> Self {
         Self {
             length_strategy: LengthStrategy::Compact,
             fallback: FallbackPolicy::None,
@@ -63,7 +63,7 @@ impl DiscordOutboundPolicy {
         }
     }
 
-    pub(crate) fn preserve_inline_content() -> Self {
+    pub fn preserve_inline_content() -> Self {
         Self {
             length_strategy: LengthStrategy::RejectOverLimit,
             fallback: FallbackPolicy::None,
@@ -71,7 +71,7 @@ impl DiscordOutboundPolicy {
         }
     }
 
-    pub(crate) fn without_idempotency(mut self) -> Self {
+    pub fn without_idempotency(mut self) -> Self {
         self.idempotency_window = Duration::ZERO;
         self
     }

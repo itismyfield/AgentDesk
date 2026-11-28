@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::services::tui_prompt_dedupe::binding_context::{BINDING_HEADER, decode_binding_header};
-pub(crate) use crate::services::tui_prompt_dedupe::pane_registration::note_claude_pane_registration;
+pub use crate::services::tui_prompt_dedupe::pane_registration::note_claude_pane_registration;
 use crate::services::tui_prompt_dedupe::pane_registration::pane_registration_failed;
 use axum::Json;
 use axum::http::{HeaderMap, StatusCode};
@@ -24,7 +24,7 @@ use crate::services::tui_prompt_dedupe::binding_events::HookSignal;
 const DISCOVERY_GRACE: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum IngressOutcome {
+pub enum IngressOutcome {
     Proceed(ProceedReason),
     Durable(DurableKind),
     NotApplicable(NotApplicableReason),
@@ -33,13 +33,13 @@ pub(crate) enum IngressOutcome {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ProceedReason {
+pub enum ProceedReason {
     NoSessionSwitch,
     NoChannelLog,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum NotApplicableReason {
+pub enum NotApplicableReason {
     CodexContextUnavailable,
     CodexSourceRejected,
     OtherProvider,
@@ -54,7 +54,7 @@ pub(crate) enum NotApplicableReason {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum UnavailableReason {
+pub enum UnavailableReason {
     RestoreNotReady,
     PaneRegistrationFailed,
     ChannelNotRestored,
@@ -65,6 +65,11 @@ pub(crate) enum UnavailableReason {
 }
 
 impl IngressOutcome {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn refused_for_test(self) -> bool {
+        self.refused()
+    }
+
     pub(crate) fn refused(self) -> bool {
         matches!(self, Self::Unavailable(_) | Self::NotDurable(_))
     }
@@ -76,7 +81,7 @@ static RECEIVER_STARTED: LazyLock<Instant> = LazyLock::new(Instant::now);
 static UNMAPPED_COMMAND_SESSIONS: AtomicU64 = AtomicU64::new(0);
 static LEGACY_NOT_DURABLE: AtomicU64 = AtomicU64::new(0);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static TEST_DISCOVERY_CLOCK: std::cell::Cell<(bool, Duration)> = const { std::cell::Cell::new((true, Duration::ZERO)) };
 }
@@ -86,14 +91,14 @@ pub(crate) fn note_receiver_start() {
 }
 
 /// A rehydrate pass that listed tmux has finished. It says nothing about any single pane.
-pub(crate) fn mark_boot_discovery_complete() {
+pub fn mark_boot_discovery_complete() {
     DISCOVERY_DONE.store(true, Ordering::Release);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     TEST_DISCOVERY_CLOCK.set((true, Duration::ZERO));
 }
 
 /// Whether a rehydrate pass has listed tmux in this process; the grace expiry does not count.
-pub(crate) fn boot_discovery_done() -> bool {
+pub fn boot_discovery_done() -> bool {
     DISCOVERY_DONE.load(Ordering::Acquire)
 }
 
@@ -103,7 +108,7 @@ fn discovery_clock() -> (bool, Duration) {
         DISCOVERY_DONE.load(Ordering::Acquire),
         RECEIVER_STARTED.elapsed(),
     );
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let clock = {
         let _ = clock;
         TEST_DISCOVERY_CLOCK.get()
@@ -125,8 +130,8 @@ fn discovery_done() -> bool {
     expired
 }
 
-#[cfg(test)]
-pub(crate) fn set_discovery_pending_for_tests(pending: bool) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_discovery_pending_for_tests(pending: bool) {
     TEST_DISCOVERY_CLOCK.set((!pending, Duration::ZERO));
 }
 
@@ -139,7 +144,7 @@ pub(crate) fn ingress_counters_for_tests() -> (u64, u64) {
 }
 
 /// The one binding judgment of a hook; only `Unavailable` and `NotDurable` refuse it.
-pub(crate) fn observe_binding_hook(
+pub fn observe_binding_hook(
     provider: &str,
     event: &str,
     command_session_id: Option<&str>,
@@ -336,9 +341,9 @@ pub(crate) fn refusal(
     Some((StatusCode::TOO_EARLY, Json(body)))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "observation_ingress_tests.rs"]
-pub(crate) mod tests;
+pub mod tests;
 
 #[cfg(test)]
 #[cfg(windows)]

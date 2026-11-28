@@ -20,7 +20,7 @@ pub struct PipelineDiagnostic {
 }
 
 impl PipelineDiagnostic {
-    pub(crate) fn new(
+    pub fn new(
         code: &str,
         path: impl Into<String>,
         state_id: Option<&str>,

@@ -25,7 +25,7 @@ use super::host_draft::{
 /// Updated session resolution carried back to the orchestrator when a warm
 /// follow-up could not be delivered and the hosted session must be recreated.
 #[cfg(unix)]
-pub(crate) struct ClaudeTuiRecreateState {
+pub struct ClaudeTuiRecreateState {
     pub(crate) resolved_session_id: String,
     pub(crate) transcript_path: std::path::PathBuf,
     pub(crate) transcript_path_string: String,
@@ -49,7 +49,7 @@ pub(crate) enum ClaudeTuiDraftRecoveryOutcome {
 
 /// Outcome of an attempted warm follow-up against a live Claude TUI session.
 #[cfg(unix)]
-pub(crate) enum ClaudeTuiWarmFollowupOutcome {
+pub enum ClaudeTuiWarmFollowupOutcome {
     /// Handled (delivered, aborted, or errored); return this without launch.
     Terminal(Result<(), String>),
     /// Could not proceed; fall through to fresh launch with this resolution.
@@ -586,7 +586,7 @@ const OWNER_RETIRED_NOTICE: &str = "⚠ 세션이 응답 전에 중단되어 새
 /// The owner's idle submit observed as a warm follow-up observes its own, set up before that
 /// submit; a session that died before any output is retired with a notice, never resent.
 #[cfg(unix)]
-pub(crate) fn owner_observer(
+pub fn owner_observer(
     (tmux, prompt, channel): (&str, &str, u64),
     (session_id, working_dir): (Option<&str>, &std::path::Path),
     sender: Sender<StreamMessage>,
@@ -736,7 +736,7 @@ fn late_rebind(
 /// A paste into a running turn read as its caller's answer, from the user row the attempt took to
 /// that turn's end; a dead pane or a turn ending with no such row ends the read in error, unresent.
 #[cfg(unix)]
-pub(crate) fn busy_owner_observer(
+pub fn busy_owner_observer(
     (tmux, nonce, frame, channel): (&str, &str, &str, u64),
     transcript: &std::path::Path,
     sender: Sender<StreamMessage>,
@@ -958,7 +958,7 @@ mod followup_wait_error_requeue_tests {
 /// Mirrors the pre-refactor live-session branch: recovery, busy wait, submit/read/classify; `Terminal` returns before fresh-launch side effects, `Recreate` carries fall-through resolution.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn try_claude_tui_warm_followup(
+pub fn try_claude_tui_warm_followup(
     mut resolved_session_id: String,
     mut transcript_path: std::path::PathBuf,
     mut transcript_path_string: String,

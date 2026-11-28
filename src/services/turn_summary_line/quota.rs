@@ -17,7 +17,7 @@ const STATUSLINE_SETTLE: chrono::Duration = chrono::Duration::seconds(60);
 mod statusline;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Quota {
+pub struct Quota {
     five_hour: Option<Window>,
     seven_day: Option<Window>,
     fable_seven_day: Option<Window>,
@@ -27,7 +27,7 @@ pub(crate) struct Quota {
 
 // Native starts follow launch selection; Legacy intake timestamps precede it.
 #[derive(Clone, Copy)]
-pub(crate) enum Selected {
+pub enum Selected {
     Before(DateTime<Utc>),
     Within(DateTime<Utc>),
 }
@@ -227,7 +227,7 @@ pub(crate) fn record_launch(
     Ok(overlay)
 }
 
-pub(crate) fn publish(provider: &str, profile: &str, data: &str, fetched_at: i64) {
+pub fn publish(provider: &str, profile: &str, data: &str, fetched_at: i64) {
     if provider != "codex" && provider != "claude" {
         return;
     }
@@ -336,13 +336,13 @@ fn merge_claude(session: Option<Quota>, account: Option<Quota>) -> Option<Quota>
     Some(session)
 }
 
-pub(crate) struct Snapshot {
+pub struct Snapshot {
     pub quota: Option<Quota>,
     statusline: Option<statusline::Record>,
 }
 
 impl Snapshot {
-    pub(crate) fn model(&self) -> Model<'_> {
+    pub fn model(&self) -> Model<'_> {
         self.statusline
             .as_ref()
             .map_or_else(Model::default, |record| Model {
@@ -368,7 +368,7 @@ impl Snapshot {
     }
 }
 
-pub(crate) fn snapshot(
+pub fn snapshot(
     provider: &str,
     channel: u64,
     selection: Option<Selected>,
@@ -410,7 +410,7 @@ pub(crate) fn snapshot(
     Snapshot { quota, statusline }
 }
 
-pub(crate) fn legacy_started(raw: &str) -> Option<DateTime<Utc>> {
+pub fn legacy_started(raw: &str) -> Option<DateTime<Utc>> {
     chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S")
         .ok()?
         .and_local_timezone(chrono::Local)
@@ -421,3 +421,9 @@ pub(crate) fn legacy_started(raw: &str) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 #[path = "quota_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn with_locked_quota_cache<T>(run: impl FnOnce() -> T) -> T {
+    let _guard = CACHE.write().unwrap();
+    run()
+}

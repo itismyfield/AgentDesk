@@ -2,10 +2,10 @@
 
 use crate::services::session_host::{HostKind, HostLiveness, HostSessionRef, host_for};
 use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
-pub(crate) use crate::services::tmux_common::host_marker::{marker_is_tmux, marker_refusal};
+pub use crate::services::tmux_common::host_marker::{marker_is_tmux, marker_refusal};
 
 /// A provider-auth login target: only the auth namespace with no other host's marker.
-pub(crate) fn auth_login_refusal(tmux_name: &str) -> Option<String> {
+pub fn auth_login_refusal(tmux_name: &str) -> Option<String> {
     if !tmux_name.starts_with("adk-login-") {
         return Some(format!("{tmux_name} is not a provider-auth login session"));
     }
@@ -13,13 +13,13 @@ pub(crate) fn auth_login_refusal(tmux_name: &str) -> Option<String> {
 }
 
 /// Each caller observes the current live switch before its own operation.
-pub(crate) fn terminate_enabled() -> bool {
+pub fn terminate_enabled() -> bool {
     crate::config_live_reload::current()
         .is_some_and(|config| config.runtime.herdr_terminate_enabled == Some(true))
 }
 
 /// Only an explicit local tmux/process marker permits a historical liveness probe.
-pub(crate) fn historical_execution_liveness(name: &str) -> Option<HostLiveness> {
+pub fn historical_execution_liveness(name: &str) -> Option<HostLiveness> {
     let HostKindMarker::Known(kind @ (HostKind::Tmux | HostKind::Process)) =
         read_host_kind_marker(name)
     else {

@@ -429,7 +429,7 @@ async fn s1_real_missing_namespace_reaches_selected_tmux_start_pg() {
     }
     use crate::services::platform::tmux::session_inventory::{
         self as inventory, EmptyReason, Inventory,
-        tests::{self as inventory_tests, ChannelNamespace, ChannelProbeTrace},
+        test_support::{self as inventory_tests, ChannelNamespace, ChannelProbeTrace},
     };
     let _root = crate::config::TestRuntimeRootGuard::new();
     let _injection = injection_off();
@@ -743,7 +743,7 @@ async fn s1_fallback_only_and_restored_owner_only_live_hold_real_effects_pg() {
     )) {
         return;
     }
-    use crate::services::platform::tmux::session_inventory::tests::{
+    use crate::services::platform::tmux::session_inventory::test_support::{
         ChannelNamespace, ChannelProbeTrace,
     };
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -1193,7 +1193,7 @@ async fn native_herdr_cases(
     use crate::db::dispatched_sessions::hosted_execution::{
         self, HostedLocation, HostedOwner, HostedState,
     };
-    use crate::services::platform::tmux::session_inventory::tests::ChannelNamespace;
+    use crate::services::platform::tmux::session_inventory::test_support::ChannelNamespace;
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let (api_port, api_server) = native_session_api(&pool).await;
@@ -1251,7 +1251,7 @@ async fn native_herdr_cases(
                 9 => HostedState::Bound,
                 _ => HostedState::Retired,
             };
-            let mut record = hosted_execution::tests::record(&owner, "recorded", state);
+            let mut record = hosted_execution::test_support::record(&owner, "recorded", state);
             if state != HostedState::Pending {
                 record.location = Some(HostedLocation {
                     host: "herdr".into(),

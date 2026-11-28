@@ -103,7 +103,7 @@ fn finish(dir: &Path) -> Result<(), StoreError> {
             Err(error) if error.kind() == io::ErrorKind::NotFound && target.is_file() => {}
             Err(error) => return Err(error.into()),
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         durable::fault::strike(&target, durable::fault::Step::RefreshInstall)?;
         fsync_parent_dir(&target)?;
         fsync_parent_dir(&stage)?;
@@ -293,7 +293,7 @@ impl ChannelStore {
                 return Err(damage("transcript moved during source refresh"));
             }
             fsync_parent_dir(&staged(dir, 0))?;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             durable::fault::strike(&dir.join(INTENT), durable::fault::Step::RefreshBeforeIntent)?;
             durable::create_once(&dir.join(INTENT), &serde_json::to_vec(&intent)?)?;
             finish(dir)?;

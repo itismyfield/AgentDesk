@@ -17,7 +17,7 @@ fn local_retry_managed_verified_host_drains_budget_before_following_exact_work()
     let _dedupe_lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
     let _fake_tmux =
-        crate::services::provider_teardown::tests::test_support::FakeTmux::install(CANARY_TMUX);
+        crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
     dedupe::reset_state_for_tests();
     dedupe::binding_events::set_test_root(Some(root.path()));
     let (context, canonical, retained) = durable_canary_without_launch_files(root.path());
@@ -131,7 +131,7 @@ fn local_retry_retired_source_stays_held_when_only_the_new_source_is_allowed() {
     let _dedupe_lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
     let _fake_tmux =
-        crate::services::provider_teardown::tests::test_support::FakeTmux::install(CANARY_TMUX);
+        crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
     dedupe::reset_state_for_tests();
     dedupe::binding_events::set_test_root(Some(root.path()));
     let (context, canonical, retained) = durable_canary_without_launch_files(root.path());
@@ -246,7 +246,7 @@ fn operator_resume_verified_source_hold_preserves_approval_cursor_and_post_count
     let _dedupe_lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
     let _fake_tmux =
-        crate::services::provider_teardown::tests::test_support::FakeTmux::install(CANARY_TMUX);
+        crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
     dedupe::reset_state_for_tests();
     dedupe::binding_events::set_test_root(Some(root.path()));
     let (context, canonical, retained) = durable_canary_without_launch_files(root.path());

@@ -41,7 +41,7 @@ pub(super) fn before_pending_lookup(logical: &str) {
     }
 }
 
-pub(crate) fn check_unlocked<T>(logical: &str, submit: impl FnOnce() -> T) -> T {
+pub fn check_unlocked<T>(logical: &str, submit: impl FnOnce() -> T) -> T {
     let (reading, mut release) = UnixStream::pair().unwrap();
     reading.set_nonblocking(true).unwrap();
     let (in_lookup, entered) = mpsc::channel();

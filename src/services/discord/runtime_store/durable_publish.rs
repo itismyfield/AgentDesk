@@ -8,23 +8,38 @@ use std::path::Path;
 use super::durable_ancestors::fsync_created_ancestors;
 use super::{AtomicWriteContext, PARENT_DIR_FSYNC_FLUSHES, classify_io_error};
 
-/// Step that failed before the rename made the new bytes visible.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PrePublishStage {
-    CreateDir,
-    CreateTemp,
-    Write,
-    FileSync,
-    Rename,
+mod publish_outcome {
+    use super::FlushStatus;
+
+    /// Step that failed before the rename made the new bytes visible.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum PrePublishStage {
+        CreateDir,
+        CreateTemp,
+        Write,
+        FileSync,
+        Rename,
+    }
+
+    /// Nothing was published; the target still holds its previous bytes (or is still absent).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct PrePublishError {
+        pub stage: PrePublishStage,
+        /// The same text `atomic_write` returns for this failure, ENOSPC classification included.
+        pub message: String,
+    }
+
+    /// The new bytes are visible at the target path.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Published {
+        pub flush_status: FlushStatus,
+    }
 }
 
-/// Nothing was published; the target still holds its previous bytes (or is still absent).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PrePublishError {
-    pub(crate) stage: PrePublishStage,
-    /// The same text `atomic_write` returns for this failure, ENOSPC classification included.
-    pub(crate) message: String,
-}
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use publish_outcome::{PrePublishError, PrePublishStage, Published};
+#[cfg(any(test, feature = "test-support"))]
+pub use publish_outcome::{PrePublishError, PrePublishStage, Published};
 
 impl std::fmt::Display for PrePublishError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -34,14 +49,14 @@ impl std::fmt::Display for PrePublishError {
 
 /// Directory flush that failed after the rename.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SyncStage {
+pub enum SyncStage {
     ParentOpen,
     ParentSync,
     Ancestors,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum FlushStatus {
+pub enum FlushStatus {
     /// The parent and every directory up to the trusted root were flushed.
     Flushed,
     /// The rename is visible, but this platform offers no directory flush.
@@ -50,10 +65,13 @@ pub(crate) enum FlushStatus {
     SyncFailed { stage: SyncStage, error: String },
 }
 
-/// The new bytes are visible at the target path.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Published {
-    pub(crate) flush_status: FlushStatus,
+#[cfg(any(test, feature = "test-support"))]
+pub fn publish_durable_for_test(
+    root: &Path,
+    path: &Path,
+    data: &str,
+) -> Result<Published, PrePublishError> {
+    publish_durable(root, path, data)
 }
 
 /// Publishes `data` at `path`, then flushes its parent and the directories up to `root`, the
@@ -82,26 +100,26 @@ fn write_and_rename(path: &Path, data: &str) -> Result<(), PrePublishError> {
     let unique = uuid::Uuid::new_v4().simple();
     let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
     let tmp = path.with_file_name(format!(".{file_name}.{unique}.tmp"));
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     flush_probe::inject(path, flush_probe::Step::CreateTemp, &tmp)
         .map_err(failed(PrePublishStage::CreateTemp, "create_tmp"))?;
     let mut file =
         fs::File::create(&tmp).map_err(failed(PrePublishStage::CreateTemp, "create_tmp"))?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     flush_probe::inject(path, flush_probe::Step::Write, &tmp)
         .map_err(failed(PrePublishStage::Write, "write_all"))?;
     file.write_all(data.as_bytes())
         .map_err(failed(PrePublishStage::Write, "write_all"))?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     flush_probe::inject(path, flush_probe::Step::FileSync, &tmp)
         .map_err(failed(PrePublishStage::FileSync, "sync_all"))?;
     file.sync_all()
         .map_err(failed(PrePublishStage::FileSync, "sync_all"))?;
     super::log_discord_inflight_atomic_replace(path);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     super::rename_fault::before(path, &tmp);
     let renamed = fs::rename(&tmp, path);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     super::rename_fault::after(path, &renamed);
     renamed.map_err(failed(PrePublishStage::Rename, "rename"))
 }
@@ -141,16 +159,16 @@ pub(super) fn flush_dir(
     open_stage: SyncStage,
     sync_stage: SyncStage,
 ) -> Result<(), (SyncStage, io::Error)> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     match flush_probe::dir_decision(target, open_stage, dir) {
         flush_probe::Decision::Proceed => {}
         flush_probe::Decision::Fail(stage, error) => return Err((stage, error)),
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     let _ = target;
     let opened = fs::File::open(dir).map_err(|error| (open_stage, error));
     let synced = opened.and_then(|file| file.sync_all().map_err(|error| (sync_stage, error)));
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     flush_probe::record(
         target,
         synced.as_ref().err().map_or(sync_stage, |e| e.0),
@@ -162,13 +180,13 @@ pub(super) fn flush_dir(
 
 /// Flushes `path`'s parent and the directories up to `root` before `path` is published, so
 /// files written in place there are durable before the publication that vouches for them.
-pub(crate) fn flush_chain_before_publish(root: &Path, path: &Path) -> FlushStatus {
+pub fn flush_chain_before_publish(root: &Path, path: &Path) -> FlushStatus {
     flush_published(root, path)
 }
 
 /// `fsync_parent_dir`, then the directories up to the runtime root, for writers that classify the
 /// post-rename outcome themselves; outside the runtime root only the parent is synced.
-pub(crate) fn fsync_parent_and_ancestors(path: &Path) -> io::Result<()> {
+pub fn fsync_parent_and_ancestors(path: &Path) -> io::Result<()> {
     super::fsync_parent_dir(path)?;
     match super::runtime_root() {
         Some(root) if path.starts_with(&root) => fsync_created_ancestors(&root, path),
@@ -178,7 +196,7 @@ pub(crate) fn fsync_parent_and_ancestors(path: &Path) -> io::Result<()> {
 
 /// Flushes the parent after a successful removal so a crash cannot bring the file back; a
 /// failure is only logged, because the removal already happened.
-pub(crate) fn sync_removed(path: &Path) {
+pub fn sync_removed(path: &Path) {
     if PARENT_DIR_FSYNC_FLUSHES && let Err((stage, error)) = flush_parent(path) {
         tracing::warn!(
             path = %path.display(),
@@ -192,7 +210,7 @@ pub(crate) fn sync_removed(path: &Path) {
 
 /// After a rename of `from` to `to`, flushes the destination chain up to `root`, then the source,
 /// so a crash never keeps the removal without the copy; failures are only logged.
-pub(crate) fn sync_moved(root: &Path, from: &Path, to: &Path) {
+pub fn sync_moved(root: &Path, from: &Path, to: &Path) {
     let failed = match flush_published(root, to) {
         FlushStatus::Flushed => flush_parent(from)
             .err()
@@ -214,7 +232,7 @@ pub(crate) fn sync_moved(root: &Path, from: &Path, to: &Path) {
 
 /// Recovery-critical publication of `<trusted root>/<store>/<provider>/<file>`, the trusted root
 /// being the runtime root in production; store and provider names come from the path.
-pub(crate) fn publish_store_row(path: &Path, data: &str) -> Result<(), String> {
+pub fn publish_store_row(path: &Path, data: &str) -> Result<(), String> {
     fn name(dir: Option<&Path>) -> Option<&str> {
         dir.and_then(Path::file_name).and_then(|name| name.to_str())
     }
@@ -266,7 +284,7 @@ fn log_flush_status(path: &Path, context: &AtomicWriteContext<'_>, status: &Flus
 
 /// Recovery-critical publication: only a pre-rename failure is an `Err` (same text and log as
 /// before); a later flush failure is logged as published so callers never roll memory back.
-pub(crate) fn critical_publish(
+pub fn critical_publish(
     path: &Path,
     data: &str,
     context: AtomicWriteContext<'_>,
@@ -274,7 +292,7 @@ pub(crate) fn critical_publish(
     critical_publish_status(path, data, context).map(|_| ())
 }
 
-pub(crate) fn critical_publish_status(
+pub fn critical_publish_status(
     path: &Path,
     data: &str,
     context: AtomicWriteContext<'_>,
@@ -302,14 +320,14 @@ pub(crate) fn critical_publish_status(
     }
 }
 
-pub(crate) fn retry_published_status(path: &Path, context: AtomicWriteContext<'_>) -> FlushStatus {
+pub fn retry_published_status(path: &Path, context: AtomicWriteContext<'_>) -> FlushStatus {
     let status = flush_published(&trusted_root(&context), path);
     log_flush_status(path, &context, &status);
     status
 }
 
 /// Best-effort durable publication: never fails its caller, but every failure is logged.
-pub(crate) fn best_effort_publish_logged(path: &Path, data: &str, context: AtomicWriteContext<'_>) {
+pub fn best_effort_publish_logged(path: &Path, data: &str, context: AtomicWriteContext<'_>) {
     match publish_durable(&trusted_root(&context), path, data) {
         Ok(published) => log_flush_status(path, &context, &published.flush_status),
         Err(error) => tracing::warn!(
@@ -329,7 +347,7 @@ pub(crate) fn best_effort_publish_logged(path: &Path, data: &str, context: Atomi
 
 /// The plain `atomic_write` with the recovery-critical failure log, kept for test fixtures.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn critical_atomic_write(
+pub fn critical_atomic_write(
     path: &Path,
     data: &str,
     context: AtomicWriteContext<'_>,
@@ -351,14 +369,14 @@ pub(crate) fn critical_atomic_write(
 /// Test-only view of every directory flush and injected step failure, scoped by target path so
 /// parallel tests in separate temp directories never see each other's events.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod flush_probe {
+pub mod flush_probe {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Condvar, Mutex};
 
     use super::SyncStage;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub(crate) enum Step {
+    pub enum Step {
         CreateTemp,
         Write,
         FileSync,
@@ -379,28 +397,28 @@ pub(crate) mod flush_probe {
 
     /// One write or flush step, with the target's bytes as they stood when it ran.
     #[derive(Debug, Clone, PartialEq, Eq)]
-    pub(crate) struct Event {
-        pub(crate) target: PathBuf,
-        pub(crate) step: Step,
-        pub(crate) dir: PathBuf,
-        pub(crate) ok: bool,
-        pub(crate) target_bytes: Option<String>,
+    pub struct Event {
+        pub target: PathBuf,
+        pub step: Step,
+        pub dir: PathBuf,
+        pub ok: bool,
+        pub target_bytes: Option<String>,
     }
 
     /// Holds a flush until released; `entered` reports that a flush reached it.
     #[derive(Default)]
-    pub(crate) struct Gate {
+    pub struct Gate {
         state: Mutex<(bool, bool)>,
         changed: Condvar,
     }
 
     impl Gate {
-        pub(crate) fn release(&self) {
+        pub fn release(&self) {
             self.state.lock().unwrap_or_else(|e| e.into_inner()).1 = true;
             self.changed.notify_all();
         }
 
-        pub(crate) fn wait_entered(&self, timeout: std::time::Duration) -> bool {
+        pub fn wait_entered(&self, timeout: std::time::Duration) -> bool {
             let guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let (guard, _) = self
                 .changed
@@ -421,11 +439,11 @@ pub(crate) mod flush_probe {
 
     /// What a watched scope does to flushes under it.
     #[derive(Clone, Default)]
-    pub(crate) struct Plan {
+    pub struct Plan {
         /// Every attempt of these steps fails with `EIO`.
-        pub(crate) fail: Vec<Step>,
+        pub fail: Vec<Step>,
         /// Parent flushes wait here before running.
-        pub(crate) block: Option<Arc<Gate>>,
+        pub block: Option<Arc<Gate>>,
     }
 
     struct Entry {
@@ -437,10 +455,10 @@ pub(crate) mod flush_probe {
     static WATCHED: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
 
     /// Applies `plan` to every target under `scope` until dropped.
-    pub(crate) struct Watch(PathBuf);
+    pub struct Watch(PathBuf);
 
     impl Watch {
-        pub(crate) fn new(scope: &Path, plan: Plan) -> Self {
+        pub fn new(scope: &Path, plan: Plan) -> Self {
             WATCHED
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -452,7 +470,7 @@ pub(crate) mod flush_probe {
             Self(scope.to_path_buf())
         }
 
-        pub(crate) fn events(&self) -> Vec<Event> {
+        pub fn events(&self) -> Vec<Event> {
             WATCHED
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -463,7 +481,7 @@ pub(crate) mod flush_probe {
         }
 
         /// Successful `step`s for targets under `scope`, as the directories they ran on.
-        pub(crate) fn flushed(&self, step: Step) -> Vec<PathBuf> {
+        pub fn flushed(&self, step: Step) -> Vec<PathBuf> {
             self.events()
                 .into_iter()
                 .filter(|event| event.step == step && event.ok)
@@ -471,7 +489,7 @@ pub(crate) mod flush_probe {
                 .collect()
         }
 
-        pub(crate) fn count(&self, step: Step) -> usize {
+        pub fn count(&self, step: Step) -> usize {
             self.events().iter().filter(|e| e.step == step).count()
         }
     }

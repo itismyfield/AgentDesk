@@ -610,7 +610,7 @@ pub(crate) mod test_support {
                 shared.settings.write().await.allowed_channel_ids = vec![channel];
                 registry.register(provider.into(), shared).await;
             }
-            crate::services::tui_o::writer::tests::with_ready_codex_and_claude(
+            crate::services::tui_o::writer::test_support::codex_ready::with_ready_codex_and_claude(
                 fixture.source.clone(),
                 |ready| async move {
                     let mut channels = ready.transition_channels();

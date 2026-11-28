@@ -614,7 +614,7 @@ async fn f6_original_intent_failure_holds_until_durable_intent_pg() {
                 }
             );
             if gate == OriginalGate::SendPgManaged {
-                let envelope = RepostEnvelope::additional(
+                let envelope = RepostEnvelope::additional_for_test(
                     CHANNEL,
                     "fresh payload".into(),
                     RepostIds::for_piece(&marker(&key)).unwrap(),
@@ -647,7 +647,7 @@ async fn f6_original_intent_failure_holds_until_durable_intent_pg() {
                         .as_ref()
                         .unwrap()
                         .state()
-                        .intent(0)
+                        .intent_for_test(0)
                         .unwrap()
                         .key
                         .as_ref(),
