@@ -195,13 +195,13 @@ impl TurnViewReconciler {
         #[cfg(any(test, feature = "test-support"))]
         if let Some(route) = self.test_reaction_route.get() {
             return match route {
-                reaction_hook_tests::Route::Record { .. } => {
+                reaction_hook_tests::Route::Record(_) => {
                     tokio::task::yield_now().await;
                     self.record_reaction_op(target, emoji, add, identity);
                     TurnViewDelivery::Delivered
                 }
-                reaction_hook_tests::Route::Http(http) => {
-                    reaction_hook_tests::deliver_http(http, target, emoji, add).await
+                reaction_hook_tests::Route::Http(_) => {
+                    reaction_hook_tests::deliver_http(route.http(), target, emoji, add).await
                 }
             };
         }

@@ -4,18 +4,14 @@ use super::{ResolvedIdentity, TurnViewDelivery, TurnViewReconciler, TurnViewTarg
 use poise::serenity_prelude as serenity;
 
 pub(super) enum Route {
-    Record {
-        #[cfg(not(test))]
-        http: Arc<serenity::Http>,
-    },
+    Record(Arc<serenity::Http>),
     Http(Arc<serenity::Http>),
 }
 
 impl Route {
-    #[cfg(not(test))]
     pub(super) fn http(&self) -> &Arc<serenity::Http> {
         match self {
-            Self::Record { http } | Self::Http(http) => http,
+            Self::Record(http) | Self::Http(http) => http,
         }
     }
 }
@@ -30,16 +26,7 @@ pub(in crate::services::discord) struct TestReactionOp {
 
 impl TurnViewReconciler {
     pub(in crate::services::discord) fn record_test_reactions(&self, http: Arc<serenity::Http>) {
-        #[cfg(test)]
-        let _ = http;
-        assert!(
-            self.test_reaction_route
-                .set(Route::Record {
-                    #[cfg(not(test))]
-                    http,
-                })
-                .is_ok()
-        );
+        assert!(self.test_reaction_route.set(Route::Record(http)).is_ok());
     }
 
     pub(in crate::services::discord) fn use_test_reaction_http(&self, http: Arc<serenity::Http>) {
