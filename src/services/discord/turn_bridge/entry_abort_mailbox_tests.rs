@@ -2,6 +2,8 @@ use crate::services::agent_protocol::StreamMessage;
 use crate::services::discord::gateway::TurnGateway;
 use crate::services::discord::inflight::InflightTurnState;
 use crate::services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::seed_context;
+#[cfg(unix)]
+use crate::services::discord::turn_bridge::context::TurnBridgeContext;
 use crate::services::discord::turn_bridge::{BridgeCompletionSignal, spawn_turn_bridge};
 use crate::services::discord::{
     self,
