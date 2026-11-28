@@ -121,7 +121,6 @@ impl ReadError {
 }
 
 /// None denotes an unmanaged channel; errors must install a held view, never Legacy.
-#[cfg(any(test, feature = "test-support"))]
 pub async fn read(
     pool: &PgPool,
     provider: &str,
