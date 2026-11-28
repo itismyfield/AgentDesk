@@ -1687,6 +1687,55 @@ mod tests {
         }
 
         #[test]
+        fn mirror_warning_rearms_after_the_session_leaves_rehydration() {
+            let _root = crate::config::TestRuntimeRootGuard::new();
+            let _dedupe = dedupe::TEST_LOCK
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            dedupe::reset_state_for_tests();
+            let _tmux = ScriptedTmux::install();
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let pool = {
+                let _entered = runtime.enter();
+                sqlx::postgres::PgPoolOptions::new()
+                    .connect_lazy("postgres://fixture@127.0.0.1:1/fixture")
+                    .unwrap()
+            };
+            let shared =
+                crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool));
+            let name = "AgentDesk-claude-mirror-warning-lifetime";
+            let log = tempfile::NamedTempFile::new().unwrap();
+            let writer = log.reopen().unwrap();
+            crate::logging::test_capture::pin_callsite_interest();
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_writer(move || writer.try_clone().unwrap())
+                .finish();
+            let tick = || rehydrate_existing_claude_tui_bindings(&shared);
+            tracing::subscriber::with_default(subscriber, || {
+                for incarnation in 1..=2 {
+                    dedupe::register_tmux_runtime_binding(
+                        name,
+                        binding(RuntimeHandoffKind::ClaudeTui),
+                    );
+                    tick();
+                    tick();
+                    let warnings = std::fs::read_to_string(log.path())
+                        .unwrap()
+                        .lines()
+                        .filter(|line| {
+                            line.contains(name) && line.contains("no runtime for the host check")
+                        })
+                        .count();
+                    assert_eq!(warnings, incarnation);
+                    assert!(dedupe::evict_dead_tmux_mirror(name));
+                    tick();
+                }
+            });
+            dedupe::reset_state_for_tests();
+        }
+
+        #[test]
         fn mirror_host_timeout_keeps_and_retries_with_one_warning_until_success_pg() {
             let _root = crate::config::TestRuntimeRootGuard::new();
             let _dedupe = dedupe::TEST_LOCK

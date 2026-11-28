@@ -41,6 +41,72 @@ fn rollout(root: &Path, id: &str) -> PathBuf {
     path
 }
 
+#[test]
+fn deferred_codex_pane_blocks_markerless_rollout_publication() {
+    fixture(|root| {
+        let tmux = crate::services::discord::host_defer_gate::tests::ScriptedTmux::install();
+        let (deferred, admitted) = ("AgentDesk-codex-deferred", SESSION);
+        let cwd = root.join("repo");
+        let home = root.join("codex");
+        let sessions_dir = home.join("sessions");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let _home = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "CODEX_HOME",
+            &home,
+        );
+        let rollout_of = |at| {
+            let id = uuid::Uuid::new_v4().to_string();
+            let path = sessions_dir.join(format!("rollout-2026-10-01T00-00-00-{id}.jsonl"));
+            let header = serde_json::json!({"type": "session_meta",
+                "payload": {"id": id, "cwd": cwd, "originator": "codex-tui", "source": "cli"}});
+            std::fs::write(&path, format!("{header}\n")).unwrap();
+            std::fs::File::open(&path)
+                .unwrap()
+                .set_modified(at)
+                .unwrap();
+            path
+        };
+        let recent = std::time::SystemTime::now();
+        rollout_of(recent - Duration::from_secs(5));
+        let deferred_rollout = rollout_of(recent);
+        assert_eq!(
+            crate::services::codex_tui::rollout_tail::latest_unclaimed_rollout_for_cwd_since(
+                &cwd,
+                std::time::SystemTime::UNIX_EPOCH,
+                &sessions_dir,
+                &HashSet::new(),
+            ),
+            Some(deferred_rollout),
+        );
+        tmux.live(admitted);
+        tmux.cwd(&cwd);
+        let names = [deferred.to_owned(), admitted.to_owned()];
+        let hosts = HashMap::from([(names[0].clone(), false), (names[1].clone(), true)]);
+        let plan = codex_tui_rehydrate_plan(&names, &hosts);
+        let published = rehydrate_codex_tui_binding_transaction(
+            admitted,
+            CHANNEL,
+            &HashSet::new(),
+            &plan.reserved_rollout_paths,
+            &plan.duplicate_marker_paths,
+            plan.markerless_fallback_allowed_sessions.contains(admitted),
+            || {},
+        );
+        let calls = tmux.take_calls();
+        assert!(
+            calls.iter().all(|call| !call.contains(deferred)),
+            "{calls:?}"
+        );
+        assert!(!plan.markerless_fallback_allowed_sessions.contains(admitted));
+        assert!(
+            published.is_none(),
+            "A's newest rollout must never become B's source"
+        );
+        assert!(dedupe::runtime_binding_for_tmux_session(admitted).is_none());
+    });
+}
+
 fn rehydrate(observe: impl FnOnce()) -> Option<dedupe::TuiRuntimeBinding> {
     rehydrate_codex_tui_binding_transaction(
         SESSION,

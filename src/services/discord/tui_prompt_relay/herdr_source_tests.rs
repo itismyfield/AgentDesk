@@ -95,6 +95,51 @@ pub(crate) struct Herdr {
     _root: crate::config::TestRuntimeRootGuard,
 }
 
+#[test]
+fn claude_herdr_launch_source_survives_two_mirror_passes_pg() {
+    let herdr = &mut Herdr::new("mirror-preservation");
+    let tmux = crate::services::discord::host_defer_gate::tests::ScriptedTmux::install();
+    let session = uuid();
+    let nonce = herdr.launch(&session);
+    herdr.ingress.transcript(&session);
+    assert!(matches!(
+        herdr.launched(&nonce, &session, &herdr.pane(&nonce, |_| {})),
+        HerdrSourceAttach::Published { bound: true, .. }
+    ));
+    let logical = herdr.logical();
+    let before = herdr.bound().unwrap();
+    assert_eq!(before.session_id.as_deref(), Some(session.as_str()));
+    let mut transcript = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&before.output_path)
+        .unwrap();
+    std::io::Write::write_all(&mut transcript, b"\n").unwrap();
+    assert!(transcript.metadata().unwrap().len() > before.last_offset);
+    let mut shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(herdr.pool.clone()));
+    Arc::get_mut(&mut shared).unwrap().token_hash = herdr.owner.discord_token_hash.clone();
+    tmux.take_calls();
+    for _ in 0..2 {
+        let shared = shared.clone();
+        let events = binding_events::test_root();
+        herdr.rt.block_on(async {
+            tokio::task::spawn_blocking(move || {
+                binding_events::set_test_root(events.as_deref());
+                super::super::rehydration::rehydrate_existing_claude_tui_bindings(&shared);
+                binding_events::set_test_root(None);
+            })
+            .await
+            .unwrap();
+        });
+        assert_eq!(herdr.bound(), Some(before.clone()));
+        assert_eq!(
+            dedupe::owner_channel_for_tmux_session(logical),
+            Some(herdr.channel)
+        );
+    }
+    assert!(tmux.take_calls().iter().all(|call| !call.contains(logical)));
+}
+
 impl Herdr {
     pub(crate) fn new(tag: &str) -> Self {
         let rt = tokio::runtime::Builder::new_current_thread()

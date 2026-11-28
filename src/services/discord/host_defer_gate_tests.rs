@@ -123,6 +123,9 @@ impl ScriptedTmux {
              echo \"$*\" >> \"$d/calls\"\n\
              [ \"$1\" = list-sessions ] && {{ cat \"$d/listed\" 2>/dev/null; exit 0; }}\n\
              [ -f \"$d/fail\" ] && {{ echo 'error connecting to socket' >&2; exit 1; }}\n\
+             if [ \"$1\" = display-message ] && [ -f \"$d/cwd\" ] && [ \"$4\" = \"=$(cat \"$d/live\"):\" ]; then\n\
+                 cat \"$d/cwd\"; exit 0\n\
+             fi\n\
              if [ -f \"$d/live\" ] && [ \"$3\" = \"=$(cat \"$d/live\"):\" ]; then\n\
                  [ \"$1\" = list-panes ] && echo 0; exit 0\n\
              fi\n\
@@ -157,6 +160,14 @@ impl ScriptedTmux {
 
     pub(crate) fn live(&self, name: &str) {
         std::fs::write(self.dir.path().join("live"), name).unwrap();
+    }
+
+    pub(crate) fn cwd(&self, path: &std::path::Path) {
+        std::fs::write(
+            self.dir.path().join("cwd"),
+            path.as_os_str().as_encoded_bytes(),
+        )
+        .unwrap();
     }
 
     /// The logged calls, oldest first, and clears the log.

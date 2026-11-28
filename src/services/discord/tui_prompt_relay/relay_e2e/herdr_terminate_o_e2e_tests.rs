@@ -139,6 +139,50 @@ fn codex_attach_withholds_an_execution_retired_after_its_reconcile_read_pg() {
 }
 
 #[test]
+fn codex_herdr_launch_source_survives_two_mirror_passes_pg() {
+    let path = concat!(
+        module_path!(),
+        "::codex_herdr_launch_source_survives_two_mirror_passes_pg"
+    );
+    in_child(path, |rig, _| {
+        Box::pin(async move {
+            let (run, context, sessions) = Terminating::launch_codex(&rig).await;
+            let tmux = crate::services::discord::host_defer_gate::tests::ScriptedTmux::install();
+            let native = uuid::Uuid::new_v4().to_string();
+            let path = rollout(&sessions, &native);
+            own_source(&run, &context, &native, &path).await;
+            let before = dedupe::runtime_binding_for_tmux_session(&run.logical).unwrap();
+            assert_eq!(before.session_id.as_deref(), Some(native.as_str()));
+            append(&path, &codex_message("unread", "retained output"));
+            assert!(std::fs::metadata(&path).unwrap().len() > before.last_offset);
+            for _ in 0..2 {
+                let shared = run.harness.shared.clone();
+                tokio::task::spawn_blocking(move || {
+                    super::super::rehydration::rehydrate_existing_codex_tui_bindings(&shared);
+                })
+                .await
+                .unwrap();
+                assert_eq!(
+                    dedupe::runtime_binding_for_tmux_session(&run.logical),
+                    Some(before.clone())
+                );
+                assert_eq!(
+                    dedupe::owner_channel_for_tmux_session(&run.logical),
+                    Some(CHANNEL_ID)
+                );
+            }
+            assert!(
+                tmux.take_calls()
+                    .iter()
+                    .all(|call| !call.contains(&run.logical))
+            );
+            drop(tmux);
+            run.finish().await;
+        })
+    });
+}
+
+#[test]
 fn m2t_t7u_o_actor_unsealed_survives_rotation_stall_pg() {
     let path = concat!(
         module_path!(),
