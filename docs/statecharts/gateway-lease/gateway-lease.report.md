@@ -44,6 +44,47 @@ No chart is generated: the `statechart` skill is not installed on the WSL lane.
 | NKeepaliveYield | `gateway_lease.rs:787-822` (the `preferred_gateway_is_waiting` `:118` → `should_yield_to_preferred` `:98` → `node_awaits_gateway` `cluster/intake_worker_capabilities.rs:131`) |
 | Arrive/Deliver on N | O-home refusal "O channel … is served only on O home …" (Foreign queue) |
 
+## Held O thread input (#8487)
+
+Code SHA: `6d17424acd675010cfeb47c2437b1e5d97b77a91` (Before), plus the catch-up change on `refs/review/i8487-2` (After).
+`child` is the first input of an O thread under a selected parent that P has no registration, checkpoint or scan record for.
+While N serves the lease, N answers it with `WriterBlocked`: no refusal, nothing stored, checkpoint left in place (`ChildArrive`).
+Only P's catch-up can queue it once P serves again (`CatchUp`).
+`ChildCandidates = FALSE` is the catch-up before the fix, which builds candidates from registered channels and P's own records only.
+`Dedup = FALSE` is a mutation: a later catch-up run queues the already-queued message again.
+
+Rules:
+- `HeldInputQueued` (PROPERTY): `[](child = "held" => <>(child = "queued"))`. A human input N held for P is queued in the end.
+- `NoDuplicateEnqueue` (INVARIANT): `enqueued <= 1`. Together with `HeldInputQueued`, the held input is queued exactly once.
+
+Assumption: P serves again within the catch-up window (5 minutes of message age, `catch_up.rs` `max_age`), as for every channel.
+The window is not modeled.
+
+| cfg | ChildCandidates / Dedup / Mode | result |
+|---|---|---|
+| GatewayLeaseChildBefore | FALSE / TRUE / `retry` (6d17424acd) | RED: `HeldInputQueued`. P's catch-up never reads the thread, so the held input stays held |
+| GatewayLeaseAfter | TRUE / TRUE / `retry` | GREEN |
+| GatewayLeaseChildDup | TRUE / FALSE / `retry` (mutation) | RED: `NoDuplicateEnqueue` |
+| GatewayLeaseBefore, GatewayLeaseNoYield, GatewayLeaseAfterRefused | TRUE / TRUE / as above | RED also on `HeldInputQueued`: the lease never returns to a serving P, so no catch-up runs |
+
+TLC 1.7.4 through `scripts/ci/statecharts_tlc.py`, macOS `openjdk`: 6/6 configs match `expected.tsv`, 16.5 s total.
+
+### Entry points that hold or recover the input (`refs/review/i8487-2`)
+
+| Entry point | Code | Model |
+|---|---|---|
+| live text intake | `router/intake_gate.rs:1389` → `intake_dispatch.rs:613` `dispatch_live_text_intake` → `finish_deferred` `:711` | ChildArrive |
+| O hold intake | `router/intake_gate.rs:1393`, `router/herdr_consent.rs:544` → `intake_dispatch.rs:645` `dispatch_o_hold_intake` → `finish_deferred` | ChildArrive |
+| herdr consent live intake | `router/herdr_consent.rs:506,565` → `dispatch_live_text_intake` | ChildArrive |
+| attachment intake | `intake_dispatch.rs:666` `finish_nonlocal_attachment_admission` → `finish_deferred` | ChildArrive |
+| non-live text and skill intake | `router/intake_gate.rs:1397`, `intake_dispatch/skill.rs:55` → `intake_dispatch.rs:584` `dispatch_text_intake` | not modeled: no checkpoint, so catch-up has nothing to recover |
+| hold verdict | `intake_dispatch.rs:315` builds `WriterBlocked { waits_for_home }` from `cutover.rs:440` `placement_waits_for_home`; `:734` sends no refusal when it is set | ChildArrive (no refusal) |
+| remote home owner | `ownership/execution.rs:165` → `runtime_bootstrap/owner_execution.rs:98,185` record it; `:105,207,238,245` clear it | N's held view |
+| boot catch-up | `runtime_bootstrap/spawns.rs:526`, `runtime_bootstrap/recovery_flush.rs:43` → `catch_up.rs:456` | CatchUp |
+| retry catch-up | `mailbox_ops.rs:286` → `catch_up.rs:488` | CatchUp (later run) |
+| candidate selection | `catch_up.rs:553` registered channels and records, `:554` → `catch_up/o_children.rs` `add_unrecorded` (active threads under selected parents, `catch_up/api.rs` `child_threads`) | ChildCandidates |
+| duplicate guard | phase 1 known ids from the mailbox snapshot (`catch_up/phase1_sweep.rs` `recovery_known_arms_and_ids`) | Dedup |
+
 Not modeled: the handback breaker (`gateway_handback_breaker.rs`). It suppresses the keepalive yield after dense empty handbacks; on 11-23 no handback happened, so the breaker was not involved.
 The preferred node's restart-pending standby (`gateway_lease.rs:304-311`) is not modeled either. That standby retries without advertising a waiter.
 

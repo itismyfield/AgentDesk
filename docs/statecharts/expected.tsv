@@ -328,9 +328,11 @@ gateway-lease/GatewayBootShutdownMultiStuckLease.cfg	GatewayBootShutdown	-	Barri
 gateway-lease/GatewayBootShutdownSingleAfter.cfg	GatewayBootShutdown	-	-
 gateway-lease/GatewayBootShutdownSingleBefore.cfg	GatewayBootShutdown	-	BarrierEnds
 gateway-lease/GatewayLeaseAfter.cfg	GatewayLease	-	-
-gateway-lease/GatewayLeaseAfterRefused.cfg	GatewayLease	-	ForeignQueueDrains,LeaseReturnsToPreferred
-gateway-lease/GatewayLeaseBefore.cfg	GatewayLease	-	ForeignQueueDrains,LeaseReturnsToPreferred
-gateway-lease/GatewayLeaseNoYield.cfg	GatewayLease	-	ForeignQueueDrains,LeaseReturnsToPreferred
+gateway-lease/GatewayLeaseAfterRefused.cfg	GatewayLease	-	ForeignQueueDrains,HeldInputQueued,LeaseReturnsToPreferred
+gateway-lease/GatewayLeaseBefore.cfg	GatewayLease	-	ForeignQueueDrains,HeldInputQueued,LeaseReturnsToPreferred
+gateway-lease/GatewayLeaseChildBefore.cfg	GatewayLease	-	HeldInputQueued
+gateway-lease/GatewayLeaseChildDup.cfg	GatewayLease	NoDuplicateEnqueue	-
+gateway-lease/GatewayLeaseNoYield.cfg	GatewayLease	-	ForeignQueueDrains,HeldInputQueued,LeaseReturnsToPreferred
 host-migration/HostMigration.cfg	HostMigration	NoDeadlock,RecordMatchesProcesses	-
 host-migration/HostMigrationClean.cfg	HostMigration	-	-
 host-migration/HostMigrationIdOnly.cfg	HostMigration	NoDeadlock	-
