@@ -332,7 +332,6 @@ macro_rules! emit_invariant_log {
             session_key = $violation.session_key.unwrap_or_default(),
             turn_id = $violation.turn_id.unwrap_or_default(),
             code_location = $violation.code_location,
-            response_offset = $violation.details.get("response_offset").map(tracing::field::display),
             "[invariant] {}",
             $violation.message
         );
@@ -352,7 +351,6 @@ macro_rules! emit_invariant_log {
             session_key = $violation.session_key.unwrap_or_default(),
             turn_id = $violation.turn_id.unwrap_or_default(),
             code_location = $violation.code_location,
-            response_offset = $violation.details.get("response_offset").map(tracing::field::display),
             "[invariant] {} {}",
             $violation.message,
             INVARIANT_WARN_DOWNGRADE_SUFFIX
