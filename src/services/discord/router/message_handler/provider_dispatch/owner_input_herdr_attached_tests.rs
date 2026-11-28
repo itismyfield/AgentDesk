@@ -58,6 +58,49 @@ fn started(channel: u64) -> HerdrOwner {
     owner
 }
 
+#[test]
+fn s2b1_placed_attach_missing_unread_owner_answers_settled_once() {
+    use crate::db::dispatched_sessions::hosted_execution::HostedObservation;
+    use crate::services::turn_host::HerdrTurnPlan;
+    use tokio::sync::oneshot::{self, error::TryRecvError};
+
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let owner = HerdrOwner::start("claude", 7_283_997);
+    let stale = claim(&owner);
+    let current = claim(&owner);
+    assert_eq!(stale.front().0, current.front().0);
+    assert_ne!(stale.number(), current.number());
+    let host = TurnHost::Herdr(Box::new(HerdrTurnPlan {
+        endpoint: owner.endpoint(),
+        row: Some(HostedObservation::known_fixture(
+            owner.record("claude", HostedState::Retired),
+        )),
+        bootstrap: false,
+    }));
+    let turn = busy_turn::build(
+        None,
+        None,
+        &ProviderKind::Claude,
+        PROMPT,
+        &owner.logical,
+        &host,
+        owner.channel,
+    );
+    let registration = owner.registration("claude", "herdr");
+    let (stream, _) = std::sync::mpsc::channel();
+    let (settled, mut response) = oneshot::channel();
+    let _entered = owner.runtime.enter();
+    let finish_count = super::super::super::start_failure::finish_count;
+    let before = finish_count();
+    let result = execute_front(turn, stream, stale, registration, settled);
+    let expected = Err("NotSent(\"owner_disposition_unavailable\")".into());
+    assert_eq!(result, expected);
+    assert_eq!(response.try_recv(), Ok(expected));
+    assert_eq!(response.try_recv(), Err(TryRecvError::Closed));
+    assert_eq!(finish_count() - before, 1);
+    assert!(owner.rig.sends().is_empty());
+}
+
 fn renonced(record: &HostedExecution, nonce: &str) -> HostedExecution {
     let mut record = record.clone();
     record.execution_nonce = nonce.into();

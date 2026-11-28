@@ -8,6 +8,16 @@ use crate::services::discord::queue_io::input_owner::drive::{Front, FrontClaim};
 use crate::services::discord::queue_io::input_owner::held_watch;
 use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem, RetryWaitCause};
 
+#[cfg(test)]
+thread_local! {
+    static FINISH_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn finish_count() -> usize {
+    FINISH_COUNT.with(std::cell::Cell::get)
+}
+
 #[derive(Clone, Copy, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(in crate::services::discord) enum Kind {
@@ -404,6 +414,8 @@ impl Failure {
         watch: Result<Option<row_removed::Watch>, String>,
         result: Result<(), String>,
     ) -> Result<(), String> {
+        #[cfg(test)]
+        FINISH_COUNT.with(|count| count.set(count.get() + 1));
         let read = crate::services::claude::herdr_turn::take_retry_probe();
         let Err(error) = result else { return Ok(()) };
         let bound = crate::services::claude::herdr_turn::take_owner_bound_failure();
