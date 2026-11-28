@@ -35,9 +35,12 @@ const SUCCESSOR: &str = "dispatch-e07-successor";
 const JSON: (&str, &str) = ("content-type", "application/json");
 
 /// A postlude with nothing to release.
-impl super::Released for () {
+#[derive(Debug, PartialEq)]
+struct NoopPostlude;
+
+impl super::Released for NoopPostlude {
     fn released(self) -> futures::future::BoxFuture<'static, Self> {
-        async {}.boxed()
+        async move { self }.boxed()
     }
 }
 
@@ -798,7 +801,7 @@ fn force_terminal_failure_matrix_pg() {
         let postlude_calls = calls.clone();
         let (result, applied) = terminate_for_http(&node.registry, node.pool.clone(), (request, e08::identity::unbound(&rig, &node)), "test", move |_| {
             postlude_calls.fetch_add(1, Ordering::SeqCst);
-            async {}.boxed()
+            async { NoopPostlude }.boxed()
         }).await;
         assert_eq!((result, applied, calls.load(Ordering::SeqCst)), (TerminationResult::Disabled, None, 0));
         node.finish().await;

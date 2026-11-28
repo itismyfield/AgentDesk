@@ -47,13 +47,13 @@ mod transport;
 pub(in crate::services::discord) mod turn_output_controller; // #3089 A1
 
 pub(crate) use crate::domain::outbound::port::DiscordOutboundClient;
+pub(crate) use crate::domain::outbound::result::{DeliveryResult, DiscordTransportReceipt};
 pub(crate) use decision::{
     DISCORD_MESSAGE_HARD_LIMIT_CHARS as DISCORD_HARD_LIMIT_CHARS,
     DISCORD_MESSAGE_SAFE_CHARS as DISCORD_SAFE_LIMIT_CHARS,
 };
 pub(crate) use message::DiscordOutboundMessage;
 pub(crate) use policy::DiscordOutboundPolicy;
-pub(crate) use result::{DeliveryResult, DiscordTransportReceipt};
 pub(crate) use transport::{
     HttpOutboundClient, OutboundDedupClaim, OutboundDedupReservation, OutboundDedupWait,
     OutboundDeduper, outbound_fingerprint, post_serenity_message_with_nonce,
@@ -72,7 +72,10 @@ pub(crate) fn shared_outbound_deduper() -> &'static OutboundDeduper {
 
 /// Installs the ports engine producers use to reach Discord outbound, before any command runs.
 pub(crate) fn install_engine_ports() {
-    crate::services::dispatches::http_outbound::install(transport::engine_http_deliver);
+    crate::services::dispatches::http_outbound::install(
+        transport::engine_http_deliver,
+        transport::ENGINE_HTTP_EDIT,
+    );
 }
 
 pub(crate) fn delivery_record_rollout_health_json() -> serde_json::Value {

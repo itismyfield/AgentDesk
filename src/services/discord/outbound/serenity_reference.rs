@@ -3,17 +3,15 @@ use std::sync::Arc;
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId};
 
-use crate::services::dispatches::discord_delivery::{
-    DispatchMessagePostError, DispatchMessagePostErrorKind,
-};
+use crate::domain::outbound::port::{DispatchMessagePostError, DispatchMessagePostErrorKind};
 
 use super::delivery::{deliver_outbound, first_raw_message_id};
 use super::message::{DiscordOutboundMessage, OutboundReferenceContext, OutboundTarget};
 use super::policy::DiscordOutboundPolicy;
-use super::result::DeliveryResult;
 use super::transport::{outbound_fingerprint, post_serenity_message_with_nonce};
 use super::{DiscordOutboundClient, shared_outbound_deduper};
 use crate::domain::conversation::{ConversationId, MessageRef};
+use crate::domain::outbound::result::DeliveryResult;
 use crate::services::discord::id_bridge::{
     conversation_from_discord, discord_channel_from_conversation, discord_message_from_ref,
 };
@@ -112,7 +110,9 @@ impl DiscordOutboundClient for SerenityReferenceOutboundClient {
                     channel_id.get(),
                 )
                 .content(content)
-                .allowed_mentions(super::super::http::relay_allowed_mentions()),
+                .allowed_mentions(
+                    crate::services::message_outbox::mentions::relay_allowed_mentions(),
+                ),
             ),
         )
         .await
@@ -147,7 +147,9 @@ impl DiscordOutboundClient for SerenityReferenceOutboundClient {
                         .fail_if_not_exists(false),
                 )
                 .content(content)
-                .allowed_mentions(super::super::http::relay_allowed_mentions()),
+                .allowed_mentions(
+                    crate::services::message_outbox::mentions::relay_allowed_mentions(),
+                ),
             ),
         )
         .await

@@ -1180,7 +1180,7 @@ pub fn handle_dcserver(token: Option<String>) {
         // Start axum HTTP server (background task) — now serves all API
         // endpoints including /api/discord/send, /api/discord/send-dm, /api/health
         let http_port = ad_config.server.port;
-        match PolicyEngine::new_with_pg(&ad_config, Some(discord_pg_pool.clone())) {
+        match PolicyEngine::new_with_pg(&ad_config, Some(discord_pg_pool.clone()), crate::services::discord::health::slot_row_host_refusal) {
             Ok(engine) => {
                 discord_engine = Some(engine.clone());
                 crate::engine::ops::turn_ops::set_global_health_registry(&health_registry);

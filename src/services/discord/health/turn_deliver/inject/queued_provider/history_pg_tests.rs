@@ -1,5 +1,7 @@
 use super::*;
 use crate::config::TestRuntimeRootGuard;
+use crate::services::discord::health::turn_deliver::inject::queued_owner::v2_effect;
+use crate::services::discord::health::turn_deliver::inject::queued_reconcile::v2_settle_exact;
 use crate::services::discord::health::turn_deliver::inject_codex_tests::QueuedCodex;
 use crate::services::tui_input::human_frame::history::v2::Registry;
 use serde_json::json;
@@ -98,46 +100,45 @@ async fn exact_history_adapter_pastes_once_and_reconciles_after_restart_pg() {
     };
     let expected = key.clone();
     assert!(
-        !mailbox
-            .v2_effect(1000, move |prepared| {
-                let target = target;
-                assert_eq!(prepared, frame);
-                let (outcome, key) = adapter.run(
-                    (&super::super::pane(input.channel, &target.session), None),
-                    (
-                        &target.session,
-                        &target.transcript,
-                        target.native_turn.as_deref(),
-                    ),
-                    None,
-                    MessageId::new(expected.identity.primary),
-                    &input,
-                )?;
-                assert_eq!(
-                    serde_json::to_value(key).unwrap(),
-                    serde_json::to_value(expected).unwrap()
-                );
-                assert!(
-                    matches!(outcome, InjectAttempt::Injected { .. }),
-                    "exact adapter must consume the real tmux receipt: {outcome:?}"
-                );
-                assert!(adapter.proof(&bound).is_some());
-                let mut wrong = bound.clone();
-                wrong.file.1 += 1;
-                assert!(
-                    adapter.proof(&wrong).is_none(),
-                    "exact receipt must reject file tuple mismatch"
-                );
-                wrong = bound.clone();
-                wrong.session_id.push('x');
-                assert!(adapter.proof(&wrong).is_none());
-                wrong = bound.clone();
-                wrong.path = wrong.path.with_extension("foreign");
-                assert!(adapter.proof(&wrong).is_none());
-                Ok(false)
-            })
-            .await
-            .unwrap()
+        !v2_effect(&mailbox, 1000, move |prepared| {
+            let target = target;
+            assert_eq!(prepared, frame);
+            let (outcome, key) = adapter.run(
+                (&super::super::pane(input.channel, &target.session), None),
+                (
+                    &target.session,
+                    &target.transcript,
+                    target.native_turn.as_deref(),
+                ),
+                None,
+                MessageId::new(expected.identity.primary),
+                &input,
+            )?;
+            assert_eq!(
+                serde_json::to_value(key).unwrap(),
+                serde_json::to_value(expected).unwrap()
+            );
+            assert!(
+                matches!(outcome, InjectAttempt::Injected { .. }),
+                "exact adapter must consume the real tmux receipt: {outcome:?}"
+            );
+            assert!(adapter.proof(&bound).is_some());
+            let mut wrong = bound.clone();
+            wrong.file.1 += 1;
+            assert!(
+                adapter.proof(&wrong).is_none(),
+                "exact receipt must reject file tuple mismatch"
+            );
+            wrong = bound.clone();
+            wrong.session_id.push('x');
+            assert!(adapter.proof(&wrong).is_none());
+            wrong = bound.clone();
+            wrong.path = wrong.path.with_extension("foreign");
+            assert!(adapter.proof(&wrong).is_none());
+            Ok(false)
+        })
+        .await
+        .unwrap()
     );
     let count = fixture.pane.keys();
     assert_eq!(count, "paste-buffer+send-keys");
@@ -186,26 +187,25 @@ async fn exact_history_adapter_pastes_once_and_reconciles_after_restart_pg() {
         nonce: nonce.into(),
     };
     let retry_primary = key.identity.primary;
-    let retried = mailbox
-        .v2_effect(32_000, move |_| {
-            let target = target;
-            let (outcome, _) = retry_adapter.run(
-                (
-                    &super::super::pane(retry_input.channel, &target.session),
-                    None,
-                ),
-                (
-                    &target.session,
-                    &target.transcript,
-                    target.native_turn.as_deref(),
-                ),
+    let retried = v2_effect(&mailbox, 32_000, move |_| {
+        let target = target;
+        let (outcome, _) = retry_adapter.run(
+            (
+                &super::super::pane(retry_input.channel, &target.session),
                 None,
-                MessageId::new(retry_primary),
-                &retry_input,
-            )?;
-            Ok(matches!(outcome, InjectAttempt::Injected { .. }))
-        })
-        .await;
+            ),
+            (
+                &target.session,
+                &target.transcript,
+                target.native_turn.as_deref(),
+            ),
+            None,
+            MessageId::new(retry_primary),
+            &retry_input,
+        )?;
+        Ok(matches!(outcome, InjectAttempt::Injected { .. }))
+    })
+    .await;
     assert_eq!(
         fixture.pane.keys(),
         count,
@@ -230,8 +230,7 @@ async fn exact_history_adapter_pastes_once_and_reconciles_after_restart_pg() {
         adapter.proof(&bound).is_some(),
         "restart recovers the exact native receipt"
     );
-    mailbox
-        .v2_settle_exact(serde_json::to_value(&key).unwrap(), true, 32_001)
+    v2_settle_exact(&mailbox, serde_json::to_value(&key).unwrap(), true, 32_001)
         .await
         .unwrap();
     let registry = history.clone();
@@ -318,30 +317,29 @@ async fn exact_history_adapter_pastes_once_and_reconciles_after_restart_pg() {
             nonce,
         };
         let primary = key.identity.primary;
-        let delivered = mailbox
-            .v2_effect(40_000 + index * 40_000, move |prepared| {
-                let target = target;
-                assert_eq!(prepared, frame);
-                let (outcome, _) = adapter.run(
-                    (&super::super::pane(input.channel, &target.session), None),
-                    (
-                        &target.session,
-                        &target.transcript,
-                        target.native_turn.as_deref(),
-                    ),
-                    None,
-                    MessageId::new(primary),
-                    &input,
-                )?;
-                assert_eq!(
-                    matches!(outcome, InjectAttempt::Injected { .. }),
-                    deliver,
-                    "retained A cannot block fresh same-body B or C: {outcome:?}"
-                );
-                Ok(deliver)
-            })
-            .await
-            .unwrap();
+        let delivered = v2_effect(&mailbox, 40_000 + index * 40_000, move |prepared| {
+            let target = target;
+            assert_eq!(prepared, frame);
+            let (outcome, _) = adapter.run(
+                (&super::super::pane(input.channel, &target.session), None),
+                (
+                    &target.session,
+                    &target.transcript,
+                    target.native_turn.as_deref(),
+                ),
+                None,
+                MessageId::new(primary),
+                &input,
+            )?;
+            assert_eq!(
+                matches!(outcome, InjectAttempt::Injected { .. }),
+                deliver,
+                "retained A cannot block fresh same-body B or C: {outcome:?}"
+            );
+            Ok(deliver)
+        })
+        .await
+        .unwrap();
         assert_eq!(delivered, deliver);
         let registry = history.clone();
         mailbox

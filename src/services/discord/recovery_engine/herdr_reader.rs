@@ -7,7 +7,7 @@ use sqlx::PgPool;
 use tokio::runtime::Handle;
 
 use super::herdr_attach::HerdrSourceAttach;
-use super::host_reconcile::{HostReconcile, NoHerdrEndpoint, reconcile_hosted};
+use super::host_reconcile::{HostReconcile, reconcile_hosted};
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedExecution, HostedLookup, HostedObservation, HostedRecord, HostedState,
     list_local_herdr_rows_pg, list_local_unplaced_pending_pg,
@@ -15,10 +15,11 @@ use crate::db::dispatched_sessions::hosted_execution::{
 use crate::services::discord::herdr_terminate::root_replaced::{
     self, Recovery, RootReplacedCandidate, missing_marker,
 };
-use crate::services::discord::tmux::execution_identity::herdr_observation::HerdrExecutionMatch;
 use crate::services::discord::tui_prompt_relay::herdr_source::attach_restarted_herdr_source;
 use crate::services::provider::ProviderKind;
-pub(in crate::services::discord) use crate::services::session_host::SocketHerdrReader;
+use crate::services::session_host::HerdrExecutionMatch;
+use crate::services::session_host::NoHerdrEndpoint;
+use crate::services::session_host::SocketHerdrReader;
 use crate::services::session_host::herdr_endpoints;
 use crate::services::tui_prompt_dedupe::herdr_execution_listed;
 
@@ -88,7 +89,7 @@ impl Reconnect {
                 Self::Published
             }
             HerdrSourceAttach::Refused(HostReconcile::Herdr(Mismatch(
-                crate::services::discord::tmux::execution_identity::herdr_observation::HerdrMismatch::RootReplaced,
+                crate::services::session_host::HerdrMismatch::RootReplaced,
             ))) => Self::RootReplaced,
             HerdrSourceAttach::Refused(HostReconcile::Herdr(Mismatch(_)))
             | HerdrSourceAttach::Refused(HostReconcile::Missing) => Self::Refused,

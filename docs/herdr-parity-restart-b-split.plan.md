@@ -53,7 +53,7 @@ startup 등록도 같은 상태 아래에서 clearing을 확인한다. clear 중
 허가는 물리 I/O가 끝날 때까지 살아 있어야 한다. 허가를 받자마자 놓고 backend를 호출하면 clear 완료 뒤 효과가 발생할 수 있다.
 
 sync execute의 TLS에는 registration Arc를 둔다. async launch는 await 너머 TLS를 설치하지 않고 worker로 Arc만 넘긴다.
-`src/services/discord/health/turn_deliver/inject/first_input.rs:114`의 별도 blocking thread에는 CreatedSubmit가 Arc를 명시 전달한다.
+`src/services/discord/queue_io/input_owner/cold.rs:48`의 별도 blocking thread에는 CreatedSubmit가 Arc를 명시 전달한다.
 startup 완료는 물리 첫 제출 반환 때 내려 AI 답변 완료나 Source 대기를 clear가 기다리지 않게 한다.
 그 뒤 늦은 source/bind 완료는 기존 exact row/nonce CAS에 의해 clear가 끝낸 세션이나 selector를 되살리지 못해야 한다.
 모델이 launcher 종료를 bind까지 추상화한다면 이 시각 차이는 모델의 증명 범위에서 제외하고 실제 진입 시험으로 확인한다.

@@ -11,11 +11,12 @@ use serde_json::{Value, json};
 use super::super::super::inject_tests::{
     InjectPane, name_rest, queue_texts, register_inject_runtime,
 };
-use super::super::super::{HumanInputDelivery, HumanInputRequest, deliver_human_input};
+use super::super::super::{HumanInputRequest, deliver_human_input};
 use super::super::test_hook;
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedExecution, HostedLocation, HostedOwner, HostedState, SourceRef,
 };
+use crate::domain::human_input::HumanInputDelivery;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::{SharedData, router};
 use crate::services::herdr_admission::{Admission, force_for_test};

@@ -10,9 +10,9 @@ use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::db::pg_wire_proxy::PgWireProxy;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::hang_forensics;
-use crate::services::health_diagnostics::pg_wire_proxy::PgWireProxy;
 
 mod amplification_claim_tests;
 mod amplification_policy_tests;

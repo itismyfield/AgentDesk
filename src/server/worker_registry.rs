@@ -533,7 +533,7 @@ mod leader_takeover_tests {
         config.policies.hot_reload = false;
         config.data.dir = dir.path().join("data");
         std::fs::create_dir_all(&config.policies.dir).unwrap();
-        let engine = crate::engine::PolicyEngine::new_with_pg(&config, None).unwrap();
+        let engine = crate::engine::PolicyEngine::new(&config).unwrap();
         let pool = sqlx::PgPool::connect_lazy("postgres://fixture@127.0.0.1:1/unused").unwrap();
         let mut registry = SupervisedWorkerRegistry::new(
             config,
@@ -587,7 +587,7 @@ mod leader_takeover_tests {
             config.policies.hot_reload = false;
             config.data.dir = dir.path().join("data");
             std::fs::create_dir_all(&config.policies.dir).unwrap();
-            let engine = crate::engine::PolicyEngine::new_with_pg(&config, None).unwrap();
+            let engine = crate::engine::PolicyEngine::new(&config).unwrap();
             let mut registry = SupervisedWorkerRegistry::new(
                 config,
                 engine,

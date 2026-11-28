@@ -4,8 +4,8 @@ use std::time::Instant;
 use poise::serenity_prelude::ChannelId;
 use serde_json::Value;
 
-use super::tool_summary::{class, safe_tool_summary};
 use crate::config::ToolActivityDisplay;
+use crate::domain::tool_summary::{class, safe_tool_summary};
 use crate::services::agent_protocol::StatusEvent;
 
 const CAPACITY: usize = 64;
@@ -122,7 +122,11 @@ impl ToolActivityRing {
                     });
                     let codex_spawn = agent_call == Some(AgentCall::Spawn);
                     let agent = (agent_call == Some(AgentCall::Close))
-                        .then(|| input.as_deref().map(super::status_events::tool_input_value))
+                        .then(|| {
+                            input
+                                .as_deref()
+                                .map(crate::domain::tool_summary::tool_input_value)
+                        })
                         .flatten()
                         .and_then(|value| value.get("target")?.as_str().map(str::to_owned));
                     self.rows.push_back(Row {
@@ -143,7 +147,7 @@ impl ToolActivityRing {
                             || matches!(class(name).as_str(), "Task" | "Bash")
                                 && input
                                     .as_deref()
-                                    .map(super::status_events::tool_input_value)
+                                    .map(crate::domain::tool_summary::tool_input_value)
                                     .and_then(|value| {
                                         value.get("run_in_background").and_then(Value::as_bool)
                                     })
@@ -497,7 +501,7 @@ pub(super) fn fit_panel(sections: Vec<String>) -> String {
             if index == 0 {
                 Some(section)
             } else {
-                super::tool_summary::safe_section(&section).or_else(|| {
+                crate::domain::tool_summary::safe_section(&section).or_else(|| {
                     let title = section.lines().next()?;
                     ["Plan", "Tasks", "Subagents", "Workflow"]
                         .contains(&title)

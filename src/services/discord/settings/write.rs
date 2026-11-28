@@ -232,7 +232,7 @@ fn save_runtime_bot_settings_checked(
         .unwrap_or(false);
     let legacy_metadata = super::find_bot_settings_entry(obj, token)
         .and_then(|(_, entry)| entry.as_object().cloned());
-    let key = super::discord_token_hash(token);
+    let key = crate::utils::discord::discord_token_hash(token);
     obj.retain(|existing_key, existing_entry| {
         if existing_key == &key {
             return false;
@@ -471,7 +471,7 @@ fn save_tui_launch_settings(token: &str, settings: &DiscordBotSettings) -> std::
             (!levels.is_empty()).then(|| serde_json::json!(levels)),
         ),
     ];
-    let key = super::discord_token_hash(token);
+    let key = crate::utils::discord::discord_token_hash(token);
     let present = obj.get(&key).and_then(|entry| entry.as_object());
     let unchanged = fields.iter().all(|(field, value)| {
         value.is_none() && present.is_none_or(|entry| !entry.contains_key(*field))

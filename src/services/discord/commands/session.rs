@@ -79,7 +79,7 @@ pub(in crate::services::discord) async fn cmd_resume(
         ));
     let (_status, body) = crate::services::session_resume::dispatch_resume_previous(
         &pool,
-        registry.as_deref(),
+        crate::services::discord::health::resume_ports(registry.as_deref()),
         &forward_context,
         None,
         &session_key,

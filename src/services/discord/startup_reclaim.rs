@@ -128,7 +128,7 @@ fn build_reclaim_scan_plan(provider: &ProviderKind, boot_unix_secs: i64) -> Recl
 fn reclaim_scan_plan_from_rows(
     rows: Vec<(super::inflight::InflightTurnState, u64)>,
     pending_starts: Vec<super::tui_direct_pending_start::TuiDirectPendingStart>,
-    configured_bindings: Vec<super::settings::RegisteredChannelBinding>,
+    configured_bindings: Vec<crate::services::channel_roles::RegisteredChannelBinding>,
     provider: &ProviderKind,
     boot_unix_secs: i64,
 ) -> ReclaimScanPlan {
@@ -752,17 +752,17 @@ mod tests {
     #[test]
     fn configured_candidates_are_provider_scoped_and_deduplicated() {
         let bindings = vec![
-            super::super::settings::RegisteredChannelBinding {
+            crate::services::channel_roles::RegisteredChannelBinding {
                 channel_id: 42,
                 owner_provider: ProviderKind::Claude,
                 fallback_name: None,
             },
-            super::super::settings::RegisteredChannelBinding {
+            crate::services::channel_roles::RegisteredChannelBinding {
                 channel_id: 42,
                 owner_provider: ProviderKind::Claude,
                 fallback_name: None,
             },
-            super::super::settings::RegisteredChannelBinding {
+            crate::services::channel_roles::RegisteredChannelBinding {
                 channel_id: 43,
                 owner_provider: ProviderKind::Codex,
                 fallback_name: None,

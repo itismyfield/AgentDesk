@@ -120,7 +120,6 @@ pub mod routines;
 pub(crate) mod running_binary;
 pub mod scheduled_messages;
 pub(crate) mod scheduling;
-pub mod service_error;
 pub mod session_activity;
 pub(crate) mod session_selector_validity;
 pub use adk_runtime::services::session_backend;

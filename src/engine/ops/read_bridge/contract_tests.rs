@@ -5,7 +5,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::services::health_diagnostics::pg_wire_proxy::PgWireProxy;
+use crate::db::pg_wire_proxy::PgWireProxy;
 use crate::utils::bridge_deadline::ScopedBridgeDeadline;
 
 /// config scalar, config blob fallback, kv live, kv expiring later, kv missing.
@@ -288,8 +288,18 @@ async fn policy_read_bridge_engines_read_through_their_own_source() {
     let mut config = crate::config::Config::default();
     config.policies.dir = std::path::PathBuf::from("/nonexistent");
     config.policies.hot_reload = false;
-    let main = crate::engine::PolicyEngine::new_with_pg(&config, Some(main_pool.clone())).unwrap();
-    let tick = crate::engine::PolicyEngine::new_for_tick(&config, Some(tick_pool.clone())).unwrap();
+    let main = crate::engine::PolicyEngine::new_with_pg(
+        &config,
+        Some(main_pool.clone()),
+        crate::services::discord::health::slot_row_host_refusal,
+    )
+    .unwrap();
+    let tick = crate::engine::PolicyEngine::new_for_tick(
+        &config,
+        Some(tick_pool.clone()),
+        crate::services::discord::health::slot_row_host_refusal,
+    )
+    .unwrap();
     let mut answers = Vec::new();
     for engine in [&main, &main, &main, &tick, &tick, &tick] {
         answers.push(engine.eval_js::<String>(READ_ALL).unwrap());

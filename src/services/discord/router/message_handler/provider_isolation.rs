@@ -1122,8 +1122,8 @@ mod thread_role_inheritance_tests {
             workspace.to_str()
         );
         assert_eq!(resolved.memory_channel_id(child), parent.0);
-        let memory = settings::ResolvedMemorySettings {
-            backend: settings::MemoryBackendKind::Memento,
+        let memory = crate::domain::memory::ResolvedMemorySettings {
+            backend: crate::domain::memory::MemoryBackendKind::Memento,
             ..Default::default()
         };
         let built = super::super::super::super::prompt_builder::build_system_prompt_with_manifest(

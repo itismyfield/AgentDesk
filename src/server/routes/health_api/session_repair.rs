@@ -1,8 +1,9 @@
 use crate::services::discord::health::HealthRegistry;
-use crate::services::discord::host_teardown_gate::{ChannelTeardown, channel_teardown};
+use crate::services::discord::host_teardown_gate::channel_teardown;
 use crate::services::discord::{health, relay_recovery::unmeasured_tail_of};
 use crate::services::health_diagnostics::ChannelSessionState;
 use crate::services::provider::ProviderKind;
+use crate::services::session_host::ChannelTeardown;
 use crate::services::session_host::{
     HostPresence, HostSessionRef, InteractiveSessionHost, TmuxHost,
 };

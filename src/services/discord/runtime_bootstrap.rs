@@ -194,7 +194,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         return;
     }
 
-    let token_hash = settings::discord_token_hash(token);
+    let token_hash = crate::utils::discord::discord_token_hash(token);
 
     // Phase 5.1 of intake-node-routing (issue #2007): build SharedData before
     // resolving the gateway lease. Confirmed gateway and standby roles start

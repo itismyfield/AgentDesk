@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "4dd1188016a9c95976ac86a53f20e9b6b91f7001",
+  "measured_at_sha": "0783f70dea3736e5651a703241d3b032ab930079",
   "comment": "These counts are a growth-blocking baseline, not proof of safety.",
   "categories": {
     "tmux_bounded_runner_outside_adapter": {
@@ -184,6 +184,7 @@
         "src/services/discord/health/recovery/carried_turn_close.rs": 1,
         "src/services/discord/health/recovery/inflight_repair.rs": 3,
         "src/services/discord/health/recovery/runtime_stop.rs": 3,
+        "src/services/discord/health/recovery/stop_judgement/turn_stop_port.rs": 1,
         "src/services/discord/health/recovery/watchdog_pass.rs": 2,
         "src/services/discord/inflight.rs": 1,
         "src/services/discord/inflight_heartbeat_sweeper.rs": 1,
@@ -205,8 +206,7 @@
         "src/services/discord/tui_prompt_relay/synthetic_start.rs": 1,
         "src/services/discord/turn_bridge/completion_postlude.rs": 1,
         "src/services/discord/turn_finalizer/cleanup/already_finalized.rs": 1,
-        "src/services/discord/watchers/dispatched_origin_ghost.rs": 1,
-        "src/services/turn_lifecycle.rs": 1
+        "src/services/discord/watchers/dispatched_origin_ghost.rs": 1
       }
     },
     "fs_unlink": {
@@ -230,7 +230,6 @@
         "src/services/agy_acp/child.rs": 1,
         "src/services/claude.rs": 7,
         "src/services/claude/herdr_turn.rs": 1,
-        "src/services/claude/herdr_turn/first_input.rs": 1,
         "src/services/claude/process_session_launch.rs": 2,
         "src/services/claude/tui_session_launch.rs": 2,
         "src/services/claude_tui/hook_relay.rs": 4,
@@ -285,7 +284,6 @@
         "src/services/mcp_config.rs": 1,
         "src/services/memory/memento_writer_guard.rs": 1,
         "src/services/onboarding/mod.rs": 2,
-        "src/services/provider/herdr_before_start.rs": 1,
         "src/services/provider_cli/upgrade.rs": 2,
         "src/services/qwen.rs": 1,
         "src/services/qwen/session_lifecycle.rs": 8,
@@ -375,7 +373,7 @@
         "src/services/discord/http.rs": 2,
         "src/services/discord/monitoring_status.rs": 2,
         "src/services/discord/outbound/delivery.rs": 1,
-        "src/services/discord/outbound/transport.rs": 1,
+        "src/services/discord/outbound/transport.rs": 2,
         "src/services/discord/outbound/turn_output_controller/transport.rs": 1,
         "src/services/discord/placeholder_controller.rs": 1,
         "src/services/discord/placeholder_controller/queued_card_gate.rs": 1,
@@ -401,6 +399,7 @@
         "src/services/discord/turn_bridge/stream_tick/rollover_guard.rs": 2,
         "src/services/discord/turn_bridge/terminal_outcome_delivery.rs": 1,
         "src/services/discord/turn_bridge/terminal_outcome_delivery/recovery_retry.rs": 1,
+        "src/services/dispatches/http_outbound.rs": 1,
         "src/services/issue_announcements.rs": 1
       }
     },

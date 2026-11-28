@@ -30,7 +30,10 @@ mod worker_entry;
 #[cfg(all(test, unix))]
 mod replay_start_tests;
 
-pub(crate) use worker_entry::{IntakeRequest, execute_intake_turn_core, start_exact_retry};
+pub(crate) use {
+    self::worker_entry::{execute_intake_turn_core, start_exact_retry},
+    crate::services::cluster::intake_turn::IntakeRequest,
+};
 
 mod context;
 pub(in crate::services::discord) use context::IntakeDeps;
@@ -1028,7 +1031,7 @@ pub(super) async fn handle_text_message(
             .await;
         // The claim owns the route: publish it before this turn can be observed.
         if started {
-            route.publish(shared, &provider);
+            adk_thread::publish(&route, shared, &provider);
         }
 
         // #3813 Phase 1a: intake latency span anchor (turn claimed; observation-only
