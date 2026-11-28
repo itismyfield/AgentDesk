@@ -103,7 +103,7 @@ Bearer 검사가 있다.
 네이티브 클라이언트는 Bearer 토큰을 보낼 수 있다. 티켓이 없고 토큰도 미설정이면
 WebSocket 인증은 통과하므로 출처 필터 설정도 함께 확인해야 한다.
 
-실제 노출 경로는 [`/api/docs`](../src/server/routes/docs/inventory/endpoints/public_surfaces.rs)
+실제 노출 경로는 [`/api/docs`](data/api-endpoints.json)
 인벤토리에 정리돼 있다. `/tui/send`, `/tui/wait`, `/hooks/{provider}/{event}`는
 loopback 피어나 설정된 유효한 Bearer 토큰만 허용하며, 토큰 미설정이면 loopback만
 허용한다. `/ws`는 위 티켓/Bearer 규칙과 peer filter 설정을 따른다.

@@ -492,7 +492,7 @@ API 응답에 반환하지 않고 count-only summary만 반환한다. 반복 정
 | `src/db/scheduled_messages.rs`, `src/db/scheduled_messages/{agent,outbox,external_delivery}.rs` | CRUD + due-claim + delivery/agent-poll/outbox 조회 쿼리 |
 | `src/server/routes/scheduled_messages.rs` | 위 7개 핸들러 |
 | `src/server/routes/mod.rs`, `domains/ops.rs` | 라우트 등록 (protected ops 도메인) |
-| `src/server/routes/docs/inventory/endpoints/part_09.rs` | API docs 인벤토리 항목 (coverage 가드 필수) |
+| `docs/data/api-endpoints.json` | API docs 인벤토리 항목 (coverage 가드 필수) |
 | `src/services/scheduled_messages.rs`, `src/services/scheduled_messages/{evidence,timing,push_handoff,provider_targets,external_delivery}.rs` | scheduler + 원자적 fan-out + provider payload/worker + 완료 evidence/timing |
 | `src/server/worker_registry.rs` | 워커 등록 항목 추가 (`ScheduledMessages`, leader-only) |
 | `src/services/message_outbox.rs` (`gc_stale_outbox_rows`), `src/services/maintenance/jobs/db_retention.rs` | 영구 slot dedupe sentinel을 GC/retention에서 보존 |
