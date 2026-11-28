@@ -1,11 +1,13 @@
-//! Sweeps a user message's `⏳` that no live turn holds any more. Holds are judged per message:
-//! a busy channel nearly always has a later turn in flight, so a channel-wide hold never clears.
+//! Sweeps a user message's `⏳` that no live turn holds any more. Holds are judged per message
+//! across the provider: a busy channel nearly always has a later turn in flight, and a thread
+//! turn's row lives in its execution thread while the `⏳` stays on the original message.
 
 use std::collections::HashSet;
 use std::time::{Duration, SystemTime};
 
 use super::orphan_sweep::PendingAnchorCandidate;
 use super::*;
+use crate::services::discord::{inflight, tui_direct_pending_start};
 use crate::services::provider::ProviderKind;
 
 /// Same grace as the bot-anchor sweep, so a slow-starting turn keeps its `⏳`.
@@ -32,10 +34,18 @@ pub(in crate::services::discord) async fn sweep_orphan_intake_reactions(
     }
     let mailbox = shared.mailbox_held_messages().await;
     let native = native_held_messages(provider);
+    let turns = turn_held_messages(provider);
     let held = |channel: u64, message: u64| {
-        mailbox.contains(&(channel, message))
+        mailbox.contains(&message)
             || native.as_ref().is_none_or(|ids| ids.contains(&message))
-            || turn_holds_message(provider, channel, message)
+            || turns.contains(&message)
+            || inflight::load_inflight_state_read_only_result(provider, channel).is_err()
+    };
+    // Under the target lock: a turn or a restart of this message since the snapshot holds it.
+    let held_now = |channel: u64, message: u64| {
+        held(channel, message)
+            || turn_held_messages(provider).contains(&message)
+            || restarted_within(channel, message, min_age)
     };
     let mut cleared = 0;
     let unheld = candidates
@@ -51,7 +61,8 @@ pub(in crate::services::discord) async fn sweep_orphan_intake_reactions(
             ChannelId::new(channel_id),
             MessageId::new(message_id),
         );
-        if (reconciler.clear_orphan_pending(shared, target, &held, "orphan_intake_sweep")).await {
+        if (reconciler.clear_orphan_pending(shared, target, &held_now, "orphan_intake_sweep")).await
+        {
             cleared += 1;
             tracing::warn!(
                 channel_id,
@@ -64,21 +75,26 @@ pub(in crate::services::discord) async fn sweep_orphan_intake_reactions(
     cleared
 }
 
-/// The channel's inflight row or a pending start names this message; an unreadable row holds.
-fn turn_holds_message(provider: &ProviderKind, channel: u64, message: u64) -> bool {
-    use crate::services::discord::{inflight, tui_direct_pending_start};
-    let row_holds = match inflight::load_inflight_state_read_only_result(provider, channel) {
-        Ok(row) => row.is_some_and(|row| {
-            row.user_msg_id == message || row.source_message_ids.contains(&message)
-        }),
-        Err(_) => true,
-    };
-    row_holds
-        || tui_direct_pending_start::load_all().iter().any(|record| {
-            record.provider.eq_ignore_ascii_case(provider.as_str())
-                && record.channel_id == channel
-                && record.anchor_message_id == message
-        })
+/// Messages any of the provider's inflight rows or pending starts names, in any channel.
+fn turn_held_messages(provider: &ProviderKind) -> HashSet<u64> {
+    let rows = inflight::load_inflight_states_for_sweep(provider);
+    let row_messages = rows
+        .into_iter()
+        .flat_map(|(row, _)| std::iter::once(row.user_msg_id).chain(row.source_message_ids));
+    let starts = tui_direct_pending_start::load_all().into_iter();
+    let started = starts
+        .filter(|record| record.provider.eq_ignore_ascii_case(provider.as_str()))
+        .map(|record| record.anchor_message_id);
+    row_messages.chain(started).collect()
+}
+
+/// The message's `⏳` record was rewritten within `min_age`, as a fresh start of it does.
+fn restarted_within(channel: u64, message: u64, min_age: Duration) -> bool {
+    let target =
+        TurnViewTarget::intake_user_message(ChannelId::new(channel), MessageId::new(message));
+    let modified = TurnViewReconciler::persisted_target_path(target)
+        .and_then(|path| std::fs::metadata(path).ok()?.modified().ok());
+    modified.is_some_and(|at| at.elapsed().unwrap_or_default() < min_age)
 }
 
 /// Messages of native inputs whose outcome is not settled yet; `None` when unreadable.
@@ -106,25 +122,25 @@ fn native_held_messages(provider: &ProviderKind) -> Option<HashSet<u64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::discord::inflight;
 
-    /// Holds are per message: another message's live turn in the channel never blocks the sweep,
-    /// while the message's own live turn keeps its `⏳`.
+    /// Holds are per message wherever the turn runs: the original channel's later turn never
+    /// blocks the sweep, while the message's own turn in its execution thread keeps its `⏳`.
     #[tokio::test]
     async fn sweep_clears_by_message_not_by_channel() {
         let _root = crate::config::TestRuntimeRootGuard::new();
         let shared = crate::services::discord::make_shared_data_for_tests();
         let http = Arc::new(serenity::http::Http::new("test-token"));
-        let (ended, live) = (1_430_000_000_000_008_490_u64, 1_430_000_000_000_008_492_u64);
-        for (channel, message, row_message) in
-            [(ended - 1, ended, ended + 5), (live - 1, live, live)]
-        {
-            let (channel_id, message_id) = (ChannelId::new(channel), MessageId::new(message));
+        let (origin, thread) = (1_430_000_000_000_008_489_u64, 1_430_000_000_000_008_499_u64);
+        let (ended, live) = (origin + 1, origin + 3);
+        for message in [ended, live] {
+            let (channel_id, message_id) = (ChannelId::new(origin), MessageId::new(message));
             assert!(note_intake_turn_started(&shared, &http, channel_id, message_id, 1, "t").await);
             let path = TurnViewReconciler::persisted_target_path(
                 TurnViewTarget::intake_user_message(channel_id, message_id),
             );
             crate::services::discord::health::test_support::age_file(&path.unwrap(), 1_000);
+        }
+        for (channel, row_message) in [(origin, ended + 5), (thread, live)] {
             let row = inflight::InflightTurnState::new(
                 shared.provider.clone(),
                 channel,
@@ -154,6 +170,6 @@ mod tests {
             removed(ended),
             "another message's live turn does not hold this ⏳"
         );
-        assert!(!removed(live), "the message's own live turn keeps its ⏳");
+        assert!(!removed(live), "the message's thread turn keeps its ⏳");
     }
 }

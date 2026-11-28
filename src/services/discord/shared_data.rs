@@ -172,18 +172,18 @@ impl SharedData {
         self.mailboxes.handle(channel_id)
     }
 
-    /// `(channel, message)` held by a live mailbox as its active, dispatching or queued input.
+    /// Messages a live mailbox holds as its active, dispatching or queued input, in any channel.
     /// Reads existing actors only, so it never spawns a mailbox for an idle channel.
-    pub(super) async fn mailbox_held_messages(&self) -> std::collections::HashSet<(u64, u64)> {
+    pub(super) async fn mailbox_held_messages(&self) -> std::collections::HashSet<u64> {
         let mut held = std::collections::HashSet::new();
-        for (channel, snapshot) in self.mailboxes.snapshot_all().await {
+        for (_, snapshot) in self.mailboxes.snapshot_all().await {
             let queued = snapshot.intervention_queue.iter().flat_map(|item| {
                 std::iter::once(item.message_id).chain(item.source_message_ids.iter().copied())
             });
             let ids = (snapshot.active_user_message_id.into_iter())
                 .chain(snapshot.pending_user_dispatch)
                 .chain(queued);
-            held.extend(ids.map(|message| (channel.get(), message.get())));
+            held.extend(ids.map(|message| message.get()));
         }
         held
     }
