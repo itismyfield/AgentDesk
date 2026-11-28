@@ -668,12 +668,12 @@ pub(super) fn front_holds(items: &[PendingQueueItem], input: &InputAttempt) -> b
     front.is_some_and(|front| front.iter().zip(&members).all(|(a, b)| same(a, b)))
 }
 
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(super) mod retry_wait_test_support;
 // Owner fixtures require a confirmed parent directory fsync for adoption and commits.
 #[cfg(all(test, unix))]
 #[path = "v2/owner_tests.rs"]
 mod tests;
-#[cfg(all(any(test, feature = "test-support"), unix))]
-pub(super) mod retry_wait_test_support;
 // Unit fixtures adopt real owner files, which need a confirmed parent directory fsync.
 #[cfg(all(test, unix))]
 #[path = "v2/retry_wait_tests.rs"]

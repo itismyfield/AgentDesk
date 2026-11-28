@@ -1021,7 +1021,7 @@ src/
 │   │   │   └── terminalize_tx.rs
 │   │   ├── runtime/
 │   │   │   ├── clear_slot_sessions_pg_tests.rs
-│   │   │   ├── slot_reset_archive_fixture.rs
+│   │   │   ├── slot_reset_archive_fixture_tests.rs
 │   │   │   ├── slot_reset_host_pg_tests.rs
 │   │   │   ├── test_support.rs
 │   │   │   ├── verified_clear_probe_tests.rs

@@ -22,7 +22,7 @@ pub(crate) async fn runtime_clears_after_done(
 }
 
 #[cfg(unix)]
-#[path = "slot_reset_archive_fixture.rs"]
+#[path = "slot_reset_archive_fixture_tests.rs"]
 mod archive_fixture;
 
 #[cfg(unix)]
@@ -402,6 +402,11 @@ pub(crate) mod host {
         let _root =
             TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
         let archive = super::archive_fixture::ArchiveFixture::install(root.path()).await;
+        let base = format!("http://{}", archive.address());
+        let _archive_base = TestEnvVarGuard::set_value_after_shared_test_env_lock(
+            "AGENTDESK_DISCORD_API_BASE_URL",
+            base.as_ref(),
+        );
         crate::services::discord::install_engine_probes();
         let db = TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
