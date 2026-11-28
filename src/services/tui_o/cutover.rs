@@ -434,6 +434,20 @@ fn claim_for_placement(channel: Option<u64>) -> Result<(), String> {
     })
 }
 
+/// Whether a placement on `channel` waits for its O home: this node is Foreign and holds no
+/// execution for the selected channel. Read-only, unlike [`claim_for_placement`].
+pub fn placement_waits_for_home(channel: u64) -> bool {
+    test_override::with_channels(|snapshot| {
+        let Some(snapshot) = snapshot.filter(|s| !s.channels().is_empty()) else {
+            return false;
+        };
+        let selected = snapshot.channels().contains(&channel) || snapshot.child(channel).is_some();
+        selected
+            && snapshot.execution(channel).is_none()
+            && matches!(snapshot.site(), Site::Foreign { .. })
+    })
+}
+
 #[cfg(not(any(test, feature = "test-support")))]
 mod test_override {
     use super::channel_policy::{self, BootChannels};

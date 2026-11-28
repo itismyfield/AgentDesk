@@ -988,3 +988,39 @@ mod snapshot_tests {
         observe_without_pg(true);
     }
 }
+
+/// A Foreign node holds an O channel's input for its home: no refusal reaches the channel and the
+/// checkpoint stays put for the home's catch-up.
+#[tokio::test(flavor = "current_thread")]
+async fn a_foreign_node_holds_o_input_without_telling_the_user() {
+    use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+    use crate::services::tui_o::cutover::test_override;
+    let env = ScopedIntakeTestEnv::with_mode("disabled");
+    let config = crate::runtime_layout::config_file_path(env._root.path());
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, "server: {}\n").unwrap();
+    let _config = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_CONFIG",
+        &config,
+    );
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let api = crate::services::discord::admin_host_guard::tests::Recorder::start().await;
+    let deps = deps(&api.http, &shared);
+    let o = ChannelId::new(4_360_021);
+    let _foreign = test_override::force_foreign(&[(o.get(), ClaudeTui)], "home-node");
+    let submission = submission_for_admission(o, 4_360_022);
+    let admission = super::admit_text_intake(&deps, &submission).await;
+    assert!(
+        matches!(admission, super::IntakeAdmission::WriterBlocked { .. }),
+        "{admission:?}"
+    );
+    let mut advanced = false;
+    let finished = super::finish_deferred(&deps, admission, submission, || advanced = true);
+    finished.await.unwrap();
+    assert!(!advanced, "the home's catch-up still owns the input");
+    assert_eq!(
+        api.take(),
+        Vec::<String>::new(),
+        "no refusal reaches the channel"
+    );
+}

@@ -725,7 +725,11 @@ pub(crate) async fn finish_text_intake_admission(
             boot_custody::retain(deps, submission, prepared).await?;
         }
         IntakeAdmission::WriterBlocked { ref reason } => {
-            notify_blocked_intake(deps, &submission, reason).await;
+            // A Foreign node leaves the input to its O home's catch-up and tells the user nothing.
+            let channel = submission.request.channel_id.get();
+            if !crate::services::tui_o::cutover::placement_waits_for_home(channel) {
+                notify_blocked_intake(deps, &submission, reason).await;
+            }
         }
         #[cfg(unix)]
         IntakeAdmission::ConsentHeld(hold) => {
