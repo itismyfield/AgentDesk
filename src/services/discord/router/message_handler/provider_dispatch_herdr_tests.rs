@@ -46,14 +46,16 @@ use crate::services::session_host::{
 use crate::services::tui_prompt_dedupe::binding_context::HookBindingEnvelope;
 use crate::services::turn_host::{HerdrTurnPlan, force_switch_for_test};
 
-const CHANNEL: u64 = 1_479_671_301_387_059_301;
+pub(in crate::services::discord::router::message_handler) const CHANNEL: u64 =
+    1_479_671_301_387_059_301;
 const TOKEN: &str = "discord_0123456789abcdef";
 const NONCE: &str = "0123456789abcdef0123456789abcdef";
-const LIMIT: Duration = Duration::from_secs(30);
+pub(in crate::services::discord::router::message_handler) const LIMIT: Duration =
+    Duration::from_secs(30);
 
 /// The launch's Herdr side: E7 off, one created pane, its evidence; it reports each nonce.
 #[derive(Default)]
-struct Launcher {
+pub(in crate::services::discord::router::message_handler) struct Launcher {
     creates: AtomicUsize,
     nonces: Mutex<Vec<String>>,
     /// The provider is not confirmed: the launch keeps its pane Pending without evidence.
@@ -227,16 +229,16 @@ impl HerdrTurnPorts for Ports<'_> {
 }
 
 /// A Claude channel's canonical row on PG, its Herdr endpoint, hook receiver and project dir.
-struct Fixture {
-    ingress: Ingress,
-    rt: tokio::runtime::Runtime,
+pub(in crate::services::discord::router::message_handler) struct Fixture {
+    pub(in crate::services::discord::router::message_handler) ingress: Ingress,
+    pub(in crate::services::discord::router::message_handler) rt: tokio::runtime::Runtime,
     db: Option<crate::db::auto_queue::test_support::TestPostgresDb>,
-    pool: PgPool,
+    pub(in crate::services::discord::router::message_handler) pool: PgPool,
     owner: HostedOwner,
-    rig: HerdrRig,
-    cwd: tempfile::TempDir,
+    pub(in crate::services::discord::router::message_handler) rig: HerdrRig,
+    pub(in crate::services::discord::router::message_handler) cwd: tempfile::TempDir,
     started: AtomicBool,
-    finished: AtomicBool,
+    pub(in crate::services::discord::router::message_handler) finished: AtomicBool,
     cancel: Mutex<Arc<CancelToken>>,
     /// Installs C2a for the next turns whatever the tag says; each strict turn logs its attempts.
     strict: AtomicBool,
@@ -254,7 +256,10 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new(tag: &str, hosted: Option<Value>) -> Self {
+    pub(in crate::services::discord::router::message_handler) fn new(
+        tag: &str,
+        hosted: Option<Value>,
+    ) -> Self {
         Self::with_root(tag, hosted, TestRuntimeRootGuard::new())
     }
 
@@ -345,7 +350,7 @@ impl Fixture {
         }
     }
 
-    fn logical(&self) -> &str {
+    pub(in crate::services::discord::router::message_handler) fn logical(&self) -> &str {
         &self.owner.logical_key
     }
 
@@ -398,7 +403,7 @@ impl Fixture {
         }
     }
 
-    fn row(&self) -> Option<HostedState> {
+    pub(in crate::services::discord::router::message_handler) fn row(&self) -> Option<HostedState> {
         let raw: Option<Value> = self.rt.block_on(async {
             sqlx::query_scalar("SELECT hosted_execution FROM sessions WHERE channel_id = $1")
                 .bind(CHANNEL.to_string())
@@ -436,7 +441,7 @@ impl Fixture {
     }
 
     /// The Claude home of the channel's account; the daemon's when `None`.
-    fn home(&self) -> Option<PathBuf> {
+    pub(in crate::services::discord::router::message_handler) fn home(&self) -> Option<PathBuf> {
         let overlay = self.overlay.lock().unwrap();
         overlay.as_ref().and_then(|overlay| overlay.home.clone())
     }
@@ -448,7 +453,7 @@ impl Fixture {
     }
 
     /// The row as the turn host reads it.
-    fn record(&self) -> HostedRecord {
+    pub(in crate::services::discord::router::message_handler) fn record(&self) -> HostedRecord {
         let raw: Option<Value> = self.rt.block_on(async {
             sqlx::query_scalar("SELECT hosted_execution FROM sessions WHERE channel_id = $1")
                 .bind(CHANNEL.to_string())
@@ -468,7 +473,10 @@ impl Fixture {
     }
 
     /// `record` written to the row.
-    fn store(&self, record: &HostedExecution) {
+    pub(in crate::services::discord::router::message_handler) fn store(
+        &self,
+        record: &HostedExecution,
+    ) {
         self.rt.block_on(async {
             sqlx::query("UPDATE sessions SET hosted_execution = $1 WHERE channel_id = $2")
                 .bind(serde_json::to_value(record).unwrap())
@@ -534,7 +542,11 @@ impl Fixture {
     }
 
     /// `answer` for a later turn on the same rig, whose earlier turns made `earlier` pane writes.
-    fn answer_after(&self, started: &Started, earlier: usize) {
+    pub(in crate::services::discord::router::message_handler) fn answer_after(
+        &self,
+        started: &Started,
+        earlier: usize,
+    ) {
         self.answer_with_submit_order(started, earlier, false);
     }
 
@@ -695,7 +707,7 @@ impl Drop for Fixture {
     }
 }
 
-fn open_admission() -> ForcedAdmission {
+pub(in crate::services::discord::router::message_handler) fn open_admission() -> ForcedAdmission {
     let stop = std::env::temp_dir().join(format!("adk-ht-none-{}", uuid::Uuid::new_v4()));
     force_for_test(Admission::new(true, Some(stop)))
 }
@@ -734,14 +746,19 @@ fn prompt_sends() -> Vec<Value> {
 }
 
 /// A launched provider's session, transcript and the hook envelope its pane relays.
-struct Started {
-    session: String,
-    path: PathBuf,
-    envelope: String,
+pub(in crate::services::discord::router::message_handler) struct Started {
+    pub(in crate::services::discord::router::message_handler) session: String,
+    pub(in crate::services::discord::router::message_handler) path: PathBuf,
+    pub(in crate::services::discord::router::message_handler) envelope: String,
 }
 
 impl Started {
-    fn hook(&self, fx: &Fixture, event: &str, payload: &Value) -> u16 {
+    pub(in crate::services::discord::router::message_handler) fn hook(
+        &self,
+        fx: &Fixture,
+        event: &str,
+        payload: &Value,
+    ) -> u16 {
         let uri = format!("/hooks/claude/{event}?session_id={}", self.session);
         let request_id = uuid();
         let sent = fx
@@ -837,7 +854,7 @@ fn process_reads(fx: &Fixture) -> usize {
 }
 
 /// Where a launch writes execution `nonce`'s context.
-fn context_of(nonce: &str) -> PathBuf {
+pub(in crate::services::discord::router::message_handler) fn context_of(nonce: &str) -> PathBuf {
     let root = crate::config::runtime_root().unwrap();
     root.join(format!("runtime/binding_contexts/claude/{nonce}.json"))
 }
@@ -1461,7 +1478,7 @@ async fn an_unconfigured_channel_passes_both_entries_without_a_read() {
 }
 
 #[path = "provider_dispatch_herdr_reconnect_tests.rs"]
-mod reconnect;
+pub(in crate::services::discord::router::message_handler) mod reconnect;
 
 // A Herdr turn takes its stop state before launch even with the Escape switch off, and records
 // its submitted prompt there; no stop intent exists until a user stop records one.
@@ -1558,7 +1575,7 @@ fn coldstop_execute_fresh_pending_bound_closed_arm_releases_hold_pg() {
 pub(super) mod live_end;
 
 #[path = "provider_dispatch_herdr_busy_entry_tests.rs"]
-mod busy_entry_tests;
+pub(in crate::services::discord::router::message_handler) mod busy_entry_tests;
 #[path = "provider_dispatch_herdr_clear_fence_tests.rs"]
 mod clear_fence_tests;
 #[path = "provider_dispatch_herdr_fresh_notice_tests.rs"]

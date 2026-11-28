@@ -24,10 +24,11 @@ mod dead_bound;
 #[path = "provider_dispatch_herdr_http_start_tests.rs"]
 mod http_start;
 #[path = "provider_dispatch_herdr_missing_input_tests.rs"]
-mod missing_input;
+pub(in crate::services::discord::router::message_handler) mod missing_input;
 
 const MESSAGE: u64 = 1_570_000_811_403_001_001;
-const INPUT: &str = "join the running Herdr turn now";
+pub(in crate::services::discord::router::message_handler) const INPUT: &str =
+    "join the running Herdr turn now";
 const THREAD_PARENT_NAME: &str = "thread-http-parent";
 
 struct DeliveredLegacy {
@@ -138,17 +139,18 @@ impl HostIo for SourceHost {
     }
 }
 
-struct Intake {
-    shared: Arc<SharedData>,
-    mailbox: ChannelMailboxHandle,
-    runtime: tokio::runtime::Runtime,
+pub(in crate::services::discord::router::message_handler) struct Intake {
+    pub(in crate::services::discord::router::message_handler) shared: Arc<SharedData>,
+    pub(in crate::services::discord::router::message_handler) mailbox: ChannelMailboxHandle,
+    pub(in crate::services::discord::router::message_handler) runtime: tokio::runtime::Runtime,
     hosts: Vec<ManagedWriterHandle>,
     alarms: Alarms,
     posts: Arc<Posts>,
     listener_started: std::sync::atomic::AtomicBool,
     mock: discord_mock::DiscordMockState,
     server: tokio::task::JoinHandle<()>,
-    _api: discord::admin_host_guard::tests::Recorder,
+    pub(in crate::services::discord::router::message_handler) _api:
+        discord::admin_host_guard::tests::Recorder,
     _config: (
         Guard,
         crate::config::session_hosts::ForcedSessionHosts,
@@ -330,7 +332,7 @@ impl Intake {
         Self::with_launch(fx, started, expected, output_gate, (false, None), None)
     }
 
-    fn with_launch(
+    pub(in crate::services::discord::router::message_handler) fn with_launch(
         fx: &Fixture,
         started: &Started,
         expected: ExpectedPin,
@@ -586,7 +588,7 @@ impl Intake {
         )
     }
 
-    async fn front(&self) -> OwnerFront {
+    pub(in crate::services::discord::router::message_handler) async fn front(&self) -> OwnerFront {
         self.front_for(MESSAGE).await
     }
 
@@ -950,7 +952,7 @@ fn an_early_new_herdr_execution_cannot_borrow_its_old_global_pin_pg() {
 }
 
 #[derive(Clone, Copy)]
-enum ExpectedPin {
+pub(in crate::services::discord::router::message_handler) enum ExpectedPin {
     Verified,
     Registered,
 }
@@ -1031,7 +1033,7 @@ fn assert_registered_source_unverified(
     );
 }
 
-fn source_retry_drive(
+pub(in crate::services::discord::router::message_handler) fn source_retry_drive(
     intake: &Intake,
 ) -> Arc<crate::services::discord::queue_io::input_owner::drive::Drive> {
     use crate::services::discord::queue_io::input_owner::drive::Handoff;
@@ -1148,7 +1150,9 @@ fn assert_idle_tmux_queries(logical: &str) {
     );
 }
 
-async fn wait_for_idle_turn_to_unwind(intake: &Intake) {
+pub(in crate::services::discord::router::message_handler) async fn wait_for_idle_turn_to_unwind(
+    intake: &Intake,
+) {
     let finished = tokio::time::timeout(LIMIT, async {
         while intake.mailbox.has_active_turn().await != Ok(false) {
             tokio::task::yield_now().await;

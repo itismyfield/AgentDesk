@@ -11,7 +11,10 @@ mod root_replaced_recovery_tests;
 
 /// A first turn launches the pane and binds it, as T-E1 does; returns the launched nonce and
 /// session.
-pub(super) fn launch(fx: &Fixture, launcher: &Arc<Launcher>) -> (String, Started) {
+pub(in crate::services::discord::router::message_handler) fn launch(
+    fx: &Fixture,
+    launcher: &Arc<Launcher>,
+) -> (String, Started) {
     launch_with(fx, launcher, || {
         let started = fx.start_provider(launcher, true)?;
         fx.answer(&started);

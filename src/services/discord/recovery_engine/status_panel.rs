@@ -52,4 +52,4 @@ mod turn_summary_recovery_tests;
 
 #[cfg(test)]
 #[path = "footer_retirement_tests.rs"]
-mod footer_retirement_tests;
+pub(super) mod footer_retirement_tests;

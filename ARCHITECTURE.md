@@ -2479,7 +2479,6 @@ src/
 │   │   │   ├── herdr_before_start_restart_tests.rs
 │   │   │   ├── herdr_reader.rs
 │   │   │   ├── herdr_reader_missing_tests.rs
-│   │   │   ├── herdr_reader_placed_tests.rs
 │   │   │   ├── herdr_reader_tests.rs
 │   │   │   ├── herdr_row_end.rs
 │   │   │   ├── herdr_row_end_gate_tests.rs
@@ -2832,7 +2831,6 @@ src/
 │   │   │   │   ├── provider_dispatch_herdr_missing_race_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_missing_success_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_native_work_tests.rs
-│   │   │   │   ├── provider_dispatch_herdr_placed_attach_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_start_offset_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tests.rs
@@ -4064,8 +4062,7 @@ src/
 │   ├── dispatches/
 │   │   ├── discord_delivery/
 │   │   │   ├── transport/
-│   │   │   │   ├── duplicate_archive.rs
-│   │   │   │   └── duplicate_archive_tests.rs
+│   │   │   │   └── duplicate_archive.rs
 │   │   │   ├── guard.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── orchestration.rs
@@ -4519,8 +4516,6 @@ src/
 │   │   │   │   ├── spawn.rs
 │   │   │   │   ├── spawn_real_tests.rs
 │   │   │   │   └── spawn_tests.rs
-│   │   │   ├── launch_host_tests/
-│   │   │   │   └── command_tests.rs
 │   │   │   ├── managed_config/
 │   │   │   │   ├── maintenance.rs
 │   │   │   │   ├── maintenance_tests.rs
@@ -4575,8 +4570,6 @@ src/
 │   │   │   │   ├── witness_codec.rs
 │   │   │   │   ├── writer_compat.rs
 │   │   │   │   └── writer_compat_tests.rs
-│   │   │   ├── unplaced_rig_tests/
-│   │   │   │   └── placed_tests.rs
 │   │   │   ├── autostart.rs
 │   │   │   ├── autostart_real_tests.rs
 │   │   │   ├── autostart_tests.rs

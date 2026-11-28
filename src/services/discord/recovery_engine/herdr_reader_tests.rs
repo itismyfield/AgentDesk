@@ -2,54 +2,14 @@
 //! and the restart pass's endpoint switch.
 
 use super::*;
-use crate::db::dispatched_sessions::hosted_execution::{
-    HostedLocation, HostedOwner, ProcessStamp, SourceRef,
-};
+use crate::db::dispatched_sessions::hosted_execution::ProcessStamp;
+use crate::services::discord::recovery_engine::recovery_status_panel::footer_retirement_tests::missing_herdr_panes::{NONCE, record};
 use crate::services::session_host::SocketHerdrReader;
-use crate::services::session_host::herdr_socket_rig_tests::{
-    HerdrRig, KEY, NODE, PANE, PROVIDER, SESSION, SHELL,
-};
+use crate::services::session_host::herdr_socket_rig_tests::{HerdrRig, NODE, PANE, PROVIDER, SHELL};
 use crate::services::session_host::{HerdrExecutionReader, HerdrPaneEvidence, HerdrPaneReading};
-
-const NONCE: &str = "0123456789abcdef0123456789abcdef";
 
 #[path = "herdr_reader_missing_tests.rs"]
 mod missing;
-
-fn record(rig: &HerdrRig) -> HostedExecution {
-    let owner = HostedOwner {
-        provider: "claude".into(),
-        discord_token_hash: "hash".into(),
-        channel_id: "1".into(),
-        logical_key: "AgentDesk-claude-p9c-reader".into(),
-        owner_node: NODE.into(),
-        runtime_root: "/adk/runtime".into(),
-    };
-    HostedExecution {
-        schema: 1,
-        state: HostedState::Bound,
-        execution_nonce: NONCE.into(),
-        location: Some(HostedLocation {
-            host: "herdr".into(),
-            execution_node: NODE.into(),
-            endpoint_config_key: KEY.into(),
-            socket_addr: rig.socket().display().to_string(),
-            named_session: SESSION.into(),
-            pane_id: PANE.into(),
-        }),
-        expected: Some(rig.expected(NONCE)),
-        source_ref: SourceRef {
-            runtime_root: owner.runtime_root.clone(),
-            channel: owner.channel_id.clone(),
-            provider: "claude".into(),
-            logical_key: owner.logical_key.clone(),
-            execution_nonce: NONCE.into(),
-            initial_source: None,
-            baseline_event_seq: None,
-        },
-        owner,
-    }
-}
 
 fn stamp(pid: u32, seconds: u64) -> ProcessStamp {
     ProcessStamp {
@@ -137,6 +97,3 @@ fn the_restart_pass_reads_nothing_without_a_local_endpoint() {
     assert_eq!(passes(), 1, "a local endpoint gets past the switch");
     assert_eq!(local_reconnect_health(), counted(Some(Ok(1))));
 }
-
-#[path = "herdr_reader_placed_tests.rs"]
-mod placed;

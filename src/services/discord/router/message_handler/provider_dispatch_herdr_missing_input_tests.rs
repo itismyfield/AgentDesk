@@ -3,7 +3,7 @@ use super::*;
 use crate::services::discord::router::message_handler::provider_dispatch as dispatch;
 use crate::services::discord::shared_state::test_rest;
 
-pub(super) fn recording_runtime(
+pub(in crate::services::discord::router::message_handler) fn recording_runtime(
     intake: &mut Intake,
     fx: &Fixture,
     launch: bool,
@@ -540,9 +540,6 @@ pub(super) fn append_terminal(started: &Started, message: &str) {
 
 #[path = "provider_dispatch_herdr_missing_success_tests.rs"]
 mod success;
-
-#[path = "provider_dispatch_herdr_placed_attach_tests.rs"]
-mod placed_attach;
 
 #[path = "provider_dispatch_herdr_missing_race_tests.rs"]
 mod capture_race;
