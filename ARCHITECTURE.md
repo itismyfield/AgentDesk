@@ -1035,7 +1035,6 @@ src/
 │   │   ├── dispatch_query.rs
 │   │   ├── dispatched_entry_recovery_pg_tests.rs
 │   │   ├── fsm.rs
-│   │   ├── fsm_tests.rs
 │   │   ├── lifecycle_routes.rs
 │   │   ├── order_routes.rs
 │   │   ├── order_snapshot_tests.rs
@@ -1044,7 +1043,6 @@ src/
 │   │   ├── phase_gate_violations.rs
 │   │   ├── phase_snapshot_tests.rs
 │   │   ├── planning.rs
-│   │   ├── planning_dispatch_failure_pg_tests.rs
 │   │   ├── query.rs
 │   │   ├── route.rs
 │   │   ├── route_generate.rs
