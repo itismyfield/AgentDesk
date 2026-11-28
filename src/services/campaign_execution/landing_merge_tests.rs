@@ -3,7 +3,7 @@ use crate::services::campaign_execution::adk_observe::ci::{
     CheckResult, CiMode, RequiredSet, TestProvenance, VerifiedTests, WorkerAdoption,
     WorkflowIdentity,
 };
-use crate::services::campaign_execution::control::tests as domain;
+use crate::services::campaign_execution::control::test_support as domain;
 
 fn facts() -> (OpenedPr, MergeObservations, DateTime<Utc>) {
     let head = "a".repeat(40);

@@ -1082,6 +1082,7 @@ src/
 │   │   ├── ci_exception_tests.rs
 │   │   ├── commands.rs
 │   │   ├── control.rs
+│   │   ├── control_test_support.rs
 │   │   ├── control_tests.rs
 │   │   ├── decision_commands.rs
 │   │   ├── decision_commands_tests.rs
@@ -1096,6 +1097,7 @@ src/
 │   │   ├── effect_envelope.rs
 │   │   ├── evidence.rs
 │   │   ├── evidence_gate.rs
+│   │   ├── evidence_gate_test_support.rs
 │   │   ├── evidence_gate_tests.rs
 │   │   ├── evidence_tests.rs
 │   │   ├── execution_pin.rs
@@ -1140,11 +1142,13 @@ src/
 │   │   ├── scheduler.rs
 │   │   ├── scheduler_tests.rs
 │   │   ├── stage_fsm.rs
+│   │   ├── stage_fsm_test_support.rs
 │   │   ├── stage_fsm_tests.rs
 │   │   ├── verification_commands.rs
 │   │   ├── verification_driver.rs
 │   │   ├── verification_driver_tests.rs
 │   │   ├── verification_run.rs
+│   │   ├── verification_run_test_support.rs
 │   │   ├── verification_run_tests.rs
 │   │   ├── verification_runner.rs
 │   │   ├── verification_runner_tests.rs
@@ -1633,7 +1637,8 @@ src/
 │   │   │   ├── hold_release_tests.rs
 │   │   │   ├── inflight_row.rs
 │   │   │   ├── policy.rs
-│   │   │   └── policy_tests.rs
+│   │   │   ├── policy_tests.rs
+│   │   │   └── sweep_test_support.rs
 │   │   ├── catch_up/
 │   │   │   ├── frontier_sweep_tests/
 │   │   │   │   ├── dispatch_retirement_tests.rs
@@ -2348,6 +2353,7 @@ src/
 │   │   │   ├── canary_workspace_tests.rs
 │   │   │   ├── cancel_backstop_race_support_tests.rs
 │   │   │   ├── input_effect_tests.rs
+│   │   │   ├── ke_retry_sweep_tests.rs
 │   │   │   └── kickoff.rs
 │   │   ├── queue_io/
 │   │   │   ├── decision_drain/
@@ -5670,6 +5676,7 @@ src/
 │   ├── secret_file.rs
 │   └── wip_detect.rs
 ├── adk_base_lib.rs
+├── adk_engine_lib.rs
 ├── adk_runtime_lib.rs
 ├── adk_test_support_lib.rs
 ├── api_caller_observability.rs
@@ -5743,6 +5750,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/ui/` | Compatibility shims for persisted UI/session types used by the Discord runtime. |
 | `src/utils/` | Shared formatting and Unicode-safe string utilities. |
 | `src/adk_base_lib.rs` | Library root of the `adk-base` workspace crate; builds the seed `domain` value contracts and `utils` pure helpers in place, which the parent re-exports under their old paths. |
+| `src/adk_engine_lib.rs` | Library root of the `adk-engine` workspace crate, which builds the provider prose and prompt-length diagnostics in place. |
 | `src/adk_runtime_lib.rs` | Library root of the `adk-runtime` workspace crate; builds the runtime modules (config, db, logging, the provider/TUI/session services) in place, which the parent re-exports under their old paths. |
 | `src/adk_test_support_lib.rs` | Library root of the `adk-test-support` workspace crate; builds the `test_support` capped waits, serialized runtimes, lock holder records and source lexer in place for dev-dependencies only, which the parent re-exports under `#[cfg(test)]`. |
 | `src/api_caller_observability.rs` | Request-principal classification and uniform log-only API caller attribution records for identity-consuming mutation paths. |

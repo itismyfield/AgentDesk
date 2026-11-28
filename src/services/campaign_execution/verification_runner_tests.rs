@@ -6,12 +6,13 @@ use crate::services::campaign_execution::model::{Action, ActionState};
 use crate::services::campaign_execution::profile::{
     Observation, PlannedTest, ResourceKind, TestOutcome,
 };
-use crate::services::campaign_execution::verification_run::tests as run_tests;
 use crate::services::campaign_execution::verification_run::{
     PhaseInput, SelectionRule, VerificationCollection, VerificationRun, VerificationSpec, digest_of,
 };
 #[cfg(unix)]
-use crate::services::campaign_execution::verification_run::{Slot, VerificationError};
+use crate::services::campaign_execution::verification_run::{
+    Slot, VerificationError, test_support as run_support, tests as run_tests,
+};
 
 fn at() -> DateTime<Utc> {
     DateTime::parse_from_rfc3339("2026-10-29T09:00:00Z")
@@ -530,7 +531,7 @@ fn adk_phases_hand_their_files_to_the_real_helper_and_collect_the_planned_check(
         sha: "h1",
     };
     let (identity, policy) = (identity(), policy());
-    let spec = run_tests::spec_with_audit();
+    let spec = run_support::spec_with_audit();
     let (mut run, mut actions) = run_tests::registered_with(spec.clone());
     run.bind_subject(run_tests::subject()).unwrap();
     let archive = scratch.join("lib-tests.tar.zst");
@@ -752,7 +753,7 @@ fn adk_phases_hand_their_files_to_the_real_helper_and_collect_the_planned_check(
         serde_json::from_str(&std::fs::read_to_string(&verdict).unwrap()).unwrap();
     assert_eq!(verdict["verdict"], "pass", "{verdict}");
     let collected = run
-        .collect(|id| actions.get(id), run_tests::environment(), vec![])
+        .collect(|id| actions.get(id), run_support::environment(), vec![])
         .unwrap();
     let VerificationCollection::Executed { audit, evidence } = collected else {
         panic!("{collected:?}");
@@ -805,7 +806,7 @@ fn universe_plan_with_real_helper(partial: bool) -> (VerificationRun, Verificati
         sha: "h1",
     };
     let (identity, policy) = (identity(), policy());
-    let mut spec: VerificationSpec = run_tests::spec();
+    let mut spec: VerificationSpec = run_support::spec();
     spec.checks[0].selection = SelectionRule::ListedUniverse;
     let (mut run, mut actions) = run_tests::registered_with(spec.clone());
     run.bind_subject(run_tests::subject()).unwrap();

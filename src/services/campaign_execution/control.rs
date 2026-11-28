@@ -102,7 +102,7 @@ pub fn stop_guard(state: &CampaignState) -> DecisionResult<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn validate_result_binding(
     state: &CampaignState,
     binding: &AttemptBinding,
@@ -969,5 +969,9 @@ pub(super) fn observe_action(
 }
 
 #[cfg(any(test, feature = "test-support"))]
+#[path = "control_test_support.rs"]
+pub(crate) mod test_support;
+
+#[cfg(test)]
 #[path = "control_tests.rs"]
-pub(crate) mod tests;
+mod tests;

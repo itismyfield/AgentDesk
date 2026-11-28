@@ -1,15 +1,15 @@
+use crate::campaign_adapter::stage_fsm::test_support as fsm;
 use crate::db::server_campaigns::*;
 use crate::domain::campaign::model::*;
 use crate::services::campaign_execution::{
-    control::tests as domain,
+    control::test_support as domain,
     evidence::{EvidenceEnvelope, EvidenceStatus, TuiPayload, TuiSubmission},
-    evidence_gate::tests::{REPO, workspace},
+    evidence_gate::test_support::{REPO, workspace},
     profile::{ExecutedTest, ExecutionEnvironment, TestOutcome},
-    stage_fsm::tests as fsm,
     verification_run::{
         ArtifactRef, ListedTest, NotSentReason, PhaseInitiation, PhaseInput, PhaseKind,
         PhaseOutput, ProcessIdentity, TerminationObservation, TreeState, VerificationCollection,
-        digest_of, plan_scope, tests as a1,
+        digest_of, plan_scope, test_support as a1,
     },
 };
 use crate::services::krx_db_tests::server_campaigns_storage::{

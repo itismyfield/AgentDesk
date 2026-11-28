@@ -13,7 +13,7 @@ use crate::services::campaign_execution::{
     adk_workspace::observe_checkout,
     candidate_seal::CandidateSeal,
     commands,
-    control::tests as domain,
+    control::test_support as domain,
     landing_prepare::tests::{fixture_checkout, tools},
     lifecycle,
 };

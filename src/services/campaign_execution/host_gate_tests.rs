@@ -7,7 +7,7 @@ use tempfile::{TempDir, tempdir};
 
 use super::*;
 use crate::services::campaign_execution::candidate_seal::CandidateSeal;
-use crate::services::campaign_execution::control::{decide, tests as domain};
+use crate::services::campaign_execution::control::{decide, test_support as domain};
 use crate::services::campaign_execution::effect_envelope::{
     action_envelope, host_fences, phase_envelope, phase_launch,
 };
@@ -15,11 +15,11 @@ use crate::services::campaign_execution::model::{
     ActionObservation, ActionState, AttemptBinding, CampaignState, Command, PhaseFact,
     RejectionCode,
 };
-use crate::services::campaign_execution::stage_fsm::tests::{
+use crate::services::campaign_execution::stage_fsm::test_support::{
     assigned, begin, execution, review_of, run_v, seal_of,
 };
 use crate::services::campaign_execution::verification_run::{
-    AuthoritySource, PhaseInput, tests as a1,
+    AuthoritySource, PhaseInput, test_support as a1,
 };
 
 const PHASE: &str = "archive";

@@ -144,7 +144,7 @@ async fn m9_the_worker_reobserves_every_host_after_an_indeterminate_restart_pg()
     use crate::services::campaign_execution::{
         adk_resources::AdkResources,
         commands,
-        control::tests as domain,
+        control::test_support as domain,
         effect_envelope::execution_nonce,
         host_gate::{
             EffectAuthority, EffectEnvelope, EffectGate, HostNodeFence, Initiation, RunFence,
