@@ -906,7 +906,7 @@ pub(super) async fn resume_gateway(
     if &shared.provider != provider || !serving() {
         return;
     }
-    let Some(registry) = health::registry_for(shared) else {
+    let Some(registry) = crate::services::discord::health::registry_for(shared) else {
         return;
     };
     let gate = crate::services::tui_o::ownership::gate(provider.as_str());

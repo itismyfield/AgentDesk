@@ -343,26 +343,27 @@ pub(in crate::services::discord) async fn handle_event(
             }
             crate::logging::intake_stage::mark(new_message.id.get(), "intake", None);
 
-            let (announce_resolution, notify_resolution) =
-                if let Some(registry) = health::registry_for(&data.shared) {
-                    (
-                        registry
-                            .utility_bot_user_id_resolution(
-                                super::super::bot_role::UtilityBotRole::Announce,
-                            )
-                            .await,
-                        registry
-                            .utility_bot_user_id_resolution(
-                                super::super::bot_role::UtilityBotRole::Notify,
-                            )
-                            .await,
-                    )
-                } else {
-                    (
-                        health::UtilityBotUserIdResolution::Unconfigured,
-                        health::UtilityBotUserIdResolution::Unconfigured,
-                    )
-                };
+            let (announce_resolution, notify_resolution) = if let Some(registry) =
+                crate::services::discord::health::registry_for(&data.shared)
+            {
+                (
+                    registry
+                        .utility_bot_user_id_resolution(
+                            super::super::bot_role::UtilityBotRole::Announce,
+                        )
+                        .await,
+                    registry
+                        .utility_bot_user_id_resolution(
+                            super::super::bot_role::UtilityBotRole::Notify,
+                        )
+                        .await,
+                )
+            } else {
+                (
+                    health::UtilityBotUserIdResolution::Unconfigured,
+                    health::UtilityBotUserIdResolution::Unconfigured,
+                )
+            };
             let announce_bot_id = announce_resolution.user_id();
 
             // Ignore bot messages, unless they are allowed bot traffic or the
