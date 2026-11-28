@@ -51,6 +51,8 @@ pub struct BootChannels {
     foreign_stores: BTreeSet<u64>,
     execution: Arc<Mutex<BTreeMap<u64, super::ownership::execution::View>>>,
     execution_install: Arc<Mutex<()>>,
+    /// The other node PG last named as each channel's execution owner.
+    remote_owners: Arc<Mutex<BTreeMap<u64, String>>>,
 }
 
 /// Membership as configured; the adoption states and kept committed channels are process state.
@@ -284,6 +286,7 @@ impl BootChannels {
             foreign_stores: BTreeSet::new(),
             execution: Arc::default(),
             execution_install: Arc::default(),
+            remote_owners: Arc::default(),
         })
     }
 
@@ -491,6 +494,26 @@ impl BootChannels {
             .or_else(|| Some(self.child(channel)?.ok()?.candidate))
             .filter(|candidate| !candidate.child_parked())
             .map(|candidate| candidate.with_init_scope(self.init_scope_view()))
+    }
+
+    /// Records the other node PG names as the channel's execution owner; `None` clears it.
+    pub fn note_remote_owner(&self, channel: u64, owner: Option<String>) {
+        let mut owners = self
+            .remote_owners
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        match owner {
+            Some(owner) => owners.insert(channel, owner),
+            None => owners.remove(&channel),
+        };
+    }
+
+    pub fn remote_owner(&self, channel: u64) -> Option<String> {
+        let owners = self
+            .remote_owners
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        owners.get(&channel).cloned()
     }
 
     pub fn install_execution(

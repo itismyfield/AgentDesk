@@ -93,7 +93,8 @@ pub(super) async fn unproved_successor_holds_actual_input(
         matches!(
             &admission,
             IntakeAdmission::WriterBlocked {
-                reason: IntakeBlockedReason::RoutingDependencyFailed { detail }
+                reason: IntakeBlockedReason::RoutingDependencyFailed { detail },
+                ..
             } if detail == &held_reason
         ),
         "actual D intake must hold the unproved successor: {admission:?}",

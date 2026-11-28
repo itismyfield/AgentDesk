@@ -953,7 +953,7 @@ async fn actual_o_herdr_blocked_notice_keeps_live_checkpoint_pg() {
             IntakeAdmission::Blocked {
                 reason: crate::services::cluster::intake_router_hook::IntakeBlockedReason::RoutingDependencyFailed { detail }
             } | IntakeAdmission::WriterBlocked {
-                reason: crate::services::cluster::intake_router_hook::IntakeBlockedReason::RoutingDependencyFailed { detail }
+                reason: crate::services::cluster::intake_router_hook::IntakeBlockedReason::RoutingDependencyFailed { detail }, ..
             } if detail.contains("writer ready")
         ),
         "actual_o_writer_refusal_is_blocked_before_live_dispatch: {admission:?}"

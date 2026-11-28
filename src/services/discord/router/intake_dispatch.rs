@@ -126,6 +126,8 @@ pub(crate) enum IntakeAdmission {
     /// An O Hold without local custody authority; it never settles a live checkpoint.
     WriterBlocked {
         reason: IntakeBlockedReason,
+        /// A Foreign node leaves the input to its O home's catch-up and tells the user nothing.
+        waits_for_home: bool,
     },
     Forwarded {
         target_instance_id: String,
@@ -308,7 +310,12 @@ pub(crate) async fn admit_text_intake(
             );
         }
         let reason = IntakeBlockedReason::RoutingDependencyFailed { detail };
-        return IntakeAdmission::WriterBlocked { reason };
+        let waits_for_home =
+            crate::services::tui_o::cutover::placement_waits_for_home(destination.get());
+        return IntakeAdmission::WriterBlocked {
+            reason,
+            waits_for_home,
+        };
     }
     let effective_config =
         crate::services::cluster::intake_router_hook::effective_intake_routing_config();
@@ -724,10 +731,11 @@ pub(crate) async fn finish_text_intake_admission(
         IntakeAdmission::DeferredWriterBoot(prepared) => {
             boot_custody::retain(deps, submission, prepared).await?;
         }
-        IntakeAdmission::WriterBlocked { ref reason } => {
-            // A Foreign node leaves the input to its O home's catch-up and tells the user nothing.
-            let channel = submission.request.channel_id.get();
-            if !crate::services::tui_o::cutover::placement_waits_for_home(channel) {
+        IntakeAdmission::WriterBlocked {
+            ref reason,
+            waits_for_home,
+        } => {
+            if !waits_for_home {
                 notify_blocked_intake(deps, &submission, reason).await;
             }
         }
@@ -1015,7 +1023,7 @@ fn log_nonlocal_admission(admission: &IntakeAdmission, channel_id: &str, user_ms
             user_msg_id,
             "[intake_dispatch] distinct open route deferred; local execution fenced"
         ),
-        IntakeAdmission::Blocked { reason } | IntakeAdmission::WriterBlocked { reason } => {
+        IntakeAdmission::Blocked { reason } | IntakeAdmission::WriterBlocked { reason, .. } => {
             tracing::warn!(
                 ?reason,
                 channel_id,

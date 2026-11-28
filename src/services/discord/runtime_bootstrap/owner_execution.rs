@@ -87,29 +87,48 @@ pub(super) async fn prepare(provider: &ProviderKind, pool: Option<&sqlx::PgPool>
     let local =
         super::o_writer_host::local_id(snapshot.configured_id(), Duration::from_secs(10)).await;
     for channel in channels {
-        let result = match (pool, &local) {
-            (Some(pool), Ok(local)) => {
-                let read = execution::read(pool, provider.as_str(), channel, local, || {
-                    legacy_present(provider, channel, shadow)
-                });
-                tokio::time::timeout(Duration::from_secs(3), read)
-                    .await
-                    .map_err(|_| "execution owner PG read timed out".to_owned())
-                    .and_then(|r| r)
-            }
-            (None, _) => Err("execution owner PG pool unavailable".into()),
-            (_, Err(reason)) => Err(reason.clone()),
-        };
+        let result = observe(provider, pool, &local, channel, shadow).await;
         let view = match result {
             Ok(None) => None,
             Ok(Some(permit)) => Some(Ok(permit)),
-            Err(reason) => {
+            Err(error) => {
                 record_hold(provider.as_str(), channel);
+                let reason = error.reason;
                 tracing::warn!(provider=provider.as_str(),channel_id=channel,%reason,"execution restore held");
+                snapshot.note_remote_owner(channel, error.owner);
                 Some(Err(reason))
             }
         };
+        let held = matches!(view, Some(Err(_)));
         snapshot.install_execution(channel, view);
+        if !held {
+            snapshot.note_remote_owner(channel, None);
+        }
+    }
+}
+
+/// One bounded PG observation of the channel's execution owner, for boot and refresh alike.
+async fn observe(
+    provider: &ProviderKind,
+    pool: Option<&sqlx::PgPool>,
+    local: &Result<String, String>,
+    channel: u64,
+    shadow: ShadowProvider,
+) -> Result<Option<Arc<execution::OwnerPermit>>, execution::ReadError> {
+    match (pool, local) {
+        (Some(pool), Ok(local)) => tokio::time::timeout(
+            Duration::from_secs(3),
+            execution::read_observation(pool, provider.as_str(), channel, local, || {
+                legacy_present(provider, channel, shadow)
+            }),
+        )
+        .await
+        .map_err(|_| execution::ReadError::temporary("execution owner PG read timed out"))
+        .and_then(|result| result),
+        (None, _) => Err(execution::ReadError::temporary(
+            "execution owner PG pool unavailable",
+        )),
+        (_, Err(reason)) => Err(execution::ReadError::temporary(reason)),
     }
 }
 
@@ -160,23 +179,10 @@ pub(super) async fn refresh(provider: &ProviderKind, pool: Option<&sqlx::PgPool>
         if snapshot.kind(channel) != Some(kind) {
             continue;
         }
-        let result = match (pool, &local) {
-            (Some(pool), Ok(local)) => tokio::time::timeout(
-                Duration::from_secs(3),
-                execution::read_observation(pool, provider.as_str(), channel, local, || {
-                    legacy_present(provider, channel, shadow)
-                }),
-            )
-            .await
-            .map_err(|_| execution::ReadError::temporary("execution owner PG read timed out"))
-            .and_then(|result| result),
-            (None, _) => Err(execution::ReadError::temporary(
-                "execution owner PG pool unavailable",
-            )),
-            (_, Err(reason)) => Err(execution::ReadError::temporary(reason)),
-        };
+        let result = observe(provider, pool, &local, channel, shadow).await;
         let permit = match result {
             Err(error) => {
+                snapshot.note_remote_owner(channel, error.owner.clone());
                 record_hold(provider.as_str(), channel);
                 // The loop runs every 2 s, so only a new or changed reason is logged.
                 let held = snapshot
@@ -196,7 +202,9 @@ pub(super) async fn refresh(provider: &ProviderKind, pool: Option<&sqlx::PgPool>
             }
             Ok(permit) => permit,
         };
+        // Cleared only once the new view is in, so a reader never sees the old hold unowned.
         if snapshot.resume_execution(channel, permit.as_ref()) {
+            snapshot.note_remote_owner(channel, None);
             record_readmission(provider.as_str(), channel);
             continue;
         }
@@ -227,12 +235,14 @@ pub(super) async fn refresh(provider: &ProviderKind, pool: Option<&sqlx::PgPool>
             .is_err()
             {
                 record_retirement(provider.as_str(), channel, "wait_timeout_continue");
+                snapshot.note_remote_owner(channel, None);
                 continue;
             } else {
                 record_retirement(provider.as_str(), channel, "retired_host_install");
             }
         }
         snapshot.install_execution(channel, permit.map(Ok));
+        snapshot.note_remote_owner(channel, None);
         record_readmission(provider.as_str(), channel);
     }
 }

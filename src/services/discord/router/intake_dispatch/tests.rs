@@ -390,6 +390,7 @@ async fn admitted_locally(deps: &IntakeDeps<'_>, channel: ChannelId) -> Result<(
         }
         super::IntakeAdmission::WriterBlocked {
             reason: IntakeBlockedReason::RoutingDependencyFailed { detail },
+            ..
         } => Err(detail),
         other => panic!("unexpected admission {other:?}"),
     }
@@ -989,13 +990,9 @@ mod snapshot_tests {
     }
 }
 
-/// A Foreign node holds an O channel's input for its home: no refusal reaches the channel and the
-/// checkpoint stays put for the home's catch-up.
-#[tokio::test(flavor = "current_thread")]
-async fn a_foreign_node_holds_o_input_without_telling_the_user() {
-    use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
-    use crate::services::tui_o::cutover::test_override;
-    let env = ScopedIntakeTestEnv::with_mode("disabled");
+/// Discord sends of one O input admitted and finished as a writer hold, which never advances the
+/// checkpoint the home's catch-up reads.
+async fn held_input_sends(env: &ScopedIntakeTestEnv, o: ChannelId) -> Vec<String> {
     let config = crate::runtime_layout::config_file_path(env._root.path());
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
     std::fs::write(&config, "server: {}\n").unwrap();
@@ -1006,9 +1003,7 @@ async fn a_foreign_node_holds_o_input_without_telling_the_user() {
     let shared = crate::services::discord::make_shared_data_for_tests();
     let api = crate::services::discord::admin_host_guard::tests::Recorder::start().await;
     let deps = deps(&api.http, &shared);
-    let o = ChannelId::new(4_360_021);
-    let _foreign = test_override::force_foreign(&[(o.get(), ClaudeTui)], "home-node");
-    let submission = submission_for_admission(o, 4_360_022);
+    let submission = submission_for_admission(o, o.get() + 1);
     let admission = super::admit_text_intake(&deps, &submission).await;
     assert!(
         matches!(admission, super::IntakeAdmission::WriterBlocked { .. }),
@@ -1018,9 +1013,58 @@ async fn a_foreign_node_holds_o_input_without_telling_the_user() {
     let finished = super::finish_deferred(&deps, admission, submission, || advanced = true);
     finished.await.unwrap();
     assert!(!advanced, "the home's catch-up still owns the input");
-    assert_eq!(
-        api.take(),
-        Vec::<String>::new(),
-        "no refusal reaches the channel"
+    api.take()
+}
+
+/// A Foreign node without an execution view holds an O channel's input silently for its home.
+#[tokio::test(flavor = "current_thread")]
+async fn a_foreign_node_holds_o_input_without_telling_the_user() {
+    use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+    let env = ScopedIntakeTestEnv::with_mode("disabled");
+    let o = ChannelId::new(4_360_021);
+    let _foreign = crate::services::tui_o::cutover::test_override::force_foreign(
+        &[(o.get(), ClaudeTui)],
+        "home-node",
     );
+    assert_eq!(held_input_sends(&env, o).await, Vec::<String>::new());
+}
+
+/// PG names the O home as the execution owner: the Foreign node's boot view holds the input
+/// silently, while a home whose own owner read fails still warns the user.
+#[tokio::test(flavor = "current_thread")]
+async fn a_foreign_node_is_silent_on_a_home_owned_channel_pg() {
+    use crate::services::discord::runtime_bootstrap::prepare_owner_execution_for_tests as boot;
+    use crate::services::tui_o::{channel_policy::BootChannels, cutover};
+    let env = ScopedIntakeTestEnv::with_mode("disabled");
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let o = ChannelId::new(4_360_031);
+    crate::services::tui_o::ownership::execution::tests::admission(
+        &pool,
+        "claude",
+        o.get(),
+        "home-node",
+    )
+    .await;
+    for (local, read, warned) in [
+        ("foreign-node", Some(&pool), false),
+        ("home-node", None, true),
+    ] {
+        let config = serde_json::from_value(serde_json::json!({"server": {},
+            "cluster": {"enabled": true, "instance_id": local, "gateway_preferred_instance_id": "home-node"},
+            "agents": [{"id": "custody-agent", "name": "fixture",
+                "channels": {"claude": {"id": o.to_string(), "runtime": "tui"}}}],
+            "tui_o": {"writer": {"channels": [o.get()]}}}))
+        .unwrap();
+        let _boot = cutover::test_override::force_boot(BootChannels::validate(&config).unwrap());
+        boot(&ProviderKind::Claude, read).await;
+        let view = cutover::boot_snapshot().and_then(|s| s.execution(o.get()));
+        assert!(view.is_some_and(|view| view.permit.is_err()), "{local}");
+        assert_eq!(
+            !held_input_sends(&env, o).await.is_empty(),
+            warned,
+            "{local}"
+        );
+    }
+    db.drop().await;
 }

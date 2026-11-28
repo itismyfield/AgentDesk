@@ -100,23 +100,28 @@ impl View {
 pub struct ReadError {
     pub reason: String,
     pub temporary: bool,
+    /// The other node PG names as the channel's active execution owner.
+    pub owner: Option<String>,
 }
 impl ReadError {
     pub fn temporary(reason: impl ToString) -> Self {
         Self {
             reason: reason.to_string(),
             temporary: true,
+            owner: None,
         }
     }
     fn identity(reason: impl ToString) -> Self {
         Self {
             reason: reason.to_string(),
             temporary: false,
+            owner: None,
         }
     }
 }
 
 /// None denotes an unmanaged channel; errors must install a held view, never Legacy.
+#[cfg(any(test, feature = "test-support"))]
 pub async fn read(
     pool: &PgPool,
     provider: &str,
@@ -156,9 +161,10 @@ pub async fn read_observation(
     let (executor, generation) = owner
         .ok_or_else(|| ReadError::identity("managed channel has no active execution owner"))?;
     if executor != local {
-        return Err(ReadError::identity(format!(
-            "channel execution owner is {executor}"
-        )));
+        return Err(ReadError {
+            owner: Some(executor.clone()),
+            ..ReadError::identity(format!("channel execution owner is {executor}"))
+        });
     }
     let binding: Option<Value> = sqlx::query_scalar("SELECT r.replay_preserved #> '{projection,binding}' FROM intake_outbox d JOIN intake_outbox r ON r.id=d.routing_receipt_id WHERE d.provider=$1 AND d.channel_id=$2 AND d.owner_instance_id=$3 AND d.owner_generation=$4 AND r.replay_preserved #> '{projection,binding}' IS NOT NULL ORDER BY d.id DESC LIMIT 1")
         .bind(identity.provider()).bind(identity.raw_channel_id()).bind(local).bind(generation).fetch_optional(&mut *tx).await.map_err(ReadError::temporary)?;
@@ -167,6 +173,7 @@ pub async fn read_observation(
             validate_local(provider, channel, local, &binding).map_err(|error| ReadError {
                 temporary: matches!(error, NativeRefFailure::Unavailable),
                 reason: format!("original native incarnation ref: {error:?}"),
+                owner: None,
             })?;
             SessionRef::Bound(binding)
         }
