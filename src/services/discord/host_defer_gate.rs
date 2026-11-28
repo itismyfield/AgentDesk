@@ -302,10 +302,11 @@ impl TmuxMirrorEpoch {
         provider: &ProviderKind,
         name: &str,
         binding: Option<&crate::services::tui_prompt_dedupe::TuiRuntimeBinding>,
-        channel: Option<u64>,
+        channels: (Option<u64>, u64),
         restored_owner: Option<ChannelId>,
     ) -> Option<()> {
         use crate::services::{tmux_common, tui_prompt_dedupe as dedupe};
+        let (mirror_channel, loss_channel) = channels;
         tmux_common::with_tmux_source_authority(name, |authority| {
             if !self.is_current(authority)
                 || shared.tmux_watchers.has_live_watcher_handle(name)
@@ -314,7 +315,9 @@ impl TmuxMirrorEpoch {
                 return None;
             }
             let removed = dedupe::evict_tmux_mirror_if_current_under_source_authority(
-                authority, binding, channel,
+                authority,
+                binding,
+                mirror_channel,
             )?;
             shared
                 .tmux_watchers
@@ -325,9 +328,7 @@ impl TmuxMirrorEpoch {
             let permanent_loss_count = super::idle_relay_drift::record_confirmed_dead_orphan_loss(
                 provider,
                 name,
-                channel
-                    .or_else(|| restored_owner.map(ChannelId::get))
-                    .unwrap_or(0),
+                loss_channel,
             );
             if removed {
                 tracing::warn!(

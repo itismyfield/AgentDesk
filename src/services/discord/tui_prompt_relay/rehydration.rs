@@ -218,7 +218,7 @@ fn evict_dead_orphaned_tui_mirrors(
                         provider,
                         &name,
                         Some(&binding),
-                        channel,
+                        (channel, channel.unwrap_or(0)),
                         restored,
                     ),
                     Some(false) => Some(()),
@@ -577,7 +577,7 @@ fn rehydrate_claude_tui_pane_inner(
                     &ProviderKind::Claude,
                     tmux_session_name,
                     existing_binding.as_ref(),
-                    existing_channel,
+                    (existing_channel, channel_id),
                     restored,
                 );
             }
@@ -777,7 +777,7 @@ pub(super) fn rehydrate_existing_codex_tui_bindings(shared: &Arc<SharedData>) {
                         &ProviderKind::Codex,
                         &tmux_session_name,
                         before.as_ref(),
-                        mirror_channel,
+                        (mirror_channel, channel_id),
                         restored,
                     );
                 }
