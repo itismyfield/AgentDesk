@@ -8,6 +8,7 @@ fn piece(evidence: &NoticeEvidence) -> Derived {
         index: 0,
         payload: evidence.payload.clone().unwrap(),
         notice_origin: evidence.origin.clone(),
+        reply: None,
     })
 }
 
@@ -289,7 +290,7 @@ async fn floored_evidence_does_not_exclude_a_piece_with_another_origin() {
         end: evidence.record.end,
         line: evidence.raw_record.clone(),
     };
-    let derived = actor.deriver_mut_for_test().derive_scoped(
+    let derived = actor.derive_scoped_for_test(
         &record,
         &evidence.record.source,
         crate::services::tui_o::shadow::IDENTITY_VERSION,
@@ -374,8 +375,7 @@ async fn floor_boundaries_keep_late_input_without_an_old_record_proof() {
             line: evidence.raw_record.clone(),
         };
         *actor.owed_mut_for_test() = actor
-            .deriver_mut_for_test()
-            .derive_scoped(
+            .derive_scoped_for_test(
                 &record,
                 &evidence.record.source,
                 crate::services::tui_o::shadow::IDENTITY_VERSION,

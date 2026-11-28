@@ -31,7 +31,7 @@ async fn a_withheld_paused_attach_leaves_the_row_registry_and_retries_untouched_
     let root = crate::services::discord::inflight::inflight_runtime_root().unwrap();
     // (row, channel, attach result, tmux retries scheduled)
     let cases = [
-        (Stored::Hosted, 5340_31, false, 0),
+        (Stored::Hosted, 534_031, false, 0),
         (Stored::Legacy, 534_032, true, 1),
     ];
     for (stored, channel, attached, retries) in cases {
@@ -110,7 +110,7 @@ async fn a_scheduled_paused_attach_rereads_the_host_before_each_attempt() {
         "AgentDesk-claude-p8c6-admitted",
         "AgentDesk-claude-p8c6-withheld",
     ];
-    let channels = [5340_41, 5340_42].map(serenity::ChannelId::new);
+    let channels = [534_041, 534_042].map(serenity::ChannelId::new);
     for (name, channel) in [admitted, withheld].into_iter().zip(channels) {
         let output = Some(format!("/tmp/{name}.jsonl"));
         let owner = attach_paused_turn_watcher(

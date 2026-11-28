@@ -46,7 +46,7 @@ fn scope_matches(end: &RestartEnd, event: &BindingEvent, binding: &SourceBinding
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct VerifiedEnd {
+pub struct VerifiedEnd {
     end: RestartEnd,
     snapshot: Option<Fingerprint>,
     captured: bool,
@@ -166,7 +166,7 @@ thread_local! {
 mod repair_tests;
 
 /// Called on a worker before folding native records; the current resume nonce may be newer.
-pub(crate) fn validated(
+pub fn validated(
     ends: Vec<RestartEnd>,
     history: &[BindingEvent],
     binding: &SourceBinding,
@@ -378,7 +378,7 @@ pub(super) fn capture_current<B: BindingEvents>(
 }
 
 /// Loading precedes both boot replay and capture, so no unit crosses its end before sealing.
-pub(super) async fn refresh<P, L, A, B>(
+pub async fn refresh<P, L, A, B>(
     writer: &mut ChannelWriter<P, L, A>,
     deriver: &mut UnitDeriver,
     bindings: &B,

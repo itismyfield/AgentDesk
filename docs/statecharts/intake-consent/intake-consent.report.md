@@ -47,7 +47,7 @@ RED cfg를 첫 위반에서 멈춘 상태 수와 혼동하지 않는다. 위 집
 않으며 기존 9 cfg의 Next에 모두 포함된다.
 
 - `SweepPreAccept(i)`: 같은 epoch의 claimed row를 pending으로 돌리고 이전
-  worker의 pc를 claimed로 남긴다. `worker_status.rs:394–414` stamped sweep은
+  worker의 pc를 claimed로 남긴다. `worker_status.rs:382–402` stamped sweep은
   실행 중 worker를 중단시키지 않으며, `Change::from` :226–233은 Rearm을
   claimed에만 허용한다.
 - `CancelPreAccept(i)`: 같은 상태 전이 뒤 해당 worker를 done으로 만든다.

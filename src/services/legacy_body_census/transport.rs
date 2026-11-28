@@ -7,11 +7,11 @@ use std::{
 };
 
 /// Observation cannot add a disk or writer-ACK dependency to a send.
-pub(crate) fn record(record: Value) {
+pub fn record(record: Value) {
     try_record(record);
 }
 
-pub(crate) fn try_record(record: Value) {
+pub fn try_record(record: Value) {
     if let Some(journal) = JOURNAL.get() {
         journal.0.try_append(record);
     }
@@ -29,7 +29,7 @@ struct CreatedBucket {
 
 static O_CREATED: LazyLock<Mutex<VecDeque<CreatedBucket>>> = LazyLock::new(Mutex::default);
 
-pub(crate) fn record_o_created(channel: u64, id: u64, started_at_ms: Option<i64>) {
+pub fn record_o_created(channel: u64, id: u64, started_at_ms: Option<i64>) {
     let created_at_ms = ((id >> 22) + 1_420_070_400_000) as i64;
     // A nonce echo is not a new create; ambiguous clock ordering only loses denominator evidence.
     if started_at_ms.is_some_and(|started| created_at_ms <= started) {

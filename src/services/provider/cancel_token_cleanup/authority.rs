@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct SessionKey {
+pub struct SessionKey {
     provider: ProviderKind,
     name: String,
 }
@@ -24,7 +24,7 @@ impl SessionKey {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum TmuxBinding {
+pub enum TmuxBinding {
     Published { key: SessionKey, generation: u64 },
     NameOnly { name: String },
 }

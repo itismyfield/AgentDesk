@@ -59,6 +59,7 @@ mod claude_original_tests;
 use absence_state::{WatcherAbsenceKey, WatcherAbsenceState, respawn_backoff_secs};
 mod idle_relay_absence;
 mod live_bridge_guard;
+#[cfg(test)]
 pub(super) use live_bridge_guard::complete_force_clean_watcher_recovery;
 use live_bridge_guard::retry_pending_watcher_respawn;
 

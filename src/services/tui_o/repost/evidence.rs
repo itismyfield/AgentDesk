@@ -10,43 +10,52 @@ use crate::services::tui_o::repost::o_piece_delivery::{DeliveryRow, PieceKey};
 /// Bumped when attribution rules change, so evidence judged by other rules is not reused.
 pub(crate) const MATCHER_VERSION: i32 = 1;
 /// The first pass starts no sooner than this after the earlier send was seen settled.
-pub(crate) const FIRST_PASS_AFTER: Duration = Duration::from_secs(10);
+pub const FIRST_PASS_AFTER: Duration = Duration::from_secs(10);
 /// The second starts no sooner than this after the first completed, so read time adds to it.
-pub(crate) const SECOND_PASS_AFTER: Duration = Duration::from_secs(20);
+pub const SECOND_PASS_AFTER: Duration = Duration::from_secs(20);
 
 /// Who reads. A pass begun under one holder, run or credentials proves nothing under another.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RunScope {
-    pub(crate) holder: String,
-    pub(crate) run: String,
-    pub(crate) credentials: String,
-    pub(crate) evidence_generation: u64,
+pub struct RunScope {
+    pub holder: String,
+    pub run: String,
+    pub credentials: String,
+    pub evidence_generation: u64,
 }
 
 /// Everything absence evidence is about; any change means the passes looked for something else.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct EvidenceScope {
+pub struct EvidenceScope {
+    #[cfg(any(test, feature = "test-support"))]
+    pub key: PieceKey,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) key: PieceKey,
     pub(crate) payload_sha256: String,
+    #[cfg(any(test, feature = "test-support"))]
+    pub sender_id: u64,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) sender_id: u64,
     pub(crate) identity_version: i32,
     pub(crate) split_version: i32,
     pub(crate) matcher_version: i32,
+    #[cfg(any(test, feature = "test-support"))]
+    pub row_revision: i64,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) row_revision: i64,
+    #[cfg(any(test, feature = "test-support"))]
+    /// Every consumed slot, all settled: the sends the passes looked for.
+    pub checked_slots: Vec<u8>,
+    #[cfg(not(any(test, feature = "test-support")))]
     /// Every consumed slot, all settled: the sends the passes looked for.
     pub(crate) checked_slots: Vec<u8>,
     /// The piece's own stored anchor, never the ledger's latest one.
     pub(crate) original_anchor: u64,
-    pub(crate) run: RunScope,
+    pub run: RunScope,
 }
 
 impl EvidenceScope {
     /// The scope of `row` as read now; `Err(slot)` while a slot is open, as its send may land.
-    pub(crate) fn of(
-        row: &DeliveryRow,
-        attempts: &[AttemptRow],
-        run: &RunScope,
-    ) -> Result<Self, u8> {
+    pub fn of(row: &DeliveryRow, attempts: &[AttemptRow], run: &RunScope) -> Result<Self, u8> {
         if let Some(open) = attempts.iter().find(|attempt| attempt.result.is_none()) {
             return Err(open.slot);
         }
@@ -98,17 +107,26 @@ impl PermissionProof {
     }
 }
 
-/// One pass that read every page from its fixed upper bound down to the anchor.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct CompletedPass {
-    scope: EvidenceScope,
-    number: u8,
-    /// The newest id of the pass's first page; `None` when the channel had no message at all.
-    upper: Option<u64>,
-    started_at: Instant,
-    completed_at: Instant,
-    proof: PermissionProof,
+mod completed_pass {
+    use super::{EvidenceScope, Instant, PermissionProof};
+
+    /// One pass that read every page from its fixed upper bound down to the anchor.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct CompletedPass {
+        pub(super) scope: EvidenceScope,
+        pub(super) number: u8,
+        /// The newest id of the pass's first page; `None` when the channel had no message at all.
+        pub(super) upper: Option<u64>,
+        pub(super) started_at: Instant,
+        pub(super) completed_at: Instant,
+        pub(super) proof: PermissionProof,
+    }
 }
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use completed_pass::CompletedPass;
+#[cfg(any(test, feature = "test-support"))]
+pub use completed_pass::CompletedPass;
 
 impl CompletedPass {
     pub(super) fn new(
@@ -132,12 +150,22 @@ impl CompletedPass {
         self.upper
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn started_at_for_test(&self) -> Instant {
+        self.started_at()
+    }
+
     pub(crate) fn started_at(&self) -> Instant {
         self.started_at
     }
 
     pub(crate) fn completed_at(&self) -> Instant {
         self.completed_at
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn proof_message_id_for_test(&self) -> u64 {
+        self.proof().message_id()
     }
 
     pub(crate) fn proof(&self) -> &PermissionProof {
@@ -148,7 +176,7 @@ impl CompletedPass {
 /// Two clean passes in order and on time over one scope. Fields stay private so nothing outside
 /// the probe can assemble one.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct NotFoundEvidence {
+pub struct NotFoundEvidence {
     passes: [CompletedPass; 2],
 }
 
@@ -169,12 +197,32 @@ impl NotFoundEvidence {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn scope_for_test(&self) -> &EvidenceScope {
+        self.scope()
+    }
+
     pub(crate) fn scope(&self) -> &EvidenceScope {
         &self.passes[0].scope
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn passes_for_test(&self) -> &[CompletedPass; 2] {
+        self.passes()
+    }
+
     pub(crate) fn passes(&self) -> &[CompletedPass; 2] {
         &self.passes
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn validate_current_for_test(
+        &self,
+        row: &DeliveryRow,
+        attempts: &[AttemptRow],
+        run: &RunScope,
+    ) -> bool {
+        self.validate_current(row, attempts, run)
     }
 
     /// Whether the evidence still describes the row, slots and reader as read now. Approval,

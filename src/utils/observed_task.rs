@@ -6,7 +6,7 @@ use std::panic::AssertUnwindSafe;
 
 use futures::FutureExt;
 
-pub(crate) fn spawn_observed<F>(task_name: &'static str, future: F) -> tokio::task::JoinHandle<()>
+pub fn spawn_observed<F>(task_name: &'static str, future: F) -> tokio::task::JoinHandle<()>
 where
     F: Future<Output = ()> + Send + 'static,
 {
@@ -27,7 +27,7 @@ where
     }))
 }
 
-pub(crate) fn panic_payload_summary(payload: &(dyn Any + Send)) -> String {
+pub fn panic_payload_summary(payload: &(dyn Any + Send)) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {
         return (*message).to_string();
     }

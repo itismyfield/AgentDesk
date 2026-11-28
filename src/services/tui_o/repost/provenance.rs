@@ -17,7 +17,7 @@ use crate::services::tui_o::store::ledger::PieceRecord;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum ProvenanceEntry {
+pub enum ProvenanceEntry {
     /// Re-post turned on. Serials below `frontier` were prepared before and are never re-posted.
     Activated { generation: u64, frontier: u64 },
     /// An original reached its POST under the bounded transport while re-post was on.
@@ -39,7 +39,7 @@ pub(crate) enum ProvenanceEntry {
 
 impl ProvenanceEntry {
     /// The intent for `record` about to be posted, or `None` when no re-post may ever cover it.
-    pub(crate) fn intent(serial: u64, record: &PieceRecord, generation: u64) -> Option<Self> {
+    pub fn intent(serial: u64, record: &PieceRecord, generation: u64) -> Option<Self> {
         let key = piece_of(record)?;
         let ids = RepostIds::for_piece(&marker(&key))?;
         Some(Self::Intent {
@@ -60,22 +60,34 @@ struct ProvenanceLine {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Activation {
-    pub(crate) generation: u64,
+pub struct Activation {
+    pub generation: u64,
     pub(crate) frontier: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Intent {
-    pub(crate) key: Option<PieceKey>,
-    pub(crate) payload_sha256: String,
-    /// The activation the original was sent under.
-    pub(crate) generation: u64,
+mod intent {
+    use super::PieceKey;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Intent {
+        #[cfg(any(test, feature = "test-support"))]
+        pub key: Option<PieceKey>,
+        #[cfg(not(any(test, feature = "test-support")))]
+        pub(crate) key: Option<PieceKey>,
+        pub(crate) payload_sha256: String,
+        /// The activation the original was sent under.
+        pub(crate) generation: u64,
+    }
 }
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use intent::Intent;
+#[cfg(any(test, feature = "test-support"))]
+pub use intent::Intent;
 
 /// The replayed sidecar.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Provenance {
+pub struct Provenance {
     /// Every activation by generation; a later one never takes an earlier one's originals.
     activations: BTreeMap<u64, u64>,
     intents: BTreeMap<u64, Intent>,
@@ -102,17 +114,27 @@ impl Provenance {
             .is_some_and(|&frontier| serial >= frontier)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn intent_for_test(&self, serial: u64) -> Option<&Intent> {
+        self.intent(serial)
+    }
+
     pub(crate) fn intent(&self, serial: u64) -> Option<&Intent> {
         self.intents.get(&serial)
     }
 
     /// Serials whose admission was started and not seen through.
-    pub(crate) fn pending(&self) -> impl Iterator<Item = u64> + '_ {
+    pub fn pending(&self) -> impl Iterator<Item = u64> + '_ {
         self.pending.difference(&self.admitted).copied()
     }
 
     pub(crate) fn started(&self, serial: u64) -> bool {
         self.pending.contains(&serial) || self.admitted.contains(&serial)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn reported_for_test(&self, serial: u64) -> bool {
+        self.reported(serial)
     }
 
     pub(crate) fn reported(&self, serial: u64) -> bool {
@@ -157,20 +179,20 @@ impl Provenance {
 
 /// The sidecar file of one channel and its replayed state.
 #[derive(Debug)]
-pub(crate) struct ProvenanceLog {
+pub struct ProvenanceLog {
     path: PathBuf,
     state: Provenance,
     /// Set when an append failed part way: its bytes may sit at the tail, so nothing more is
     /// written until a reopen cuts them.
     poisoned: bool,
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fail_after: Option<usize>,
+    pub fail_after: Option<usize>,
 }
 
 impl ProvenanceLog {
     /// Opens or creates the sidecar. A damaged line is an error: without the file nothing proves
     /// a piece was an on original, so nothing may be re-posted.
-    pub(crate) fn open(path: &Path) -> io::Result<Self> {
+    pub fn open(path: &Path) -> io::Result<Self> {
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -188,12 +210,12 @@ impl ProvenanceLog {
         })
     }
 
-    pub(crate) fn state(&self) -> &Provenance {
+    pub fn state(&self) -> &Provenance {
         &self.state
     }
 
     /// Counts the entry only once it is synced.
-    pub(crate) fn append(&mut self, entry: ProvenanceEntry) -> io::Result<()> {
+    pub fn append(&mut self, entry: ProvenanceEntry) -> io::Result<()> {
         let line = ProvenanceLine {
             at: Utc::now(),
             entry: entry.clone(),
@@ -223,7 +245,7 @@ impl ProvenanceLog {
     }
 
     /// Records an observed off-to-on switch; pieces prepared before `frontier` stay out.
-    pub(crate) fn activate(&mut self, frontier: u64) -> io::Result<Activation> {
+    pub fn activate(&mut self, frontier: u64) -> io::Result<Activation> {
         let generation = self
             .state
             .activation()

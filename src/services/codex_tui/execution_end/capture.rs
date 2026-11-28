@@ -8,7 +8,7 @@ use crate::services::tui_o::store::codex_end::{CodexEnd, ContextSnapshot, EndBas
 use crate::services::tui_prompt_dedupe::binding_context::{self, SpawnNonceMarker};
 use crate::services::tui_prompt_dedupe::binding_events as p5;
 
-pub(crate) struct CapturedOldExecution {
+pub struct CapturedOldExecution {
     pub(super) record: CodexEnd,
     pub(super) pane_pid: u32,
     pub(super) identity: ProcessIdentity,
@@ -16,7 +16,7 @@ pub(crate) struct CapturedOldExecution {
     pub(super) epoch: u64,
 }
 
-pub(crate) fn capture(channel: u64, pane: &str) -> Result<CapturedOldExecution, String> {
+pub fn capture(channel: u64, pane: &str) -> Result<CapturedOldExecution, String> {
     tc::with_tmux_source_authority(pane, |authority| capture_under(channel, authority))
 }
 

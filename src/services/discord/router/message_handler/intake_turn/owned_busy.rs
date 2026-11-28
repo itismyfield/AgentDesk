@@ -6,14 +6,10 @@ use crate::services::discord::queue_io::input_owner::{claude_handoff, held_watch
 #[path = "owned_busy/missing_watch.rs"]
 mod missing_watch;
 pub(super) use missing_watch::guard as watch_guard;
+#[path = "owned_busy/dead_bound.rs"]
+pub(in crate::services::discord) mod dead_bound;
 
 const SOURCE_HELD: &str = "busy_source_unavailable";
-
-enum RecoveryFailure {
-    Reobserve(String),
-    Retry(String),
-    Refused(String),
-}
 
 enum HoldKind {
     Observe,
@@ -103,7 +99,7 @@ impl OwnerTurn {
         session: Option<&str>,
         key: Option<&str>,
         owner: Option<Self>,
-        fresh: bool,
+        (fresh, transition): (bool, &tokio::sync::OwnedMutexGuard<()>),
     ) -> Result<(Option<Self>, bool), ()> {
         let Some(owner) = owner else {
             return Ok((None, true));
@@ -163,7 +159,7 @@ impl OwnerTurn {
                         .recover_or_discard(
                             shared,
                             (provider, channel, key, session),
-                            &host,
+                            (&host, transition),
                             &observation,
                         )
                         .await;
@@ -209,106 +205,31 @@ impl OwnerTurn {
         self,
         shared: &Shared,
         (provider, channel, key, session): (&ProviderKind, ChannelId, Option<&str>, &str),
-        host: &TurnHost,
+        (host, transition): (&TurnHost, &tokio::sync::OwnedMutexGuard<()>),
         observation: &BusyObservation,
     ) -> Result<(Option<Self>, bool), ()> {
-        use crate::db::dispatched_sessions::hosted_execution::{HostedRecord, HostedState};
-        use crate::services::claude::herdr_turn::HoldRelease;
-        use crate::services::herdr_launch::retire::{self, RetireRefusal, Scope};
-        use RecoveryFailure::{Refused, Reobserve, Retry};
-        let refused = |reason: &str| Refused(reason.into());
-        let recovery = async {
-            let TurnHost::Herdr(plan) = host else {
-                return Err(refused("host is not a local Herdr execution"));
-            };
-            let row = plan
-                .row
-                .as_ref()
-                .ok_or_else(|| refused("hosted row unavailable"))?;
-            let HostedRecord::Known(record) = &row.record else {
-                return Err(refused("hosted record unreadable"));
-            };
-            let root = crate::config::runtime_root()
-                .ok_or_else(|| Retry("runtime root unavailable".into()))?;
-            let node = crate::config::session_hosts::local_node()
-                .ok_or_else(|| Retry("local node unavailable".into()))?;
-            let at = record
-                .location
-                .as_ref()
-                .ok_or_else(|| refused("recorded pane unavailable"))?;
-            if record.state != HostedState::Bound
-                || record.owner.provider != "claude"
-                || record.owner.discord_token_hash != shared.token_hash
-                || record.owner.channel_id != channel.get().to_string()
-                || record.owner.logical_key != session
-                || root != std::path::Path::new(&record.owner.runtime_root)
-                || node != record.owner.owner_node
-                || record.owner.owner_node != plan.endpoint.execution_node
-                || at.execution_node != plan.endpoint.execution_node
-                || at.endpoint_config_key != plan.endpoint.config_key
-                || at.socket_addr != plan.endpoint.socket_addr
-                || at.named_session != plan.endpoint.herdr_session
-            {
-                return Err(refused("local execution owner or endpoint differs"));
-            }
-            let pool = shared
-                .pg_pool
-                .as_ref()
-                .ok_or_else(|| Retry("database unavailable".into()))?;
-            crate::services::discord::herdr_terminate::root_replaced::current(pool, row)
-                .await
-                .map_err(Retry)?;
-            let retired = retire::observed(pool, row, Scope::Missing)
-                .await
-                .map_err(|error| {
-                    let reason = format!("retire: {error:?}");
-                    match error {
-                        RetireRefusal::Unproven(_) | RetireRefusal::ProviderRunning => {
-                            Reobserve(reason)
-                        }
-                        RetireRefusal::Changed(_) | RetireRefusal::NoLocalEndpoint => Retry(reason),
-                        RetireRefusal::NoRow(_) => Refused(reason),
-                    }
-                })?;
-            if retired.hold != HoldRelease::Released {
-                return Err(refused(
-                    "retired execution input hold could not be released",
-                ));
-            }
-            crate::services::tui_prompt_dedupe::withhold_herdr_execution(
-                session,
-                Some(&record.execution_nonce),
-            );
-            self.recovery.mark();
-            let mut expected = record.clone();
-            expected.state = HostedState::Retired;
-            match crate::services::turn_host::for_turn(Some(pool), provider, channel.get(), key)
-                .await
-            {
-                TurnHost::Herdr(next)
-                    if next
-                        .row
-                        .as_ref()
-                        .is_some_and(|row| row.record == HostedRecord::Known(expected.clone())) =>
-                {
-                    Ok(())
-                }
-                _ => Err(refused(
-                    "fresh Herdr execution is not admissible after retirement",
-                )),
-            }
-        }
+        use dead_bound::DeadBound::{Refused, Reobserve, Retry};
+        let marked = self.recovery.clone();
+        let recovery = dead_bound::recover(
+            shared,
+            (provider, channel, key, session),
+            host,
+            &self.mailbox,
+            dead_bound::LeaseRef::Borrow(transition),
+            move || marked.mark(),
+        )
         .await;
         let (reason, probe) = match recovery {
             Ok(()) => return Ok((Some(self.finish_reobservation().await?), false)),
             Err(Refused(reason)) => {
                 decided(channel, "discard", &reason, observation);
                 let failure = super::super::start_failure::Failure::owner(&self);
-                let result = failure
-                    .discard(Some(shared.clone()), channel, reason)
-                    .await
-                    .map(|_| ());
-                let _ = self.settled.send(result.map_err(effect::unsent));
+                // Nothing reached the provider: the refusal settles as a non-send, never a success.
+                let refused = match failure.fail(Some(shared.clone()), channel, reason).await {
+                    Ok(_) => super::super::start_failure::RECOVERY_REFUSED.to_string(),
+                    Err(error) => effect::unsent(error),
+                };
+                let _ = self.settled.send(Err(refused));
                 return Err(());
             }
             Err(Reobserve(reason)) => (

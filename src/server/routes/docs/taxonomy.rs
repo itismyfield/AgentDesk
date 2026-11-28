@@ -4,16 +4,16 @@ use std::collections::BTreeMap;
 use super::inventory::EndpointDoc;
 
 #[derive(Debug, Clone, Serialize)]
-pub(super) struct CategorySummary {
+pub(super) struct CategorySummary<'a> {
     pub(super) name: &'static str,
     pub(super) count: usize,
     pub(super) description: &'static str,
-    pub(super) subcategories: Vec<SubcategorySummary>,
+    pub(super) subcategories: Vec<SubcategorySummary<'a>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(super) struct SubcategorySummary {
-    pub(super) name: &'static str,
+pub(super) struct SubcategorySummary<'a> {
+    pub(super) name: &'a str,
     pub(super) count: usize,
     pub(super) description: &'static str,
 }
@@ -132,17 +132,20 @@ pub(super) fn group_description(group: &str) -> &'static str {
 
 /// Returns the effective fine-grained category for an endpoint (subcategory if
 /// present, otherwise canonical category).
-pub(super) fn effective_category(endpoint: &EndpointDoc) -> &'static str {
-    endpoint.subcategory.unwrap_or(endpoint.category)
+pub(super) fn effective_category(endpoint: &EndpointDoc) -> &str {
+    endpoint
+        .subcategory
+        .as_deref()
+        .unwrap_or(&endpoint.category)
 }
 
 /// For a given top-level group, return the list of distinct fine-grained
 /// categories under it plus their endpoint counts, in a deterministic order.
-pub(super) fn categories_for_group(
-    endpoints: &[EndpointDoc],
+pub(super) fn categories_for_group<'a>(
+    endpoints: &'a [EndpointDoc],
     group: &str,
-) -> Vec<(&'static str, usize)> {
-    let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
+) -> Vec<(&'a str, usize)> {
+    let mut counts = BTreeMap::new();
     for endpoint in endpoints {
         let category = effective_category(endpoint);
         if category_to_group(category) == group {
@@ -215,10 +218,10 @@ pub(super) fn category_description(category: &str) -> &'static str {
     }
 }
 
-pub(super) fn category_summaries(endpoints: &[EndpointDoc]) -> Vec<CategorySummary> {
-    let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
+pub(super) fn category_summaries(endpoints: &[EndpointDoc]) -> Vec<CategorySummary<'_>> {
+    let mut counts = BTreeMap::new();
     for endpoint in endpoints {
-        *counts.entry(endpoint.category).or_default() += 1;
+        *counts.entry(endpoint.category.as_str()).or_default() += 1;
     }
 
     CANONICAL_CATEGORIES
@@ -227,19 +230,19 @@ pub(super) fn category_summaries(endpoints: &[EndpointDoc]) -> Vec<CategorySumma
             name,
             count: counts.get(name).copied().unwrap_or_default(),
             description: category_description(name),
-            subcategories: subcategory_summaries(endpoints, name),
+            subcategories: subcategory_summaries(endpoints.iter(), name),
         })
         .collect()
 }
 
-pub(super) fn subcategory_summaries(
-    endpoints: &[EndpointDoc],
+pub(super) fn subcategory_summaries<'a>(
+    endpoints: impl Iterator<Item = &'a EndpointDoc>,
     category: &str,
-) -> Vec<SubcategorySummary> {
-    let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
+) -> Vec<SubcategorySummary<'a>> {
+    let mut counts = BTreeMap::new();
     for endpoint in endpoints {
         if endpoint.category == category {
-            let subcategory = endpoint.subcategory.unwrap_or(endpoint.category);
+            let subcategory = effective_category(endpoint);
             *counts.entry(subcategory).or_default() += 1;
         }
     }

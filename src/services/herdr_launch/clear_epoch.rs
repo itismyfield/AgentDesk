@@ -40,10 +40,10 @@ fn cell(key: &Key) -> Arc<Cell> {
 
 /// The restart postlude keeps this cell alive across a predecessor's exact termination.
 #[cfg(unix)]
-pub(crate) struct Epoch(Arc<Cell>, Option<u64>);
+pub struct Epoch(Arc<Cell>, Option<u64>);
 
 #[cfg(unix)]
-pub(crate) fn snapshot(provider: &str, token_hash: &str, channel: u64) -> Epoch {
+pub fn snapshot(provider: &str, token_hash: &str, channel: u64) -> Epoch {
     let cell = cell(&(provider.into(), token_hash.into(), channel));
     let epoch = {
         let state = cell.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -54,15 +54,15 @@ pub(crate) fn snapshot(provider: &str, token_hash: &str, channel: u64) -> Epoch 
 
 #[cfg(unix)]
 impl Epoch {
-    pub(crate) fn unchanged(&self) -> bool {
+    pub fn unchanged(&self) -> bool {
         let state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
         state.clearing == 0 && self.1 == Some(state.epoch)
     }
 }
 
-pub(crate) struct ClearGuard(Arc<Cell>);
+pub struct ClearGuard(Arc<Cell>);
 
-pub(crate) fn begin_clear(provider: &str, token_hash: &str, channel: u64) -> ClearGuard {
+pub fn begin_clear(provider: &str, token_hash: &str, channel: u64) -> ClearGuard {
     let cell = cell(&(provider.into(), token_hash.into(), channel));
     {
         let mut state = cell.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -75,7 +75,7 @@ pub(crate) fn begin_clear(provider: &str, token_hash: &str, channel: u64) -> Cle
 
 impl ClearGuard {
     #[cfg(any(unix, test))]
-    pub(crate) fn overlapped_startup(&self) -> bool {
+    pub fn overlapped_startup(&self) -> bool {
         self.0
             .state
             .lock()
@@ -83,7 +83,7 @@ impl ClearGuard {
             .overlap
     }
 
-    pub(crate) async fn wait_idle(&self) {
+    pub async fn wait_idle(&self) {
         loop {
             let notified = self.0.changed.notified();
             tokio::pin!(notified);
@@ -109,12 +109,21 @@ impl Drop for ClearGuard {
     }
 }
 
-pub(crate) struct Scope {
-    key: Key,
-    cell: Arc<Cell>,
-    epoch: u64,
-    finished: AtomicBool,
+mod scope {
+    use super::*;
+
+    pub struct Scope {
+        pub(super) key: Key,
+        pub(super) cell: Arc<Cell>,
+        pub(super) epoch: u64,
+        pub(super) finished: AtomicBool,
+    }
 }
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use scope::Scope;
+#[cfg(any(test, feature = "test-support"))]
+pub use scope::Scope;
 
 impl Scope {
     fn register(key: Key) -> Result<Arc<Self>, String> {
@@ -135,12 +144,17 @@ impl Scope {
         }))
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn effect_permit_for_test(self: &Arc<Self>) -> Result<EffectPermit, String> {
+        self.check_epoch()?.begin_effect()
+    }
+
     pub(crate) fn check_epoch(self: &Arc<Self>) -> Result<Checked, String> {
         let state = self.cell.state.lock().unwrap_or_else(|e| e.into_inner());
         self.allowed(&state)?;
         drop(state);
-        #[cfg(test)]
-        tests::point(&self.key, tests::Point::Checked);
+        #[cfg(any(test, feature = "test-support"))]
+        test_support::point(&self.key, test_support::Point::Checked);
         Ok(Checked(Arc::clone(self)))
     }
 
@@ -149,6 +163,11 @@ impl Scope {
             return Err("herdr clear changed the launch epoch".into());
         }
         Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn finish_start_for_test(&self) {
+        self.finish_start()
     }
 
     pub(crate) fn finish_start(&self) {
@@ -170,7 +189,16 @@ impl Drop for Scope {
 }
 
 pub(crate) struct Checked(Arc<Scope>);
-pub(crate) struct EffectPermit(Arc<Cell>);
+mod effect_permit {
+    use super::*;
+
+    pub struct EffectPermit(pub(super) Arc<Cell>);
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use effect_permit::EffectPermit;
+#[cfg(any(test, feature = "test-support"))]
+pub use effect_permit::EffectPermit;
 
 impl Checked {
     pub(crate) fn begin_effect(&self) -> Result<EffectPermit, String> {
@@ -179,8 +207,8 @@ impl Checked {
         state.effects += 1;
         drop(state);
         let permit = EffectPermit(Arc::clone(&self.0.cell));
-        #[cfg(test)]
-        tests::point(&self.0.key, tests::Point::Authorized);
+        #[cfg(any(test, feature = "test-support"))]
+        test_support::point(&self.0.key, test_support::Point::Authorized);
         Ok(permit)
     }
 }
@@ -196,12 +224,18 @@ impl Drop for EffectPermit {
     }
 }
 
-pub(crate) struct Launching {
+pub struct Launching {
     scope: Arc<Scope>,
     previous: Option<Option<Arc<Scope>>>,
 }
 
 impl Launching {
+    #[cfg(any(unix, test))]
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn enter_for_test(owner: &HostedOwner) -> Result<Self, String> {
+        Self::enter(owner)
+    }
+
     #[cfg(any(unix, test))]
     pub(crate) fn enter(owner: &HostedOwner) -> Result<Self, String> {
         let mut guard = Self::for_launch(owner)?;
@@ -209,7 +243,7 @@ impl Launching {
         Ok(guard)
     }
 
-    pub(crate) fn for_launch(owner: &HostedOwner) -> Result<Self, String> {
+    pub fn for_launch(owner: &HostedOwner) -> Result<Self, String> {
         let key = (
             owner.provider.clone(),
             owner.discord_token_hash.clone(),
@@ -231,6 +265,11 @@ impl Launching {
             scope,
             previous: None,
         })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn scope_for_test(&self) -> Arc<Scope> {
+        self.scope()
     }
 
     pub(crate) fn scope(&self) -> Arc<Scope> {
@@ -266,5 +305,8 @@ impl Drop for Current {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
+
 #[cfg(test)]
-pub(crate) mod tests;
+mod tests;

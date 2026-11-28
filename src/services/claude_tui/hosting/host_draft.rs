@@ -21,12 +21,17 @@ const DRAFT_CLEAR_ATTEMPTS: usize = 2;
 const DRAFT_KEY_SETTLE: Duration = Duration::from_millis(120);
 
 /// The host a warm follow-up drives and the gate admitting each mutation.
-pub(crate) struct FollowupHost<'a> {
+pub struct FollowupHost<'a> {
     pub(crate) target: InputTarget,
     pub(crate) gate: &'a dyn MutationGate,
 }
 
 impl FollowupHost<'static> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn legacy_tmux_for_test(session_name: &str) -> Self {
+        Self::legacy_tmux(session_name)
+    }
+
     /// Production entry, decided before any IO: no Herdr selector exists, so
     /// the follow-up drives the legacy tmux session of that name.
     pub(crate) fn legacy_tmux(session_name: &str) -> Self {
@@ -38,6 +43,11 @@ impl FollowupHost<'static> {
 }
 
 impl<'a> FollowupHost<'a> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn herdr_for_test(target: &'a HerdrTarget) -> Self {
+        Self::herdr(target)
+    }
+
     /// A recorded Herdr pane, admitted by its own gate. The warm follow-up still drives
     /// tmux only, so it takes no input here and retire kills nothing.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -52,6 +62,11 @@ impl<'a> FollowupHost<'a> {
 impl FollowupHost<'_> {
     pub(crate) fn session(&self) -> Result<&str, InputRefusal> {
         self.target.tmux_session()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn retire_for_test(&self, reason_code: &str, reason: &str) -> HostInputOutcome {
+        self.retire(reason_code, reason)
     }
 
     /// Retires a confirmed tmux session the gate still admits; the result is

@@ -27,7 +27,7 @@ fn probe_failure_widens_to_live_or_ambiguous_readiness() {
         temp.path(),
         "case \"$FAKE_TMUX_MODE\" in missing) echo \"can't find session: test\" >&2; exit 1;; failed) echo 'connect failed: No such file or directory' >&2; exit 1;; *) exit 0;; esac",
     );
-    let _path = PathOverride::prepend(temp.path());
+    let _path = PathOverride::prepend_for_test(temp.path());
 
     let readiness =
         |name: &str| independent_tmux_readiness(name, &ProviderKind::Claude, None, None, None);

@@ -11,15 +11,30 @@ use std::sync::Arc;
 mod stderr;
 use stderr::StderrRead;
 
-pub(crate) struct RawTap(Option<Arc<LiveAttempt>>);
+pub struct RawTap(Option<Arc<LiveAttempt>>);
 
 impl RawTap {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_token_for_test(token: Option<&CancelToken>) -> Self {
+        Self::for_token(token)
+    }
+
     pub(crate) fn for_token(token: Option<&CancelToken>) -> Self {
         Self::claim(token, ProviderKind::Claude, None)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_codex_for_test(token: Option<&CancelToken>) -> Self {
+        Self::for_codex(token)
+    }
+
     pub(crate) fn for_codex(token: Option<&CancelToken>) -> Self {
         Self::claim(token, ProviderKind::Codex, None)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_file_for_test(token: Option<&CancelToken>) -> Self {
+        Self::for_file(token)
     }
 
     pub(crate) fn for_file(token: Option<&CancelToken>) -> Self {
@@ -49,8 +64,18 @@ impl RawTap {
         Self(live)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn active_for_test(&self) -> bool {
+        self.active()
+    }
+
     pub(crate) fn active(&self) -> bool {
         self.0.is_some()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn see_for_test(&self, seen: Seen) {
+        self.see(seen)
     }
 
     pub(crate) fn see(&self, seen: Seen) {
@@ -80,6 +105,11 @@ impl RawTap {
         if let Some(seen) = Seen::of_record(record_type, message) {
             self.see(seen);
         }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn file_activity_for_test(&self) {
+        self.file_activity()
     }
 
     pub(crate) fn file_activity(&self) {
@@ -136,6 +166,11 @@ impl RawTap {
     pub(crate) fn finish_error(self, delivered: bool, drained: Seen, message: &str, stderr: &str) {
         self.stale(message, stderr);
         self.finish(delivered, drained);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn finish_for_test(self, delivered: bool, drained: Seen) {
+        self.finish(delivered, drained)
     }
 
     pub(crate) fn finish(mut self, delivered: bool, drained: Seen) {

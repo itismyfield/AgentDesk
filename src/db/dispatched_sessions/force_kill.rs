@@ -33,7 +33,7 @@ type ForceKillSession = (
 
 /// The row a primary key or alias names, with the row's current primary key: every later read,
 /// write and tmux name must follow that key, never the tail of the key that was asked for.
-pub(crate) async fn load_force_kill_session_pg(
+pub async fn load_force_kill_session_pg(
     pool: &PgPool,
     session_key: &str,
 ) -> Result<Option<(String, ForceKillSession)>, String> {
@@ -44,15 +44,15 @@ pub(crate) async fn load_force_kill_session_pg(
 /// The selected row's own key, identity columns (provider, identity kind, token hash, channel)
 /// and hosted execution record, as the same read returned them.
 #[cfg(unix)]
-pub(crate) struct ForceKillHosted {
-    pub(crate) session_key: String,
-    pub(crate) identity: [Option<String>; 4],
-    pub(crate) hosted: Option<serde_json::Value>,
+pub struct ForceKillHosted {
+    pub session_key: String,
+    pub identity: [Option<String>; 4],
+    pub hosted: Option<serde_json::Value>,
 }
 
 /// [`load_force_kill_session_pg`]'s read with the selected row's hosted record.
 #[cfg(unix)]
-pub(crate) async fn load_force_kill_session_hosted_pg(
+pub async fn load_force_kill_session_hosted_pg(
     pool: &PgPool,
     session_key: &str,
 ) -> Result<Option<(ForceKillSession, ForceKillHosted)>, String> {
@@ -152,7 +152,7 @@ async fn select<R>(
     Ok(Some((session, read)))
 }
 
-pub(crate) async fn disconnect_session_and_prepare_retry_pg(
+pub async fn disconnect_session_and_prepare_retry_pg(
     pool: &PgPool,
     session_key: &str,
     active_dispatch_id: Option<&str>,
@@ -188,7 +188,7 @@ pub(crate) async fn disconnect_session_and_prepare_retry_pg(
 
 /// Fails the force-killed session's dispatch or, with `retry`, reads what its retry copies; a
 /// terminal dispatch is never rewritten. The session row is not touched here.
-pub(crate) async fn prepare_force_kill_retry_pg(
+pub async fn prepare_force_kill_retry_pg(
     pool: &PgPool,
     session_key: &str,
     active_dispatch_id: Option<&str>,
@@ -270,7 +270,7 @@ pub(crate) async fn prepare_force_kill_retry_pg(
     Ok(retry_meta)
 }
 
-pub(crate) async fn fail_force_killed_dispatch_without_retry_pg(
+pub async fn fail_force_killed_dispatch_without_retry_pg(
     pool: &PgPool,
     dispatch_id: &str,
     session_key: Option<&str>,

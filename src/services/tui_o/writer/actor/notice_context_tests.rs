@@ -111,7 +111,7 @@ impl Fixture {
     }
 
     fn decision(&self, batch: &Batch) -> Decision {
-        batch.decision(&self.origin, "context-owned", &self.frame)
+        batch.decision_for_test(&self.origin, "context-owned", &self.frame)
     }
 }
 

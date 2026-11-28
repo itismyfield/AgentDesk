@@ -7,7 +7,7 @@ use crate::services::provider::{CancelToken, cancel_requested};
 use crate::services::tui_o::shadow::ShadowProvider;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Refusal {
+pub enum Refusal {
     InvalidPrompt,
     UnpredictableRender,
     NotReady,

@@ -19,6 +19,19 @@ impl EvidencePort for Counted {
         self.calls[1].fetch_add(1, Ordering::SeqCst);
         self.inner.snapshot(origin)
     }
+    fn snapshot_since<'a>(
+        &'a self,
+        origin: NoticeOrigin,
+        known: Option<&'a [u64]>,
+    ) -> Held<'a, Result<Option<Snapshot>, String>> {
+        Box::pin(async move {
+            let snapshot = self.inner.snapshot_since(origin, known).await;
+            if matches!(snapshot, Ok(Some(_))) {
+                self.calls[1].fetch_add(1, Ordering::SeqCst);
+            }
+            snapshot
+        })
+    }
     fn offer(
         &self,
         observed: Observation,
@@ -160,12 +173,11 @@ async fn kept_port_still_drives_retries_when_reduce_is_skipped_pg() {
     poll(&mut rig.capture, &rig.port).await;
     let (reduced, before) = (rig.capture.sources.native_reductions(), rig.calls());
     poll(&mut rig.capture, &rig.port).await;
-    // Nothing changed, so nothing is reduced again; the port is retried, read for custody and
-    // offered the Idle handoff all the same.
+    // Retry still runs when there is no evidence or Idle handoff to offer.
     assert_eq!(rig.capture.sources.native_reductions(), reduced);
     let after = rig.calls();
-    assert_eq!((after[0], after[2]), (before[0] + 1, before[2] + 1));
-    assert!(reduced > 0 && after[1] > before[1]);
+    assert_eq!(after, [before[0] + 1, before[1], before[2], before[3]]);
+    assert!(reduced > 0);
     assert!(rig.saved().outcome.is_none());
     // Custody arrives with the transcript unchanged: the same port settles it and frees the queue.
     rig.custody().await;
@@ -205,9 +217,9 @@ async fn a_cleanup_left_by_a_failed_submit_is_finished_by_the_kept_ports_retry_p
 async fn a_cut_source_submits_nothing_until_a_reopened_seed_reads_new_rows_pg() {
     use sha2::Digest;
     let mut rig = Rig::new(83850021, false).await;
-    // Without custody the first receipt is offered and held, so every poll would offer it again.
+    // Populate the seed before custody arrives. An empty view can skip the Idle handoff.
     poll(&mut rig.capture, &rig.port).await;
-    assert!(rig.calls()[3] > 0 && rig.receipts().is_empty());
+    assert!(rig.capture.sources.native_reductions() > 0 && rig.receipts().is_empty());
     rig.custody().await;
     // Cut the same inode inside the row the receipt names; the registration offset is 0.
     let path = rig.f.ticket.source.as_ref().unwrap().transcript.clone();

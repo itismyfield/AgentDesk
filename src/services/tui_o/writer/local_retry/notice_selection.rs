@@ -29,6 +29,7 @@ pub(super) fn at(ledger: &LedgerState, serial: u64) -> Option<Pending> {
             index: root.piece_index,
             payload: root.payload.clone(),
             notice_origin: root.notice_origin.clone(),
+            reply: None,
         },
         due,
     })

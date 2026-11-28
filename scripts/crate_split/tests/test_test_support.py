@@ -922,7 +922,9 @@ class SourceLosses(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             roots = {}
             manifest = '[package]\nname = "{}"\nversion = "0.1.0"\n'
-            for side, gate in (("base", "test"), ("head", TS), ("plain", "all(test, unix)")):
+            # "repeat" keeps the old inner `cfg(test)` under the new outer gate, as an unchanged child module does.
+            for side, gate in (("base", "test"), ("head", TS), ("repeat", f"{TS})]\n#[cfg(test"),
+                               ("plain", "all(test, unix)")):
                 root = Path(tmp) / side
                 files = {"crates/k/src/t.rs": "#[test]\nfn one() {}\n",
                          "crates/k/Cargo.toml": manifest.format("k")}
@@ -937,7 +939,7 @@ class SourceLosses(unittest.TestCase):
                     (root / rel).write_text(text)
                 roots[side] = root
             base, _, base_libs = rts.platform_tests(roots["base"])
-            for side, moved in (("head", 1), ("plain", 0)):
+            for side, moved in (("head", 1), ("repeat", 1), ("plain", 0)):
                 head, _, head_libs = rts.platform_tests(roots[side])
                 losses = rts._source_losses(roots["base"], roots[side], base, head, base_libs, head_libs)
                 self.assertEqual(len(losses["relocated"]["linux"]), moved, (side, losses))

@@ -54,7 +54,7 @@ pub(in crate::services::codex) fn tui_preflight_with_policy(
 }
 
 #[cfg(unix)]
-pub(crate) fn successor_hooks_ready() -> bool {
+pub fn successor_hooks_ready() -> bool {
     verified_hook_eligibility(None).is_ok()
 }
 
@@ -136,7 +136,7 @@ pub(in crate::services::codex) fn preflight_codex_tui_turn_with_policy(
         resume_root.as_deref(),
         inherited_verified,
     )?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     BEFORE_PANE_EFFECT.with_borrow_mut(|slot| {
         if let Some(effect) = slot.take() {
             effect();
@@ -147,36 +147,34 @@ pub(in crate::services::codex) fn preflight_codex_tui_turn_with_policy(
 
 /// The TUI argv up to its prompt, for tests outside `codex`.
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn codex_tui_option_args_for_test(options: &CodexLaunchOptions) -> Vec<String> {
+pub fn codex_tui_option_args_for_test(options: &CodexLaunchOptions) -> Vec<String> {
     codex_tui_option_args(options)
 }
 
 /// The resolved Codex binary, for tests outside `codex`.
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn resolve_codex_binary_for_test() -> crate::services::platform::BinaryResolution {
+pub fn resolve_codex_binary_for_test() -> crate::services::platform::BinaryResolution {
     resolve_codex_binary()
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
 impl CodexTuiLaunchScript {
     /// The prepared incarnation, for tests outside `codex`.
-    pub(crate) fn prepared_for_test(&self) -> &PreparedIncarnation {
+    pub fn prepared_for_test(&self) -> &PreparedIncarnation {
         &self.prepared
     }
 
-    pub(crate) fn script_path_for_test(&self) -> &str {
+    pub fn script_path_for_test(&self) -> &str {
         &self.script_path
     }
 
-    pub(crate) fn owner_path_for_test(&self) -> &str {
+    pub fn owner_path_for_test(&self) -> &str {
         &self.owner_path
     }
 }
 
 /// The TUI argv up to its prompt; Herdr types the prompt into the composer instead.
-pub(in crate::services::codex) fn codex_tui_option_args(
-    options: &CodexLaunchOptions,
-) -> Vec<String> {
+pub fn codex_tui_option_args(options: &CodexLaunchOptions) -> Vec<String> {
     let mut args = Vec::new();
     if options.resume_session_id.is_some() {
         args.push("resume".to_string());
@@ -270,7 +268,7 @@ fn validate_herdr_resume_argv(args: &[String], session: &str) -> Result<(), Stri
 
 /// The Herdr pane command of one prepared incarnation, for tests outside this module.
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn prepare_codex_herdr_launch_for_test(
+pub fn prepare_codex_herdr_launch_for_test(
     prepared: &PreparedIncarnation,
     launchable: &CodexHerdrLaunchable,
     launch_options: &CodexLaunchOptions,
@@ -283,7 +281,7 @@ pub(crate) fn prepare_codex_herdr_launch_for_test(
 /// The Herdr pane command of one prepared incarnation: no prompt in the argv, `--no-daemon`,
 /// hooks and an exported home, with the Herdr pane variables unset right before the exec.
 #[cfg(unix)]
-pub(in crate::services::codex) fn prepare_codex_herdr_launch(
+pub fn prepare_codex_herdr_launch(
     prepared: &PreparedIncarnation,
     launchable: &CodexHerdrLaunchable,
     launch_options: &CodexLaunchOptions,
@@ -335,7 +333,7 @@ pub(in crate::services::codex) fn prepare_codex_herdr_launch(
 
 /// Fresh panes must carry no resume command, even if the renderer changes its option order.
 #[cfg(unix)]
-pub(crate) fn validate_herdr_fresh_argv(
+pub fn validate_herdr_fresh_argv(
     mode: &str,
     resume: Option<&str>,
     args: &[String],

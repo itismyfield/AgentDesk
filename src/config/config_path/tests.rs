@@ -334,6 +334,9 @@ fn test_item_spans(code: &str) -> Vec<std::ops::Range<usize>> {
 
 /// The rest of `code` after a test-only `#[cfg(..)]` attribute, or `None` for other lines.
 fn after_test_cfg(code: &str) -> Option<&str> {
+    if let Some(rest) = code.strip_prefix("#[cfg(any(test, feature = \"test-support\"))]") {
+        return Some(rest.trim());
+    }
     let found = TEST_CFG_RE.find(code).filter(|found| found.start() == 0)?;
     (!found.as_str().contains("not("))
         .then(|| code[found.end()..].split("//").next().unwrap().trim())

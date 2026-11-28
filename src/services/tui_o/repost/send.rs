@@ -20,14 +20,14 @@ const REPOST_NOTE: &str = "재확인 후 추가 전달";
 
 /// The identifiers every send of one piece carries: the full marker, and a nonce derived from it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RepostIds {
+pub struct RepostIds {
     nonce: String,
     marker: String,
 }
 
 impl RepostIds {
     /// `None` when the marker cannot travel intact; there is no re-post without one.
-    pub(crate) fn for_piece(marker: &str) -> Option<Self> {
+    pub fn for_piece(marker: &str) -> Option<Self> {
         let footer_chars = REPOST_NOTE.chars().count() + 1 + marker.chars().count();
         if marker.trim().is_empty() || footer_chars > FOOTER_MAX_CHARS {
             return None;
@@ -40,7 +40,7 @@ impl RepostIds {
         })
     }
 
-    pub(crate) fn nonce(&self) -> &str {
+    pub fn nonce(&self) -> &str {
         &self.nonce
     }
 
@@ -51,18 +51,34 @@ impl RepostIds {
 
 /// What one dispatch sends: the stored piece content unchanged, identifiers outside it.
 #[derive(Clone, Debug)]
-pub(crate) struct RepostEnvelope {
+pub struct RepostEnvelope {
     pub(crate) channel: u64,
     content: String,
     ids: RepostIds,
     additional: bool,
+    #[cfg(any(test, feature = "test-support"))]
+    pub output_origin:
+        Option<crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) output_origin:
         Option<crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
     /// The re-posted unit's push decision, made by the notification policy.
     pub(crate) silent: bool,
+    /// The message the original replied to; a deleted one leaves the re-post unreferenced.
+    pub(crate) reply_to: Option<u64>,
 }
 
 impl RepostEnvelope {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_reply_to_for_test(&mut self, reply_to: Option<u64>) {
+        self.reply_to = reply_to;
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn original_for_test(channel: u64, content: String, ids: RepostIds) -> Self {
+        Self::original(channel, content, ids)
+    }
+
     /// A piece's first post while re-posting is on: the content plus the shared nonce.
     pub(crate) fn original(channel: u64, content: String, ids: RepostIds) -> Self {
         Self {
@@ -72,7 +88,13 @@ impl RepostEnvelope {
             additional: false,
             output_origin: None,
             silent: false,
+            reply_to: None,
         }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn additional_for_test(channel: u64, content: String, ids: RepostIds) -> Self {
+        Self::additional(channel, content, ids)
     }
 
     /// A re-post: the same content and nonce, with the note and marker in an embed footer.
@@ -87,7 +109,7 @@ impl RepostEnvelope {
         &self.content
     }
 
-    pub(crate) fn message(&self) -> CreateMessage {
+    pub fn message(&self) -> CreateMessage {
         let nonce = serenity::model::channel::Nonce::String(self.ids.nonce.clone());
         let message = crate::services::discord::outbound::notification_policy::silence(
             CreateMessage::new(),
@@ -97,11 +119,26 @@ impl RepostEnvelope {
         .allowed_mentions(crate::services::message_outbox::mentions::relay_allowed_mentions())
         .nonce(nonce)
         .enforce_nonce(true);
+        let message = match self.reply_to {
+            Some(id) => message.reference_message(
+                serenity::MessageReference::from((
+                    serenity::ChannelId::new(self.channel),
+                    serenity::MessageId::new(id),
+                ))
+                .fail_if_not_exists(false),
+            ),
+            None => message,
+        };
         if !self.additional {
             return message;
         }
         let footer = format!("{REPOST_NOTE} {}", self.ids.marker);
         message.embed(CreateEmbed::new().footer(CreateEmbedFooter::new(footer)))
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn carries_marker_for_test(&self, created: &CreatedMessage) -> bool {
+        self.carries_marker(created)
     }
 
     /// A re-post counts as identified only when the created message kept its marker.
@@ -115,15 +152,27 @@ impl RepostEnvelope {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct CreatedMessage {
+pub struct CreatedMessage {
+    #[cfg(any(test, feature = "test-support"))]
+    pub id: u64,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) id: u64,
+    #[cfg(any(test, feature = "test-support"))]
+    pub author_id: u64,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) author_id: u64,
+    #[cfg(any(test, feature = "test-support"))]
+    pub content: String,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) content: String,
+    #[cfg(any(test, feature = "test-support"))]
+    pub footers: Vec<String>,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) footers: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum WireOutcome {
+pub enum WireOutcome {
     Created(CreatedMessage),
     Withheld(String),
     /// 400, 403 or 404: the channel refuses the bot.
@@ -146,14 +195,14 @@ struct WireCount {
 }
 
 /// Checked right before each request leaves.
-pub(crate) struct AttemptGuard {
+pub struct AttemptGuard {
     count: Arc<WireCount>,
     live: Arc<dyn Fn() -> bool + Send + Sync>,
 }
 
 impl AttemptGuard {
     /// Refuses once a counted request went out or `live` (holder, source, deadline) says stop.
-    pub(crate) fn begin(&self) -> Result<(), String> {
+    pub fn begin(&self) -> Result<(), String> {
         if self.count.counted.load(Ordering::SeqCst) > 0 {
             return Err("this dispatch already sent its counted POST".into());
         }
@@ -166,7 +215,7 @@ impl AttemptGuard {
     }
 
     /// The request just sent drew a 429, so it leaves the count.
-    pub(crate) fn throttled(&self) {
+    pub fn throttled(&self) {
         self.count.counted.fetch_sub(1, Ordering::SeqCst);
         self.count.throttled.fetch_add(1, Ordering::SeqCst);
     }
@@ -174,14 +223,26 @@ impl AttemptGuard {
 
 /// `wire == counted + throttled`, and `counted <= 1`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct DispatchReport {
+pub struct DispatchReport {
+    #[cfg(any(test, feature = "test-support"))]
+    pub outcome: WireOutcome,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) outcome: WireOutcome,
+    #[cfg(any(test, feature = "test-support"))]
+    pub wire: u32,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) wire: u32,
+    #[cfg(any(test, feature = "test-support"))]
+    pub counted: u32,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) counted: u32,
+    #[cfg(any(test, feature = "test-support"))]
+    pub throttled: u32,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) throttled: u32,
 }
 
-pub(crate) trait BoundedTransport {
+pub trait BoundedTransport {
     fn create(
         &self,
         envelope: &RepostEnvelope,
@@ -190,9 +251,14 @@ pub(crate) trait BoundedTransport {
 }
 
 /// The counts of one handed-over dispatch: the same cells its guard writes.
-pub(crate) struct DispatchCounts(Arc<WireCount>);
+pub struct DispatchCounts(Arc<WireCount>);
 
 impl DispatchCounts {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn report_for_test(&self, outcome: WireOutcome) -> DispatchReport {
+        self.report(outcome)
+    }
+
     pub(crate) fn report(&self, outcome: WireOutcome) -> DispatchReport {
         DispatchReport {
             outcome,
@@ -205,7 +271,7 @@ impl DispatchCounts {
 
 /// One dispatch's request, built with its guard inside but not yet polled, so the caller can
 /// poll it first under the gate and then own its timeout. Dropped unpolled, nothing was sent.
-pub(crate) fn hand_over(
+pub fn hand_over(
     transport: &impl BoundedTransport,
     envelope: &RepostEnvelope,
     live: Arc<dyn Fn() -> bool + Send + Sync>,
@@ -230,7 +296,7 @@ pub(crate) async fn send_bounded(
     send_within(transport, envelope, live, POST_TIMEOUT).await
 }
 
-pub(crate) async fn send_within(
+pub async fn send_within(
     transport: &impl BoundedTransport,
     envelope: &RepostEnvelope,
     live: Arc<dyn Fn() -> bool + Send + Sync>,

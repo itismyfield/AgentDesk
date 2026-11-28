@@ -11,7 +11,7 @@ pub(crate) fn probe_failed_to_missing(presence: HostPresence) -> bool {
 }
 
 /// Only a confirmed dead pane counts as dead; `ProbeError` preserves.
-pub(crate) fn dead_only_if_dead_or_absent(liveness: HostLiveness) -> bool {
+pub fn dead_only_if_dead_or_absent(liveness: HostLiveness) -> bool {
     liveness == HostLiveness::DeadOrAbsent
 }
 
@@ -60,12 +60,12 @@ pub(crate) fn has_live_pane_bool(session: HostSessionRef<'_>) -> bool {
 }
 
 /// `probe_failed_to_missing` over the tmux presence probe, taking the name.
-pub(crate) fn tmux_present_bool(name: &str) -> bool {
+pub fn tmux_present_bool(name: &str) -> bool {
     probe_failed_to_missing(TmuxHost.presence(HostSessionRef::tmux(name)))
 }
 
 /// `has_live_pane_bool` for a tmux session name.
-pub(crate) fn tmux_live_pane_bool(name: &str) -> bool {
+pub fn tmux_live_pane_bool(name: &str) -> bool {
     has_live_pane_bool(HostSessionRef::tmux(name))
 }
 

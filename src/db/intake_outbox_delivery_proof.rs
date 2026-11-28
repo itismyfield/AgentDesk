@@ -9,8 +9,8 @@ use chrono::{DateTime, Utc};
 use sqlx::{AssertSqlSafe, PgConnection, PgPool};
 
 #[derive(Clone, Copy, Debug, sqlx::FromRow)]
-pub(crate) struct StaleDispatchedRow {
-    pub(crate) id: i64,
+pub struct StaleDispatchedRow {
+    pub id: i64,
 }
 
 const LIST_STALE_DISPATCHED_SQL: &str = "SELECT id FROM public.intake_outbox
@@ -42,7 +42,7 @@ fn durable_inflight_liveness_case_sql(fresh_param: usize, absence_param: usize) 
 
 /// The query coalesces no matching `turn_active` rows to 0 (Absent), draining the fence for missing or non-active sessions.
 /// Deferring zero rows would fence dead turns forever; no other drain exists (`intake_dispatch.rs` only recovers stale Pending rows).
-pub(crate) fn durable_inflight_liveness_sql() -> String {
+pub fn durable_inflight_liveness_sql() -> String {
     let liveness = durable_inflight_liveness_case_sql(2, 3);
     let scope = DURABLE_INFLIGHT_SESSION_SCOPE_SQL;
     format!(
@@ -72,8 +72,8 @@ impl AbsentBasis {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct DurableInflightLiveness {
-    pub(crate) grade: i16,
+pub struct DurableInflightLiveness {
+    pub grade: i16,
     absent_basis: Option<AbsentBasis>,
 }
 
@@ -96,7 +96,7 @@ impl From<(i64, i64, i16)> for DurableInflightLiveness {
 }
 
 impl DurableInflightLiveness {
-    pub(crate) fn record_absence(self, outbox_id: i64, phase: &'static str) {
+    pub fn record_absence(self, outbox_id: i64, phase: &'static str) {
         if let Some(basis) = self.absent_basis {
             tracing::info!(
                 outbox_id,
@@ -113,7 +113,7 @@ fn normalize_limit(limit: i64) -> i64 {
 }
 
 #[allow(dead_code)]
-pub(crate) async fn list_stale_dispatched(
+pub async fn list_stale_dispatched(
     pool: &PgPool,
     cutoff: DateTime<Utc>,
     limit: i64,
@@ -126,7 +126,7 @@ pub(crate) async fn list_stale_dispatched(
         .await
 }
 
-pub(crate) async fn list_stale_spawned(
+pub async fn list_stale_spawned(
     pool: &PgPool,
     cutoff: DateTime<Utc>,
     limit: i64,
@@ -141,7 +141,7 @@ pub(crate) async fn list_stale_spawned(
 
 /// Whether any spawned or dispatched row remains unsettled.
 /// The sweep uses this to skip an idle table; open debt alone is not anomalous.
-pub(crate) async fn open_stamp_debt_exists(pool: &PgPool) -> Result<bool, sqlx::Error> {
+pub async fn open_stamp_debt_exists(pool: &PgPool) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM public.intake_outbox
           WHERE status IN ('spawned', 'dispatched'))",
@@ -157,7 +157,7 @@ pub(crate) async fn open_stamp_debt_exists(pool: &PgPool) -> Result<bool, sqlx::
 /// refreshed row returns unchanged without a CAS. `false` conflates absence,
 /// another state, and lock contention.
 #[allow(dead_code)]
-pub(crate) async fn try_lock_dispatched_for_proof(
+pub async fn try_lock_dispatched_for_proof(
     conn: &mut PgConnection,
     outbox_id: i64,
 ) -> Result<bool, sqlx::Error> {
@@ -178,7 +178,7 @@ pub(crate) async fn try_lock_dispatched_for_proof(
 /// active caller-owned transaction, and must pass that same connection here.
 /// Autocommit use is forbidden. Dispatch audit fields are intentionally kept.
 #[allow(dead_code)]
-pub(crate) async fn mark_done_from_delivery_proof(
+pub async fn mark_done_from_delivery_proof(
     conn: &mut PgConnection,
     outbox_id: i64,
 ) -> Result<bool, sqlx::Error> {
@@ -240,7 +240,7 @@ async fn lock_and_classify_durable_inflight(
 /// required so the post-lock statement observes a heartbeat that committed
 /// while session-lock acquisition waited.
 #[allow(dead_code)]
-pub(crate) async fn settle_dispatched_unknown(
+pub async fn settle_dispatched_unknown(
     conn: &mut PgConnection,
     outbox_id: i64,
     cutoff: DateTime<Utc>,
@@ -269,7 +269,7 @@ pub(crate) async fn settle_dispatched_unknown(
 /// transaction. The caller must commit or roll back the transaction; autocommit
 /// use is forbidden. The outbox and channel session locks remain held through
 /// the liveness recheck and terminal CAS.
-pub(crate) async fn settle_spawned_unknown(
+pub async fn settle_spawned_unknown(
     conn: &mut PgConnection,
     outbox_id: i64,
     cutoff: DateTime<Utc>,
@@ -321,7 +321,7 @@ async fn settle_operator_unknown(
 }
 
 /// Cutoff-free operator settlement. It never creates a retry child row.
-pub(crate) async fn settle_unknown_by_operator(
+pub async fn settle_unknown_by_operator(
     conn: &mut PgConnection,
     outbox_id: i64,
     status: IntakeOutboxStatus,

@@ -16,19 +16,19 @@ mod agent_sync;
 mod backpressure;
 #[cfg(test)]
 use backpressure::should_yield_for_counters;
-pub(crate) use backpressure::{PressureSnapshot, pressure_snapshot};
+pub use backpressure::{PressureSnapshot, pressure_snapshot};
 #[cfg(test)]
 mod intake_timing_pg_tests;
 mod pool_return;
 #[cfg(test)]
 mod pool_return_pg_tests;
 pub use advisory_lock::AdvisoryLockLease;
-pub(crate) use advisory_lock::PooledAdvisoryLock;
+pub use advisory_lock::PooledAdvisoryLock;
 pub use agent_sync::sync_agents_from_config_pg;
 use pool_return::{RETURN_CLEANUP_BUDGET, with_return_cleanup};
 pub(crate) mod shared_config;
 
-static POSTGRES_MIGRATOR: Migrator = sqlx::migrate!("./migrations/postgres");
+static POSTGRES_MIGRATOR: Migrator = sqlx::migrate!("../../migrations/postgres");
 const DEFAULT_PG_ACQUIRE_TIMEOUT_SECS: u64 = 10;
 const STARTUP_PG_ACQUIRE_TIMEOUT_SECS: u64 = 10;
 const DEFAULT_PG_IDLE_TIMEOUT_SECS: u64 = 5 * 60;
@@ -49,7 +49,7 @@ static FOREGROUND_RESERVE: AtomicU32 = AtomicU32::new(0);
 /// #3651: minimum interval between "yielding under pool pressure" log lines in
 /// a single background loop. The predicate is stateless, so each loop holds its
 /// own `Instant` and consults this to avoid log spam during sustained pressure.
-pub(crate) const BACKPRESSURE_LOG_THROTTLE: Duration = Duration::from_secs(30);
+pub const BACKPRESSURE_LOG_THROTTLE: Duration = Duration::from_secs(30);
 
 /// #3651: backpressure predicate for background chore loops.
 ///
@@ -99,7 +99,7 @@ struct PoolConnectSettings {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PgConnectFailureKind {
+pub enum PgConnectFailureKind {
     PoolTimedOut,
     /// The database carries migrations newer than this binary embeds; retrying cannot help.
     SchemaAhead,
@@ -107,27 +107,27 @@ pub(crate) enum PgConnectFailureKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PgConnectFailure {
+pub struct PgConnectFailure {
     kind: PgConnectFailureKind,
     message: String,
 }
 
 impl PgConnectFailure {
-    pub(crate) fn other(message: impl Into<String>) -> Self {
+    pub fn other(message: impl Into<String>) -> Self {
         Self {
             kind: PgConnectFailureKind::Other,
             message: message.into(),
         }
     }
 
-    pub(crate) fn schema_ahead(message: impl Into<String>) -> Self {
+    pub fn schema_ahead(message: impl Into<String>) -> Self {
         Self {
             kind: PgConnectFailureKind::SchemaAhead,
             message: message.into(),
         }
     }
 
-    pub(crate) fn from_sqlx(context: &str, error: sqlx::Error) -> Self {
+    pub fn from_sqlx(context: &str, error: sqlx::Error) -> Self {
         let kind = match &error {
             sqlx::Error::PoolTimedOut => PgConnectFailureKind::PoolTimedOut,
             _ => PgConnectFailureKind::Other,
@@ -138,7 +138,7 @@ impl PgConnectFailure {
         }
     }
 
-    pub(crate) fn kind(&self) -> PgConnectFailureKind {
+    pub fn kind(&self) -> PgConnectFailureKind {
         self.kind
     }
 }
@@ -318,9 +318,7 @@ pub async fn connect(config: &Config) -> Result<Option<PgPool>, String> {
 /// work. Its 10-second acquire deadline tolerates slow TCP/TLS/auth handshakes;
 /// the separate long-lived runtime pool is built only after initialization and
 /// retains the normal 10-second acquire timeout.
-pub(crate) async fn connect_for_bootstrap(
-    config: &Config,
-) -> Result<Option<PgPool>, PgConnectFailure> {
+pub async fn connect_for_bootstrap(config: &Config) -> Result<Option<PgPool>, PgConnectFailure> {
     connect_with_settings_typed(
         config,
         bootstrap_pool_settings(config),
@@ -331,7 +329,7 @@ pub(crate) async fn connect_for_bootstrap(
 
 /// Activate the eager long-lived runtime pool after bootstrap initialization.
 /// This stays typed so `PoolTimedOut` classification reaches bootstrap logs.
-pub(crate) async fn connect_runtime_after_bootstrap(
+pub async fn connect_runtime_after_bootstrap(
     config: &Config,
 ) -> Result<Option<PgPool>, PgConnectFailure> {
     let pool = connect_with_settings_typed(
@@ -360,7 +358,7 @@ pub async fn connect_for_startup(config: &Config) -> Result<Option<PgPool>, Stri
     Ok(pool)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub async fn connect_and_migrate(config: &Config) -> Result<Option<PgPool>, String> {
     let Some(pool) = connect(config).await? else {
         return Ok(None);
@@ -632,7 +630,7 @@ fn database_url_override() -> Option<String> {
 /// a missing base into a soft-skip. Every fixture that creates a database must
 /// use this authority; callers that can skip return `None`, while required
 /// lanes still get the hard failure below when `AGENTDESK_REQUIRE_PG=1`.
-pub(crate) fn postgres_test_database_url_base() -> Option<String> {
+pub fn postgres_test_database_url_base() -> Option<String> {
     let override_value = FIXTURE_BASE_OVERRIDE.with(|slot| slot.borrow().clone());
     let base = override_value.unwrap_or_else(|| {
         std::env::var("POSTGRES_TEST_DATABASE_URL_BASE")
@@ -813,7 +811,7 @@ fn lock_test_setup() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) struct PostgresTestLifecycleGuard {
+pub struct PostgresTestLifecycleGuard {
     _guard: std::sync::MutexGuard<'static, ()>,
 }
 
@@ -830,7 +828,7 @@ impl Drop for PostgresTestLifecycleGuard {
 
 #[cfg(any(test, feature = "test-support"))]
 #[track_caller]
-pub(crate) fn lock_test_lifecycle() -> PostgresTestLifecycleGuard {
+pub fn lock_test_lifecycle() -> PostgresTestLifecycleGuard {
     let mutex = POSTGRES_TEST_LIFECYCLE_LOCK.get_or_init(|| std::sync::Mutex::new(()));
     let guard = crate::test_support::lock_holder::PG_LIFECYCLE_LOCK.hold(|| {
         mutex
@@ -930,7 +928,7 @@ async fn connect_test_pool_with_max_connections_inner(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn connect_test_pool_with_max_connections(
+pub async fn connect_test_pool_with_max_connections(
     database_url: &str,
     label: &str,
     max_connections: u32,
@@ -941,7 +939,7 @@ pub(crate) async fn connect_test_pool_with_max_connections(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn connect_test_pool(database_url: &str, label: &str) -> Result<PgPool, String> {
+pub async fn connect_test_pool(database_url: &str, label: &str) -> Result<PgPool, String> {
     // Test helpers frequently create many isolated pools in parallel on CI.
     // Keep the default test pool lean so PG-backed route tests do not exhaust
     // the shared runner database just by setting up fixtures.
@@ -962,7 +960,7 @@ pub(crate) async fn connect_test_pool(database_url: &str, label: &str) -> Result
 // the awaits would reintroduce the CI race this lock was added to fix. Test-only.
 #[allow(clippy::await_holding_lock)]
 /// Created through `test_db_reclaim`, whose first-create sweep reclaims databases of provably dead test processes.
-pub(crate) async fn create_test_database(
+pub async fn create_test_database(
     admin_url: &str,
     database_name: &str,
     label: &str,
@@ -1197,7 +1195,7 @@ async fn connect_test_pool_and_migrate_inner(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn connect_test_pool_and_migrate(
+pub async fn connect_test_pool_and_migrate(
     database_url: &str,
     label: &str,
 ) -> Result<PgPool, String> {
@@ -1221,7 +1219,7 @@ async fn connect_test_pool_with_max_connections_and_migrate_inner(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn connect_test_pool_with_max_connections_and_migrate(
+pub async fn connect_test_pool_with_max_connections_and_migrate(
     database_url: &str,
     label: &str,
     max_connections: u32,
@@ -1364,7 +1362,7 @@ async fn drop_test_database_with_options(
 // `create_test_database` — `lock_test_setup()` is held across the teardown
 // awaits to keep concurrent PG test DB drops from racing. Test-only.
 #[allow(clippy::await_holding_lock)]
-pub(crate) async fn drop_test_database(
+pub async fn drop_test_database(
     admin_url: &str,
     database_name: &str,
     label: &str,
@@ -1377,7 +1375,7 @@ pub(crate) async fn drop_test_database(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn close_test_pool(pool: PgPool, label: &str) -> Result<(), String> {
+pub async fn close_test_pool(pool: PgPool, label: &str) -> Result<(), String> {
     tokio::time::timeout(TEST_POSTGRES_OP_TIMEOUT, pool.close())
         .await
         .map_err(|_| {

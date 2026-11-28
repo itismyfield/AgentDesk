@@ -417,10 +417,14 @@ impl Fixture {
 
     /// Binds `session_key`'s row to this pane's admitted Herdr execution, with the channel mirrored.
     async fn host_on_herdr(&self, session_key: &str, token: &str) {
-        use crate::db::dispatched_sessions::hosted_execution::{HostedState, tests};
-        let mut owner = tests::owner(&self.channel.get().to_string());
+        use crate::db::dispatched_sessions::hosted_execution::{HostedState, test_support};
+        let mut owner = test_support::owner(&self.channel.get().to_string());
         (owner.discord_token_hash, owner.logical_key) = (token.to_owned(), self.tmux.clone());
-        let hosted = tests::wire(&tests::record(&owner, "nonce-8261", HostedState::Bound));
+        let hosted = test_support::wire(&test_support::record(
+            &owner,
+            "nonce-8261",
+            HostedState::Bound,
+        ));
         sqlx::query("UPDATE sessions SET hosted_execution = $2 WHERE session_key = $1")
             .bind(session_key)
             .bind(hosted)

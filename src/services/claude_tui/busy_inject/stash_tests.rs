@@ -19,10 +19,10 @@ thread_local! {
 static STASH_CHANNELS: LazyLock<Mutex<HashSet<u64>>> = LazyLock::new(Default::default);
 
 /// Opens only this test's channel; unrelated parallel tests retain their own switches.
-pub(crate) struct StashChannelGuard(u64);
+pub struct StashChannelGuard(u64);
 
 impl StashChannelGuard {
-    pub(crate) fn new(channel: u64) -> Self {
+    pub fn new(channel: u64) -> Self {
         let mut channels = STASH_CHANNELS
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -73,7 +73,7 @@ const FAST: Timing = Timing {
 /// stash back, attach generation, a person, a barrier, and a faint idle placeholder only `-e` keeps.
 /// `drop.Enter` counts Enters the TUI ignores; `mute` loses the record, `late` lands it at a capture.
 /// An idle Enter on an empty composer submits the shown placeholder, counted in `suggested`.
-pub(crate) const FAKE_TUI: &str = r#"#!/bin/sh
+pub const FAKE_TUI: &str = r#"#!/bin/sh
 d='@D@'
 echo "$*" >> "$d/log"
 cursor() {
