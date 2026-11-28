@@ -100,6 +100,7 @@ fn started_unproven_wait_does_not_wake_until_evidence_or_due_pg() {
 
 #[test]
 fn s2b1_retired_resume_released_nonce_causes_pg() {
+    use crate::services::discord::runtime_store;
     use crate::services::turn_orchestrator::{
         PendingQueueItem,
         queued_head::v2::{Owner, Ticket, source_admission::Custody},
@@ -110,7 +111,7 @@ fn s2b1_retired_resume_released_nonce_causes_pg() {
     let nonce = never_attached(&fx, &launcher);
     let started = fx.start_provider(&launcher, false).unwrap();
     let _runtime = fx.rt.enter();
-    let queue_root = discord::runtime_store::discord_pending_queue_root().unwrap();
+    let queue_root = runtime_store::discord_pending_queue_root().unwrap();
     std::fs::create_dir_all(&queue_root).unwrap();
     let queues = tempfile::tempdir_in(queue_root).unwrap();
     let original: PendingQueueItem = serde_json::from_value(json!({

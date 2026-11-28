@@ -332,7 +332,21 @@ impl Intake {
         Self::with_launch(fx, started, expected, output_gate, (false, None), None)
     }
 
-    pub(in crate::services::discord::router::message_handler) fn with_launch(
+    pub(in crate::services::discord::router::message_handler) fn with_herdr_launch(
+        fx: &Fixture,
+        started: &Started,
+    ) -> Self {
+        Self::with_launch(
+            fx,
+            started,
+            ExpectedPin::Verified,
+            Arc::default(),
+            (true, None),
+            None,
+        )
+    }
+
+    fn with_launch(
         fx: &Fixture,
         started: &Started,
         expected: ExpectedPin,
@@ -952,7 +966,7 @@ fn an_early_new_herdr_execution_cannot_borrow_its_old_global_pin_pg() {
 }
 
 #[derive(Clone, Copy)]
-pub(in crate::services::discord::router::message_handler) enum ExpectedPin {
+enum ExpectedPin {
     Verified,
     Registered,
 }

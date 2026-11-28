@@ -871,7 +871,7 @@ mod herdr_owner_resume {
     use herdr_tests::{
         CHANNEL, Fixture, LIMIT, Launcher, Started,
         busy_entry_tests::{
-            ExpectedPin, INPUT, Intake, missing_input::recording_runtime, source_retry_drive,
+            INPUT, Intake, missing_input::recording_runtime, source_retry_drive,
             wait_for_idle_turn_to_unwind,
         },
         context_of, open_admission, reconnect,
@@ -1155,14 +1155,7 @@ mod herdr_owner_resume {
             202,
         );
         let original_runtime;
-        let mut intake = Intake::with_launch(
-            &fx,
-            &previous,
-            ExpectedPin::Verified,
-            Arc::default(),
-            (true, None),
-            None,
-        );
+        let mut intake = Intake::with_herdr_launch(&fx, &previous);
         original_runtime = recording_runtime(&mut intake, &fx, true);
         let HostedRecord::Known(mut old) = fx.record() else {
             panic!("bootstrap row")
@@ -1456,7 +1449,8 @@ mod herdr_owner_resume {
         intake.runtime.block_on(async {
             let granted = tick_and_grant_on_mailbox(&intake.mailbox, front.clone())
                 .await
-                .unwrap();
+                .unwrap()
+                .expect("the original is available to requeue");
             let claim = drive::claim_turn(&intake.mailbox, front.1.message_id, &granted)
                 .await
                 .unwrap()
