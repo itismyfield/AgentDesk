@@ -1,8 +1,7 @@
 use super::*;
-
-pub(crate) use crate::services::channel_roles::{
-    memory_settings_for_role, resolve_agent_memory_settings,
-};
+#[cfg(test)]
+use crate::domain::memory::MemoryBackendKind;
+use crate::domain::memory::ResolvedMemorySettings;
 
 pub(crate) fn memory_settings_for_binding(
     role_binding: Option<&RoleBinding>,

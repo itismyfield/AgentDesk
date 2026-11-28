@@ -1,13 +1,20 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { RefreshCw } from "lucide-react";
 import type { Department, DispatchedSession } from "../../types";
-import { localeName } from "../../i18n";
 import { getProviderMeta } from "../../app/providerTheme";
 import { formatRelativeTime } from "../../app/shellFormatting";
 import { Button } from "../../kit/free/button-clean";
 import { CodeBlock } from "../../kit/free/code-block-clean";
 import { ContextCompaction } from "../../kit/pro/context-compaction";
-import { Cap } from "../common/KitPrimitives";
+import {
+  analyzeReplyInvitation,
+  classifyRawOutputStop,
+  computePromptCacheStatus,
+  formatPromptCacheLabel,
+  formatStopBadgeLabel,
+} from "../../lib/agentObservability";
+import { useNow } from "../../lib/useNow";
+import { Cap, Chip } from "../common/KitPrimitives";
 import type { Translator } from "../agent-manager/types";
 import { fetchSessionOutput, normalizeTimestamp, sessionStateText, type SessionOutputSnapshot } from "./SessionPanelModel";
 
@@ -21,8 +28,8 @@ export function inferSessionContextLimit(model: string | null | undefined): numb
 }
 
 /** What the server sends about one unlinked session, under its row: state, Provider, summary, signals, key and live output preview. */
-export function SessionInfoCard({ id, session: s, departments, locale, tr, isKo }: {
-  id: string; session: DispatchedSession; departments: Department[]; locale: string; tr: Translator; isKo: boolean;
+export function SessionInfoCard({ id, session: s, tr, isKo }: {
+  id: string; session: DispatchedSession; departments?: Department[]; locale?: string; tr: Translator; isKo: boolean;
 }) {
   const [output, setOutput] = useState<SessionOutputSnapshot | null | undefined>(undefined);
   const [loadingOutput, setLoadingOutput] = useState(false);
@@ -41,27 +48,60 @@ export function SessionInfoCard({ id, session: s, departments, locale, tr, isKo 
     return () => ctrl.abort();
   }, [loadOutput]);
 
-  const department = departments.find((entry) => entry.id === s.department_id);
+  const nowMs = useNow(s.provider === "claude" ? 5_000 : 60_000);
   const lastSeen = normalizeTimestamp(s.last_seen_at), connected = normalizeTimestamp(s.connected_at);
   const at = (time: number) => new Date(time).toLocaleString(isKo ? "ko-KR" : "en-US");
   const providerLabel = getProviderMeta(s.provider).label;
+  const outputText = output?.available ? output.recent_output.trim() : "";
+  const cacheStatus = computePromptCacheStatus({
+    provider: s.provider,
+    lastActivityMs: lastSeen ?? connected,
+    isWorking: s.status === "working" || s.status === "turn_active",
+    recentOutput: outputText || null,
+    nowMs,
+  });
+  const stopDiag = classifyRawOutputStop(outputText, tr, nowMs);
+  const replyInvite = !stopDiag && s.status !== "working" && s.status !== "turn_active" ? analyzeReplyInvitation(outputText) : null;
   const rows = ([
     [tr("상태", "State"), `${sessionStateText(s, tr)} (${s.status})`],
     ["Provider", providerLabel],
     [tr("모델", "Model"), s.model],
+    [tr("프롬프트 캐시", "Prompt cache"), cacheStatus ? formatPromptCacheLabel(cacheStatus, tr) : null],
     [tr("세션 요약", "Summary"), s.session_info, "whitespace-pre-line"],
     [tr("마지막 신호", "Last signal"), lastSeen && `${formatRelativeTime(lastSeen, isKo)} · ${at(lastSeen)}`],
     [tr("접속", "Connected"), connected && at(connected)],
-    [tr("부서", "Department"), department && localeName(locale, department)],
     [tr("세션 ID", "Session ID"), s.id, "font-mono"],
     [tr("세션 키", "Session key"), s.session_key, "font-mono text-xs break-all"],
   ] satisfies Array<[string, ReactNode, string?]>).filter(([, value]) => value);
-
-  const outputText = output?.available ? output.recent_output.trim() : "";
   const hasTokenMetrics = typeof s.tokens === "number" && Number.isFinite(s.tokens) && s.tokens > 0;
 
   return (
     <div id={id} className="flex min-w-0 flex-col gap-3 border-t border-(--line-soft) bg-(--bg-1) px-3 py-3 text-[13px] leading-5 sm:px-4">
+      {(stopDiag || replyInvite) ? (
+        <div data-testid={`session-diagnosis-${s.id}`} className="flex min-w-0 flex-wrap items-center gap-2 rounded-(--r-sm) border border-(--line-soft) bg-(--bg-2) px-2.5 py-2 text-xs">
+          {stopDiag ? (
+            <>
+              <Chip tone="warn">{formatStopBadgeLabel(stopDiag, tr)}</Chip>
+              <span className="min-w-0 flex-1 text-(--fg-dim)">
+                {tr("최근 출력에서 프로바이더 한도 도달 신호가 감지됐어요.", "Provider usage limit detected in recent output.")}
+              </span>
+            </>
+          ) : replyInvite ? (
+            <>
+              <Chip tone={replyInvite.asksUser ? "warn" : "info"}>
+                {replyInvite.nudge === "go-ahead"
+                  ? tr("진행 확인 대기", "Awaiting go-ahead")
+                  : replyInvite.asksUser
+                    ? tr("답변 대기", "Awaiting reply")
+                    : tr("다음 단계 안내", "Next step noted")}
+              </Chip>
+              <span className="min-w-0 flex-1 truncate text-(--fg)" title={replyInvite.quote}>
+                “{replyInvite.quote}”
+              </span>
+            </>
+          ) : null}
+        </div>
+      ) : null}
       <dl className="m-0 grid min-w-0 grid-cols-[5.5rem_minmax(0,1fr)] gap-x-3 gap-y-1.5">
         {rows.map(([label, value, valueClass]) => (
           <div key={label} className="contents">

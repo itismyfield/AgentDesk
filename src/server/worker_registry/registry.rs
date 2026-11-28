@@ -2,6 +2,10 @@
 
 use super::*;
 
+#[cfg(all(test, unix))]
+#[path = "outbox_slot_reset_pg_tests.rs"]
+mod outbox_slot_reset_pg_tests;
+
 impl SupervisedWorkerRegistry {
     pub(crate) fn new(
         config: Config,
@@ -165,6 +169,7 @@ impl SupervisedWorkerRegistry {
                         match PolicyEngine::new_for_tick(
                             &tick_config,
                             Some(tick_pg_pool.as_ref().clone()),
+                            crate::services::discord::health::slot_row_host_refusal,
                         ) {
                             Ok(tick_engine) => {
                                 rt.block_on(super::super::policy_tick_loop(
@@ -308,6 +313,7 @@ impl SupervisedWorkerRegistry {
                 let claim_owner = self.cluster_runtime.instance_id().to_string();
                 let cluster_runtime = self.cluster_runtime.clone();
                 let cluster_config = self.config.cluster.clone();
+                let slot_row_guard = self.engine.slot_row_guard();
                 self.register_tokio(spec, move || {
                     let dispatch_outbox_pg_pool = dispatch_outbox_pg_pool.clone();
                     let claim_owner = claim_owner.clone();
@@ -316,6 +322,7 @@ impl SupervisedWorkerRegistry {
                     async move {
                         super::super::routes::dispatches::dispatch_outbox_loop(
                             dispatch_outbox_pg_pool,
+                            slot_row_guard,
                             claim_owner,
                             cluster_runtime,
                             cluster_config,

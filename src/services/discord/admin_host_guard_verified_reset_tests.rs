@@ -4,7 +4,7 @@ use crate::services::discord::{
     mailbox_snapshot, mailbox_try_start_turn, make_shared_data_for_tests,
 };
 use crate::services::provider::{CancelToken, ProviderKind};
-use crate::services::provider_teardown::tests::test_support::FakeTmux;
+use crate::services::provider_teardown::test_support::FakeTmux;
 use crate::services::tui_prompt_dedupe::{self as dedupe, binding_context::*};
 use crate::services::turn_orchestrator::{Intervention, InterventionMode, QueuePersistenceContext};
 use poise::serenity_prelude::{MessageId, UserId};

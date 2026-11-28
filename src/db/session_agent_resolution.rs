@@ -4,7 +4,7 @@ use crate::db::agents::AgentChannelBindings;
 use crate::domain::session_identity::SessionIdentity;
 use crate::services::provider::parse_provider_and_channel_from_tmux_name;
 
-pub(crate) fn parse_thread_channel_name(channel_name: &str) -> Option<(&str, &str)> {
+pub fn parse_thread_channel_name(channel_name: &str) -> Option<(&str, &str)> {
     let pos = channel_name.rfind("-t")?;
     let suffix = &channel_name[pos + 2..];
     if suffix.len() >= 15 && suffix.chars().all(|c| c.is_ascii_digit()) {
@@ -20,13 +20,13 @@ pub(crate) fn parse_channel_name_from_session_key(session_key: &str) -> Option<S
     Some(channel_name)
 }
 
-pub(crate) fn parse_thread_channel_id_from_session_key(session_key: &str) -> Option<String> {
+pub fn parse_thread_channel_id_from_session_key(session_key: &str) -> Option<String> {
     parse_channel_name_from_session_key(session_key).and_then(|channel_name| {
         parse_thread_channel_name(&channel_name).map(|(_, thread_id)| thread_id.to_string())
     })
 }
 
-pub(crate) fn normalize_thread_channel_id(thread_channel_id: Option<&str>) -> Option<String> {
+pub fn normalize_thread_channel_id(thread_channel_id: Option<&str>) -> Option<String> {
     let trimmed = thread_channel_id?.trim();
     if trimmed.len() < 15 || !trimmed.chars().all(|c| c.is_ascii_digit()) {
         return None;
@@ -186,7 +186,7 @@ async fn load_session_context_pg(
     })
 }
 
-pub(crate) async fn resolve_agent_id_for_session_pg(
+pub async fn resolve_agent_id_for_session_pg(
     pool: &PgPool,
     explicit_agent_id: Option<&str>,
     session_key: Option<&str>,

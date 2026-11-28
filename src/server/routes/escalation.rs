@@ -481,7 +481,7 @@ async fn send_channel_message(
         base_url,
         token,
         &format!("/channels/{channel_id}/messages"),
-        &crate::services::discord::http::relay_message_payload(content),
+        &crate::services::message_outbox::mentions::relay_message_payload(content),
     )
     .await?;
     if response.status().is_success() {
@@ -706,7 +706,12 @@ mod manual_decision_gate_tests {
         let mut config = crate::config::Config::default();
         config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
         config.policies.hot_reload = false;
-        crate::engine::PolicyEngine::new_with_pg(&config, Some(pg_pool)).unwrap()
+        crate::engine::PolicyEngine::new_with_pg(
+            &config,
+            Some(pg_pool),
+            crate::services::discord::health::slot_row_host_refusal,
+        )
+        .unwrap()
     }
 
     struct EscalationPgDatabase {
@@ -1027,7 +1032,7 @@ mod retired_settings_route_tests {
         config.data.dir = dir.path().join("data");
         std::fs::create_dir_all(&config.policies.dir).unwrap();
         let state = AppState {
-            engine: crate::engine::PolicyEngine::new_with_pg(&config, None).unwrap(),
+            engine: crate::engine::PolicyEngine::new(&config).unwrap(),
             config: std::sync::Arc::new(config),
             pg_pool: None,
             broadcast_tx: crate::eventbus::new_broadcast(),

@@ -13,7 +13,7 @@
 //! deliberately NOT an option here: it would be an unbounded, blocking read on
 //! the async relay loop (#3086 P1).
 
-pub(super) use crate::services::claude_tui::activity::events::{
+use crate::services::claude_tui::activity::events::{
     agent_id_from_tool_use_result, summary_from_tool_use_result, tool_use_result_is_async_launch,
 };
 use serde_json::Value;

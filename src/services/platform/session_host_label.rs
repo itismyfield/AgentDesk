@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 use crate::domain::file_sync::fsync_parent_dir;
 
 #[cfg(not(any(test, feature = "test-support")))]
-pub(crate) fn session_host_label() -> String {
+pub fn session_host_label() -> String {
     static LABEL: OnceLock<String> = OnceLock::new();
     LABEL.get_or_init(|| {
         let current = super::shell::hostname_short();
@@ -31,14 +31,14 @@ thread_local! {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn session_host_label() -> String {
+pub fn session_host_label() -> String {
     TEST_LABEL
         .with(|label| label.borrow().clone())
         .unwrap_or_else(super::shell::hostname_short)
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn with_session_host_label_path_for_test<R>(path: &Path, run: impl FnOnce() -> R) -> R {
+pub fn with_session_host_label_path_for_test<R>(path: &Path, run: impl FnOnce() -> R) -> R {
     struct Reset(Option<String>);
     impl Drop for Reset {
         fn drop(&mut self) {

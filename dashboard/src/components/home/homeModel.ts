@@ -6,6 +6,14 @@ import { formatRelativeTime } from "../../app/shellFormatting";
 import type { AgentMonitorStep, AgentMonitorStepKind, AgentMonitorStepStatus } from "../../kit/pro/agent-monitor";
 import type { RunningNowTask } from "../../kit/pro/running-now";
 import { isTestAgent } from "../../lib/agentHelpers";
+import {
+  computePromptCacheStatus,
+  detectTurnLoop,
+  formatLoopSummary,
+  formatPromptCacheLabel,
+  stepsFromLiveTurnEvents,
+  type LoopFinding,
+} from "../../lib/agentObservability";
 import { aggregateDegradedReasons } from "../../lib/healthReasons";
 import type { Agent, DispatchedSession, KanbanCard } from "../../types";
 import { parseChannelNameFromSessionKey } from "../agent-manager/discord-routing";
@@ -188,7 +196,7 @@ export function classifyAgents(agents: Agent[], sessions: DispatchedSession[], s
     .sort(compareHomeAgents);
 }
 
-/** Full home roster: real agents plus active or stalled unlinked sessions (and department stand-ins). */
+/** Full home roster: real agents plus active or stalled unlinked sessions. */
 export function buildHomeAgents(
   agents: Agent[],
   sessions: DispatchedSession[],
@@ -200,7 +208,7 @@ export function buildHomeAgents(
     .filter((session) => {
       if (session.linked_agent_id || session.status === "disconnected") return false;
       const activeOrWaiting = TURN_STATUSES.has(session.status) || session.status === "awaiting_bg" || session.status === "awaiting_user";
-      return activeOrWaiting || isStaleUnlinkedSession(session, now) || Boolean(session.department_id);
+      return activeOrWaiting || isStaleUnlinkedSession(session, now);
     })
     .map((session) => {
       const title = unlinkedSessionTitle(session);
@@ -209,7 +217,7 @@ export function buildHomeAgents(
         id: `dispatched:${session.id}`,
         name: title,
         name_ko: title,
-        department_id: session.department_id,
+        department_id: null,
         cli_provider: session.provider,
         avatar_emoji: session.avatar_emoji || "📡",
         personality: null,
@@ -219,9 +227,6 @@ export function buildHomeAgents(
         stats_tokens: session.tokens || 0,
         created_at: session.connected_at,
         session_info: session.session_info,
-        department_name: session.department_name,
-        department_name_ko: session.department_name_ko,
-        department_color: session.department_color,
       };
     });
 
@@ -283,6 +288,7 @@ export interface MonitorView {
   kind: AgentMonitorStepKind;
   role: string | null;
   steps?: AgentMonitorStep[];
+  loop?: LoopFinding | null;
 }
 
 const TOOL_KINDS: Array<[RegExp, AgentMonitorStepKind]> = [
@@ -346,12 +352,14 @@ export function monitorView(turn: HomeTurn | undefined, entry: HomeAgent, tr: Tr
   const started = updated === null ? null : coerceTimestampMs(turn.started_at);
   const plausible = started !== null && updated !== null && started <= updated + CLOCK_AHEAD_MS && now - started <= CLOCK_MAX_MS;
   const steps = mapTurnSteps(turn);
+  const loop = detectTurnLoop(stepsFromLiveTurnEvents(turn.tool_events));
   return {
     started: plausible ? started : null,
     label: turn.current_tool_line ?? entry.info ?? tr("작업 중", "Working"),
     kind: TOOL_KINDS.find(([pattern]) => pattern.test(tool))?.[1] ?? "think",
     role,
     ...(steps.length > 0 ? { steps } : {}),
+    ...(loop ? { loop } : {}),
   };
 }
 
@@ -438,7 +446,20 @@ export interface TodoItem {
   agentId: string | null;
 }
 
-export type TriageAlertKind = "quota" | "stale-session" | "stalled-agent" | "health";
+export type TriageAlertKind = "quota" | "stale-session" | "stalled-agent" | "looping-agent" | "health";
+
+export function entryPromptCacheChip(
+  entry: HomeAgent,
+  tr: Tr,
+  nowMs = Date.now(),
+): { label: string; expiring: boolean } | null {
+  if (entry.state !== "resting" && entry.state !== "background") return null;
+  const provider = entry.unlinkedSession?.provider ?? entry.agent.cli_provider ?? null;
+  const lastMs = entry.activityAt ?? entry.seenAt;
+  const status = computePromptCacheStatus({ provider, lastActivityMs: lastMs, nowMs });
+  if (!status || status.phase === "cold") return null;
+  return { label: formatPromptCacheLabel(status, tr), expiring: status.phase === "expiring" };
+}
 
 export interface TriageAlert {
   key: string;
@@ -634,7 +655,7 @@ export function todoHeaderLink(
     const first = alerts[0].kind;
     if (first === "quota") return { to: "/stats", label: tr("통계에서 보기", "Open stats") };
     if (first === "health") return { to: "/settings?category=connections", label: tr("연결 상태 보기", "View connections") };
-    if (first === "stale-session" || first === "stalled-agent") {
+    if (first === "stale-session" || first === "stalled-agent" || first === "looping-agent") {
       return { to: "/agents", label: tr("에이전트에서 보기", "Open agents") };
     }
   }
@@ -647,6 +668,7 @@ export function buildTriageAlerts({
   rule,
   sessions,
   agentEntries,
+  turns,
   reconciledKeys,
   health,
   tr,
@@ -657,6 +679,7 @@ export function buildTriageAlerts({
   rule: ReturnType<typeof autoPauseRule>;
   sessions: DispatchedSession[];
   agentEntries?: ReadonlyArray<HomeAgent>;
+  turns?: ReadonlyMap<string, HomeTurn>;
   reconciledKeys?: ReadonlySet<string>;
   health: HomeHealth | null;
   tr: Tr;
@@ -700,8 +723,25 @@ export function buildTriageAlerts({
     });
   }
 
+  const loopingIds = new Set<string>();
   for (const entry of agentEntries ?? []) {
-    if (!entry.stalled || entry.unlinkedSession) continue;
+    if (entry.state !== "working" || entry.unlinkedSession) continue;
+    const loop = detectTurnLoop(stepsFromLiveTurnEvents(turns?.get(entry.agent.id)?.tool_events));
+    if (!loop) continue;
+    loopingIds.add(entry.agent.id);
+    alerts.push({
+      key: `loop:${entry.agent.id}:${loop.key}`,
+      kind: "looping-agent",
+      tone: loop.pattern === "contract" ? "err" : "warn",
+      chip: tr("루프 의심", "Looping"),
+      title: agentName(entry.agent, isKo),
+      detail: formatLoopSummary(loop, tr),
+      to: `/agents?agent=${encodeURIComponent(entry.agent.id)}`,
+    });
+  }
+
+  for (const entry of agentEntries ?? []) {
+    if (!entry.stalled || entry.unlinkedSession || loopingIds.has(entry.agent.id)) continue;
     alerts.push({
       key: `stuck:${entry.agent.id}`,
       kind: "stalled-agent",

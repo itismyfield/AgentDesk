@@ -1,5 +1,9 @@
 use super::*;
 use crate::config::TestRuntimeRootGuard;
+use crate::services::discord::health::turn_deliver::inject::queued_owner::{
+    v2_effect, v2_effect_clock,
+};
+use crate::services::discord::health::turn_deliver::inject::queued_reconcile::v2_settle_exact;
 use crate::services::discord::health::turn_deliver::inject_codex_tests::QueuedCodex;
 use serde_json::json;
 
@@ -130,7 +134,9 @@ async fn cold_submit_returns_exact_attempt_and_releases_writer_before_source_pg(
         "PreSource history precedes all four cold effects"
     );
     let late = keys[0].clone();
-    mailbox.v2_settle_exact(late, true, 100_000).await.unwrap();
+    v2_settle_exact(&mailbox, late, true, 100_000)
+        .await
+        .unwrap();
     let active = mailbox
         .v2_request(|slot| slot.as_ref().unwrap().active_attempt())
         .await
@@ -181,39 +187,39 @@ async fn cold_submit_returns_exact_attempt_and_releases_writer_before_source_pg(
     );
 }
 
-impl crate::services::turn_orchestrator::ChannelMailboxHandle {
-    pub(crate) async fn v2_cold_fixture(
-        &self,
-        path: std::path::PathBuf,
-        attempt: serde_json::Value,
-        frame: String,
-        channel: u64,
-    ) -> Result<(), String> {
-        let trusted = crate::config::runtime_root()
-            .ok_or("runtime root absent")?
-            .join("runtime");
-        let path = if path.starts_with(&trusted) {
-            path
-        } else {
-            trusted
-                .join("discord_pending_queue/cold-matrix")
-                .join(format!(
-                    "{channel}-{}",
-                    path.file_name()
-                        .ok_or("fixture filename absent")?
-                        .to_string_lossy()
-                ))
-        };
-        self.v2_adopt(path, format!("cold-scope-{channel}")).await?;
-        self.v2_request(move |slot| {
-            let owner=slot.as_mut().ok_or("owner absent")?;
-            let id=8_000_000_000_100_000_000u64+channel;
-            let original=serde_json::from_value(serde_json::json!({"author_id":7,"channel_id":channel,"message_id":id,"source_message_ids":[id],"queued_generation":1,"text":frame})).map_err(|e|e.to_string())?;
-            owner.enqueue_fixture(&original).map_err(|e|format!("{e:?}"))?;
-            owner.reserve(serde_json::from_value(attempt).map_err(|e|e.to_string())?,serde_json::from_value(serde_json::json!({"frame":frame,"digest":"fixture","attribution":{}})).map_err(|e|e.to_string())?)?;
-            Ok(())
-        }).await
-    }
+pub(in crate::services) async fn v2_cold_fixture(
+    mailbox: &ChannelMailboxHandle,
+    path: std::path::PathBuf,
+    attempt: serde_json::Value,
+    frame: String,
+    channel: u64,
+) -> Result<(), String> {
+    let trusted = crate::config::runtime_root()
+        .ok_or("runtime root absent")?
+        .join("runtime");
+    let path = if path.starts_with(&trusted) {
+        path
+    } else {
+        trusted
+            .join("discord_pending_queue/cold-matrix")
+            .join(format!(
+                "{channel}-{}",
+                path.file_name()
+                    .ok_or("fixture filename absent")?
+                    .to_string_lossy()
+            ))
+    };
+    mailbox
+        .v2_adopt(path, format!("cold-scope-{channel}"))
+        .await?;
+    mailbox.v2_request(move |slot| {
+        let owner=slot.as_mut().ok_or("owner absent")?;
+        let id=8_000_000_000_100_000_000u64+channel;
+        let original=serde_json::from_value(serde_json::json!({"author_id":7,"channel_id":channel,"message_id":id,"source_message_ids":[id],"queued_generation":1,"text":frame})).map_err(|e|e.to_string())?;
+        owner.enqueue_fixture(&original).map_err(|e|format!("{e:?}"))?;
+        owner.reserve(serde_json::from_value(attempt).map_err(|e|e.to_string())?,serde_json::from_value(serde_json::json!({"frame":frame,"digest":"fixture","attribution":{}})).map_err(|e|e.to_string())?)?;
+        Ok(())
+    }).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -243,17 +249,17 @@ async fn completion_clock_keeps_retained_a_fence_without_touching_active_b_pg() 
     let (release, wait) = std::sync::mpsc::channel();
     let handle = mailbox.clone();
     let task = tokio::spawn(async move {
-        handle
-            .v2_effect_clock(
-                1000,
-                Arc::new(move || read.load(Ordering::SeqCst)),
-                move |_| {
-                    entered.send(()).unwrap();
-                    wait.recv().unwrap();
-                    Ok(true)
-                },
-            )
-            .await
+        v2_effect_clock(
+            &handle,
+            1000,
+            Arc::new(move || read.load(Ordering::SeqCst)),
+            move |_| {
+                entered.send(()).unwrap();
+                wait.recv().unwrap();
+                Ok(true)
+            },
+        )
+        .await
     });
     ready.await.unwrap();
     mailbox.v2_request(|s| {let owner=s.as_mut().unwrap();owner.tick(31_000)?;
@@ -313,34 +319,33 @@ async fn live_payload_refusal_proof_preserves_raw_without_becoming_restart_autho
         ));
     let path = fixture.disk_path().with_file_name("payload-refusal.json");
     let attempt = json!({"nonce":"payload-refusal","provider":"codex","target":{"host":"herdr","owner":"payload-refusal","root":"/test","execution_nonce":"execution"},"source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}});
-    mailbox
-        .v2_cold_fixture(
-            path.clone(),
-            attempt.clone(),
-            "original kept after refusal".into(),
-            7272425,
-        )
-        .await
-        .unwrap();
+    v2_cold_fixture(
+        &mailbox,
+        path.clone(),
+        attempt.clone(),
+        "original kept after refusal".into(),
+        7272425,
+    )
+    .await
+    .unwrap();
     let keys = Arc::new(AtomicUsize::new(0));
     let count = keys.clone();
     let disk = path.clone();
-    let (key, outcome) = mailbox
-        .v2_cold_observed(1, Arc::new(|| 90000), move |_| {
-            let _watch = Watch::new(
-                &disk,
-                Plan {
-                    fail: vec![Step::ParentSync],
-                    ..Default::default()
-                },
-            );
-            crate::services::claude_tui::owner_input::payload(|| {
-                count.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            })
+    let (key, outcome) = v2_cold_observed(&mailbox, 1, Arc::new(|| 90000), move |_| {
+        let _watch = Watch::new(
+            &disk,
+            Plan {
+                fail: vec![Step::ParentSync],
+                ..Default::default()
+            },
+        );
+        crate::services::claude_tui::owner_input::payload(|| {
+            count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         })
-        .await
-        .unwrap();
+    })
+    .await
+    .unwrap();
     assert_eq!(
         keys.load(Ordering::SeqCst),
         0,
@@ -376,32 +381,32 @@ async fn live_payload_refusal_proof_preserves_raw_without_becoming_restart_autho
         .await
         .unwrap();
     assert!(
-        mailbox
-            .v2_effect(100000, |_| panic!("retained proof is not a replay permit"))
-            .await
-            .is_err()
+        v2_effect(&mailbox, 100000, |_| panic!(
+            "retained proof is not a replay permit"
+        ))
+        .await
+        .is_err()
     );
     assert_eq!(keys.load(Ordering::SeqCst), 0);
     let other = fixture
         .shared
         .mailbox(poise::serenity_prelude::ChannelId::new(7272426));
-    other
-        .v2_cold_fixture(
-            fixture.disk_path().with_file_name("ambiguous-content.json"),
-            attempt,
-            "maybe sent".into(),
-            7272426,
-        )
-        .await
-        .unwrap();
-    let (_, outcome) = other
-        .v2_cold_observed(1, Arc::new(|| 90000), |_| {
-            crate::services::claude_tui::owner_input::payload(|| {
-                Err::<(), _>("ambiguous transport acknowledgement".into())
-            })
+    v2_cold_fixture(
+        &other,
+        fixture.disk_path().with_file_name("ambiguous-content.json"),
+        attempt,
+        "maybe sent".into(),
+        7272426,
+    )
+    .await
+    .unwrap();
+    let (_, outcome) = v2_cold_observed(&other, 1, Arc::new(|| 90000), |_| {
+        crate::services::claude_tui::owner_input::payload(|| {
+            Err::<(), _>("ambiguous transport acknowledgement".into())
         })
-        .await
-        .unwrap();
+    })
+    .await
+    .unwrap();
     assert!(outcome.result.is_err());
     assert!(
         outcome.not_sent.is_none(),

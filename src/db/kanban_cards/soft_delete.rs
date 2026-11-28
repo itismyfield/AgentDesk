@@ -9,14 +9,14 @@ pub enum CardDeleteOutcome {
 }
 
 /// What a card delete does once the card row is locked.
-pub(crate) enum CardDeletePlan {
+pub enum CardDeletePlan {
     Refused(CardDeleteOutcome),
     /// Pending auto-queue entries to skip before the card is stamped.
     SkipPendingEntries(Vec<String>),
 }
 
 /// Locks the live card row and reads what refuses or precedes its delete.
-pub(crate) async fn plan_card_delete_on_pg_tx(
+pub async fn plan_card_delete_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     card_id: &str,
 ) -> Result<CardDeletePlan, String> {
@@ -60,7 +60,7 @@ pub(crate) async fn plan_card_delete_on_pg_tx(
 }
 
 /// Clearing the issue number frees the issue for a fresh card; the URL keeps it.
-pub(crate) async fn stamp_card_deleted_on_pg_tx(
+pub async fn stamp_card_deleted_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     card_id: &str,
 ) -> Result<(), String> {

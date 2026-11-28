@@ -12,7 +12,7 @@ const MAX_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_FILE: u64 = 16 * 1024 * 1024;
 
 #[derive(Default)]
-pub(crate) struct Collector {
+pub struct Collector {
     closed: BTreeMap<String, (u64, String)>,
     known_violation: Option<Value>,
     previous_cut: Option<i64>,
@@ -258,7 +258,7 @@ fn evaluate_host(value: &mut Value, now: i64) {
 
 #[cfg(any(test, feature = "test-support"))]
 impl Collector {
-    pub(crate) fn fixture(&mut self, root: &Path, current: &str, now: i64) -> Value {
+    pub fn fixture(&mut self, root: &Path, current: &str, now: i64) -> Value {
         let mut value = self.collect(root, current, now, None);
         let cut = value["boot_files"]
             .as_array()
@@ -272,7 +272,7 @@ impl Collector {
         value
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub(crate) fn collect_for_test(
         &mut self,
         root: &Path,

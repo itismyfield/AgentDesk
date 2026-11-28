@@ -65,7 +65,7 @@ impl Adapter {
     }
 }
 
-pub(crate) fn cause(
+pub fn cause(
     pane: busy_inject::Pane,
     mut clear: impl FnMut() -> bool + Send + 'static,
 ) -> BusyProbe {
@@ -75,7 +75,7 @@ pub(crate) fn cause(
     })
 }
 
-pub(crate) fn loads(pane: busy_inject::Pane) -> impl FnMut() -> bool + Send + 'static {
+pub fn loads(pane: busy_inject::Pane) -> impl FnMut() -> bool + Send + 'static {
     move || {
         let Ok(file) = tempfile::NamedTempFile::new() else {
             return false;

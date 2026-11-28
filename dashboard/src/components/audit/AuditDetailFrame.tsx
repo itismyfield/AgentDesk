@@ -176,7 +176,7 @@ export function FilterChipGroup<T extends string>({
             disabled={option.disabled}
             tabIndex={active ? 0 : -1}
             onClick={() => onChange(option.value)}
-            className="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center gap-1.5 rounded-full px-3 text-xs leading-none font-medium whitespace-nowrap transition-colors sm:min-h-[30px] pointer-coarse:min-h-11 disabled:cursor-not-allowed disabled:opacity-40"
+            className="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center gap-1.5 rounded-full px-3 text-xs leading-none font-medium whitespace-nowrap transition-colors min-[900px]:pointer-fine:min-h-[30px] pointer-coarse:min-h-11 disabled:cursor-not-allowed disabled:opacity-40"
             style={
               active
                 ? { background: "var(--accent-soft)", color: "var(--accent-fg)" }

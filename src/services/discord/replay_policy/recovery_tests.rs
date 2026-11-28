@@ -178,7 +178,7 @@ fn p5_actual_own_restart_and_foreign_orphan_preserve_the_authority_boundary_pg()
             ] {
                 seen.record(fact);
             }
-            write::classify_no_effect(&pool, attempt, &seen.no_effect_evidence().unwrap())
+            write::classify_no_effect(&pool, attempt, &seen.no_effect_evidence_for_test().unwrap())
                 .await
                 .unwrap();
             inflight::save_inflight_state_create_new(&no_effect).unwrap();
@@ -493,10 +493,10 @@ async fn sealed_snapshot_retains_the_original_root_lock_after_loader_handle_drop
     let attempt = begin(&pool, &mut saved, &target, "previous-process").await;
     inflight::save_inflight_state_create_new(&saved).unwrap();
     let snapshot = LocalSnapshot::load(Some(&loader), &saved).unwrap();
-    assert_eq!(snapshot.state().user_text, saved.user_text);
-    assert_eq!(
-        snapshot.incarnation(),
-        crate::domain::process_incarnation::incarnation()
+    crate::services::discord::replay_policy::recovery::assert_snapshot_identity_for_test(
+        &snapshot,
+        &saved.user_text,
+        crate::domain::process_incarnation::incarnation(),
     );
     drop(loader);
     assert!(

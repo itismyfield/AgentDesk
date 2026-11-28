@@ -171,7 +171,7 @@ pub(super) async fn designation(
 }
 
 /// Autoqueue completion explicitly opts in without changing its source or dedupe inputs.
-pub(crate) async fn enqueue_session_notice_pg_on_tx(
+pub async fn enqueue_session_notice_pg_on_tx(
     tx: &mut Transaction<'_, Postgres>,
     message: OutboxMessage<'_>,
 ) -> Result<i64, OutboxEnqueueError> {

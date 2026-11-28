@@ -68,7 +68,7 @@ fn fresh(pane: &Pane, prompt: Option<&str>) -> (BindingContext, PathBuf, String)
 }
 
 fn spawn(pane: &Pane, context: &BindingContext, observation: &mut LaunchObservation) {
-    observation.prepare(context);
+    observation.prepare_for_test(context);
     PreparedIncarnation::create(context.clone()).unwrap();
     tc::write_tmux_owner_marker(&pane.name).unwrap();
     std::fs::write(
@@ -76,7 +76,7 @@ fn spawn(pane: &Pane, context: &BindingContext, observation: &mut LaunchObservat
         &context.execution_nonce,
     )
     .unwrap();
-    observation.spawned(context);
+    observation.spawned_for_test(context);
 }
 
 fn publish(pane: &Pane, path: &Path, session: &str, restored: bool) {
@@ -420,7 +420,7 @@ fn first_live_and_rehydrated_publishers_seal_only_the_observed_fresh() {
         let pane = Pane::start(fixture.logs.path());
         pane.end(true);
         let _attempt = attempt::begin(Some(pane.channel), Some(&pane.name));
-        let mut observation = LaunchObservation::new(Some(pane.channel), &pane.name);
+        let mut observation = LaunchObservation::new_for_test(Some(pane.channel), &pane.name);
         let (context, path, session) = fresh(&pane, None);
         spawn(&pane, &context, &mut observation);
         assert!(successor(&pane).is_none(), "spawn alone never seals");
@@ -439,7 +439,7 @@ fn late_first_prompt_retries_on_unchanged_binding_without_retroactive_other_sour
     let pane = Pane::start(fixture.logs.path());
     pane.end(true);
     let _attempt = attempt::begin(Some(pane.channel), Some(&pane.name));
-    let mut observation = LaunchObservation::new(Some(pane.channel), &pane.name);
+    let mut observation = LaunchObservation::new_for_test(Some(pane.channel), &pane.name);
     let (context, path, session) = fresh(&pane, Some("late first prompt"));
     spawn(&pane, &context, &mut observation);
     let logs = capture_logs(|| publish(&pane, &path, &session, false));
@@ -502,7 +502,7 @@ fn fresh_successor_seals_when_agents_md_context_precedes_the_first_prompt() {
     let pane = Pane::start(fixture.logs.path());
     pane.end(true);
     let _attempt = attempt::begin(Some(pane.channel), Some(&pane.name));
-    let mut observation = LaunchObservation::new(Some(pane.channel), &pane.name);
+    let mut observation = LaunchObservation::new_for_test(Some(pane.channel), &pane.name);
     let prompt = "[User: tester (ID: 1)] first prompt after clear";
     let (context, path, session) = fresh(&pane, Some(prompt));
     let user = |texts: &[&str], kinds: &[&str]| {
@@ -538,7 +538,7 @@ fn next_begin_warns_once_when_discarding_bound_candidate() {
     let pane = Pane::start(fixture.logs.path());
     pane.end(true);
     let _attempt = attempt::begin(Some(pane.channel), Some(&pane.name));
-    let mut observation = LaunchObservation::new(Some(pane.channel), &pane.name);
+    let mut observation = LaunchObservation::new_for_test(Some(pane.channel), &pane.name);
     let (context, path, session) = fresh(&pane, None);
     spawn(&pane, &context, &mut observation);
     assert!(
@@ -589,7 +589,7 @@ fn overlapping_dispatch_and_resume_each_discard_adjacent_ticket() {
         let pane = Pane::start(fixture.logs.path());
         pane.end(true);
         let first = attempt::begin(Some(pane.channel), Some(&pane.name));
-        let mut observation = LaunchObservation::new(Some(pane.channel), &pane.name);
+        let mut observation = LaunchObservation::new_for_test(Some(pane.channel), &pane.name);
         if resume {
             let source = p5::codex::settled::read(pane.channel, &pane.name)
                 .unwrap()
@@ -628,7 +628,7 @@ fn restart_before_binding_and_old_unsealed_end_do_not_backfill() {
     let pane = Pane::start(fixture.logs.path());
     pane.end(true);
     let first = attempt::begin(Some(pane.channel), Some(&pane.name));
-    let mut observation = LaunchObservation::new(Some(pane.channel), &pane.name);
+    let mut observation = LaunchObservation::new_for_test(Some(pane.channel), &pane.name);
     let (context, path, session) = fresh(&pane, None);
     spawn(&pane, &context, &mut observation);
     drop(observation);
@@ -647,7 +647,7 @@ fn first_binding_before_context_blocks_a_later_matching_fresh_source() {
     let pane = Pane::start(fixture.logs.path());
     pane.end(true);
     let _attempt = attempt::begin(Some(pane.channel), Some(&pane.name));
-    let mut observation = LaunchObservation::new(Some(pane.channel), &pane.name);
+    let mut observation = LaunchObservation::new_for_test(Some(pane.channel), &pane.name);
     let (context, path, session) = fresh(&pane, None);
     spawn(&pane, &context, &mut observation);
     let header = serde_json::json!({"type":"session_meta","payload":{
@@ -671,7 +671,7 @@ fn exact_pending_then_resolved_runtime_publication_seals_the_resolved_sequence()
     let pane = Pane::start(fixture.logs.path());
     pane.end(true);
     let _attempt = attempt::begin(Some(pane.channel), Some(&pane.name));
-    let mut observation = LaunchObservation::new(Some(pane.channel), &pane.name);
+    let mut observation = LaunchObservation::new_for_test(Some(pane.channel), &pane.name);
     let (context, alias_path, session) = fresh(&pane, None);
     let path = alias_path.canonicalize().unwrap();
     let header = std::fs::read(&path).unwrap();
@@ -717,7 +717,7 @@ fn done_candidate_can_retry_late_prompt_without_another_binding_publication() {
     let pane = Pane::start(fixture.logs.path());
     pane.end(true);
     let dispatch = attempt::begin(Some(pane.channel), Some(&pane.name));
-    let mut observation = LaunchObservation::new(Some(pane.channel), &pane.name);
+    let mut observation = LaunchObservation::new_for_test(Some(pane.channel), &pane.name);
     let (context, path, session) = fresh(&pane, Some("prompt after dispatch completion"));
     spawn(&pane, &context, &mut observation);
     publish(&pane, &path, &session, false);
@@ -773,7 +773,7 @@ fn generic_pending_resolution_seals_done_candidate_on_idle_sources_follow() {
     let pane = Pane::start(fixture.logs.path());
     assert!(!pane.end(true).end_unconfirmed);
     let dispatch = attempt::begin(Some(pane.channel), Some(&pane.name));
-    let mut observation = LaunchObservation::new(Some(pane.channel), &pane.name);
+    let mut observation = LaunchObservation::new_for_test(Some(pane.channel), &pane.name);
     let prompt = "prompt after generic resolution and dispatch completion";
     let (context, alias_path, session) = fresh(&pane, Some(prompt));
     let path = alias_path.canonicalize().unwrap();
@@ -837,7 +837,7 @@ fn cleanup_reset_then_refused_or_resumed_dispatch_consumes_the_pending_ticket() 
         let dispatch = attempt::begin(Some(pane.channel), Some(&pane.name));
         assert!(attempt::ticket(pane.channel, &pane.name).is_none());
         if resumed {
-            let mut observation = LaunchObservation::new(Some(pane.channel), &pane.name);
+            let mut observation = LaunchObservation::new_for_test(Some(pane.channel), &pane.name);
             let mut context = pane.context.clone();
             context.execution_nonce = uuid::Uuid::new_v4().simple().to_string();
             context.launch_mode = "resume".into();
@@ -853,7 +853,7 @@ fn cleanup_reset_then_refused_or_resumed_dispatch_consumes_the_pending_ticket() 
         drop(dispatch);
 
         let _later = attempt::begin(Some(pane.channel), Some(&pane.name));
-        let mut observation = LaunchObservation::new(Some(pane.channel), &pane.name);
+        let mut observation = LaunchObservation::new_for_test(Some(pane.channel), &pane.name);
         let (context, path, session) = fresh(&pane, None);
         spawn(&pane, &context, &mut observation);
         publish(&pane, &path, &session, false);
@@ -934,7 +934,7 @@ fn seven_historical_unsealed_ends_stay_unsealed_when_only_the_adjacent_end_seals
     assert_eq!(records.len(), 8);
     let adjacent_id = records.last().unwrap().end_id.clone();
     let _attempt = attempt::begin(Some(pane.channel), Some(&pane.name));
-    let mut observation = LaunchObservation::new(Some(pane.channel), &pane.name);
+    let mut observation = LaunchObservation::new_for_test(Some(pane.channel), &pane.name);
     let (context, path, session) = fresh(&pane, None);
     spawn(&pane, &context, &mut observation);
     publish(&pane, &path, &session, false);

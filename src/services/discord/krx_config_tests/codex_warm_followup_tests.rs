@@ -42,7 +42,7 @@ fn tracked_retry_safe_draft_carries_replacement_through_its_pane_kill() {
     let end = install_clear_end(channel, tmux);
     let dispatch = attempt::begin(Some(channel), Some(tmux));
     let id = attempt::current(channel, tmux).unwrap();
-    let mut observation = LaunchObservation::new(Some(channel), tmux);
+    let mut observation = LaunchObservation::new_for_test(Some(channel), tmux);
     assert!(attempt::take_ticket(&id).is_none());
     let path = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(path.path(), "{}\n").unwrap();
@@ -99,13 +99,13 @@ fn tracked_retry_safe_draft_carries_replacement_through_its_pane_kill() {
     context.launch_mode = "resume".into();
     context.expected_native_session_id = Some(end.source.session_id.clone());
     let prepared = PreparedIncarnation::create(context).unwrap();
-    observation.prepare(&prepared.context);
+    observation.prepare_for_test(&prepared.context);
     std::fs::write(
         tc::session_temp_path(tmux, "spawn_nonce"),
         &prepared.context.execution_nonce,
     )
     .unwrap();
-    observation.spawned(&prepared.context);
+    observation.spawned_for_test(&prepared.context);
     tc::with_tmux_source_authority(tmux, |authority| {
         assert_eq!(
             attempt::phase_under(&id, authority),
@@ -123,7 +123,7 @@ fn tracked_retry_safe_draft_carries_replacement_through_its_pane_kill() {
         codex_end::read(&root, channel).unwrap().as_slice(),
         std::slice::from_ref(&end)
     );
-    replacement.complete();
+    replacement.complete_for_test();
     assert!(!Probe::new(channel, tmux).defer_death());
     drop(dispatch);
     let _later_fresh = attempt::begin(Some(channel), Some(tmux));

@@ -28,6 +28,37 @@ pub(crate) struct EngineSession {
     pub(in crate::services) born_generation: u64,
 }
 
+impl EngineSession {
+    pub(in crate::services) fn clear_provider_session(&mut self) {
+        self.session_id = None;
+        self.memento_context_loaded = false;
+        self.memento_reflected = false;
+    }
+
+    pub(in crate::services) fn restore_provider_session(&mut self, session_id: Option<String>) {
+        self.memento_context_loaded = Self::restored_memento_context_loaded(
+            self.memento_context_loaded,
+            self.session_id.as_deref(),
+            session_id.as_deref(),
+        );
+        self.session_id = session_id;
+        self.memento_reflected = false;
+    }
+
+    pub(in crate::services) fn note_memento_context_loaded(&mut self) {
+        self.memento_context_loaded = true;
+        self.memento_reflected = false;
+    }
+
+    pub(in crate::services) fn restored_memento_context_loaded(
+        previous_loaded: bool,
+        previous_session_id: Option<&str>,
+        next_session_id: Option<&str>,
+    ) -> bool {
+        previous_loaded && previous_session_id == next_session_id && next_session_id.is_some()
+    }
+}
+
 impl Clone for EngineSession {
     fn clone(&self) -> Self {
         Self {

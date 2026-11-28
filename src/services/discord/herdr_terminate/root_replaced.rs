@@ -2,7 +2,7 @@
 pub(in crate::services::discord) mod missing_marker {
     //! An exact marker-loss refusal is a candidate, never proof that its provider ended.
     use super::*;
-    use crate::services::discord::tmux::execution_identity::herdr_observation::HerdrUnknown;
+    use crate::services::session_host::HerdrUnknown;
 
     pub(in crate::services::discord) struct MissingMarkerCandidate(HostedObservation);
     impl MissingMarkerCandidate {
@@ -38,10 +38,8 @@ use crate::db::dispatched_session_canonical_identity::{
 use crate::services::discord::recovery_engine::herdr_attach::HerdrSourceAttach;
 use crate::services::discord::recovery_engine::host_reconcile::HostReconcile;
 use crate::services::discord::session_transition::SessionTransitionLease;
-use crate::services::discord::tmux::execution_identity::herdr_observation::{
-    HerdrExecutionMatch, HerdrMismatch,
-};
 use crate::services::herdr_launch::retired_hold::{self, RetiredHoldOutcome};
+use crate::services::session_host::{HerdrExecutionMatch, HerdrMismatch};
 use crate::services::tui_prompt_dedupe as dedupe;
 use std::collections::BTreeMap;
 

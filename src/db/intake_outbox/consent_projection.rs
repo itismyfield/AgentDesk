@@ -3,7 +3,7 @@
 use super::IntakeOutboxRow;
 use crate::domain::intake_consent::{PayloadProjection, RowProjection};
 
-pub(crate) fn project(row: &IntakeOutboxRow) -> RowProjection<'_> {
+pub fn project(row: &IntakeOutboxRow) -> RowProjection<'_> {
     RowProjection {
         id: row.id,
         provider: &row.provider,

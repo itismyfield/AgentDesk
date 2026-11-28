@@ -1,15 +1,15 @@
 use sqlx::PgPool;
 
-pub(crate) struct TestPostgresDb {
+pub struct TestPostgresDb {
     _lock: crate::db::postgres::PostgresTestLifecycleGuard,
     admin_url: String,
     database_name: String,
-    pub(crate) database_url: String,
+    pub database_url: String,
     cleanup_armed: bool,
 }
 
 impl TestPostgresDb {
-    pub(crate) async fn create() -> Self {
+    pub async fn create() -> Self {
         let lock = crate::db::postgres::lock_test_lifecycle();
         let base = crate::db::postgres::postgres_test_database_url_base()
             .expect("POSTGRES_TEST_DATABASE_URL_BASE required for db::auto_queue tests"); // agentdesk-audit: allow-unwrap — test-only fixture constructor requires an explicitly configured shared base
@@ -37,7 +37,7 @@ impl TestPostgresDb {
         }
     }
 
-    pub(crate) async fn connect_and_migrate(&self) -> PgPool {
+    pub async fn connect_and_migrate(&self) -> PgPool {
         // Slot allocation holds a dedicated advisory-lock connection while it
         // probes and updates through the pool. The global PG test default is a
         // single connection to limit CI pressure, but these serialized tests
@@ -61,10 +61,7 @@ impl TestPostgresDb {
     // auto_queue_slots row lock) need at least two concurrent connections, so the
     // default lean test pool deadlocks. This helper keeps the lean default for
     // other tests and only widens capacity for the dispatch-terminal-sync suite.
-    pub(crate) async fn connect_and_migrate_with_max_connections(
-        &self,
-        max_connections: u32,
-    ) -> PgPool {
+    pub async fn connect_and_migrate_with_max_connections(&self, max_connections: u32) -> PgPool {
         crate::db::postgres::connect_test_pool_with_max_connections_and_migrate(
             &self.database_url,
             "db::auto_queue tests",
@@ -74,7 +71,7 @@ impl TestPostgresDb {
         .expect("connect + migrate postgres auto_queue test db")
     }
 
-    pub(crate) async fn emulate_pre_0100_deploy_gate_rows(pool: &PgPool) {
+    pub async fn emulate_pre_0100_deploy_gate_rows(pool: &PgPool) {
         sqlx::query(
             "ALTER TABLE auto_queue_entries
              DROP CONSTRAINT auto_queue_entries_deploy_gate_unavailable_check",
@@ -84,7 +81,7 @@ impl TestPostgresDb {
         .expect("remove 0100 constraint for pre-migration legacy fixture");
     }
 
-    pub(crate) async fn drop(mut self) {
+    pub async fn drop(mut self) {
         let drop_result = crate::db::postgres::drop_test_database(
             &self.admin_url,
             &self.database_name,

@@ -19,15 +19,15 @@ use serde_json::Value;
 use sqlx::AssertSqlSafe;
 use sqlx::PgPool;
 
-#[cfg(test)]
-pub(crate) mod owner_fence_pg_tests;
+#[cfg(any(test, feature = "test-support"))]
+pub mod owner_fence_pg_tests;
 
 /// Owned snapshot of an `intake_outbox` row. The `Phase 3` worker poll
 /// claims a row, deserializes the payload columns into this struct, then
 /// hands it to `services::discord::router::execute_intake_turn_core` after
 /// converting `into_intake_request()`.
 #[derive(Clone, Debug, sqlx::FromRow)]
-pub(crate) struct IntakeOutboxRow {
+pub struct IntakeOutboxRow {
     pub id: i64,
     pub target_instance_id: String,
     pub forwarded_by_instance_id: String,
@@ -73,7 +73,7 @@ pub(crate) struct IntakeOutboxRow {
 /// `intake_outbox` payload columns (excluding bookkeeping like status,
 /// attempt_no, parent_outbox_id which the caller computes separately).
 #[derive(Clone, Debug)]
-pub(crate) struct InsertPendingPayload {
+pub struct InsertPendingPayload {
     pub target_instance_id: String,
     pub forwarded_by_instance_id: String,
     pub required_labels: Value,
@@ -102,7 +102,7 @@ pub(crate) struct InsertPendingPayload {
 }
 
 /// INSERT a fresh `pending` row into `intake_outbox` for the given
-/// payload. Caller computes `attempt_no` via `family_max_attempt + 1`
+/// payload. Caller computes `attempt_no` as the family maximum + 1
 /// (round-3 P0 #1) and passes `parent_outbox_id = Some(parent.id)` when
 /// retrying after a `failed_pre_accept`. For the very first attempt of
 /// a `(channel_id, user_msg_id)` family, pass `attempt_no = 1` and
@@ -113,7 +113,7 @@ pub(crate) struct InsertPendingPayload {
 /// user_msg_id, attempt_no)`) or `intake_outbox_one_open_route_per_channel`
 /// (another row for the same channel is in an OPEN status). Callers
 /// distinguish via `error.constraint_name()` per the design doc §B-bis.
-pub(crate) async fn insert_pending(
+pub async fn insert_pending(
     pool: &PgPool,
     payload: &InsertPendingPayload,
     attempt_no: i32,
@@ -209,12 +209,9 @@ pub(crate) fn classify_insert_pending_error(error: &sqlx::Error) -> Option<Intak
 }
 
 /// Compute `MAX(attempt_no)` for a `(channel_id, user_msg_id)` family,
-/// or 0 if no row exists yet. Used by retry-on-`failed_pre_accept` to
-/// allocate `attempt_no = family_max + 1` (round-4 P0 — monotonic).
-// reason: intake-outbox retry helper exercised only by the pg-integration test
-// suite; production retry path wired on select routes. See #3034.
-#[allow(dead_code)]
-pub(crate) async fn family_max_attempt(
+/// or 0 if no row exists yet. Only the pg-integration tests call it.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn family_max_attempt(
     pool: &PgPool,
     channel_id: &str,
     user_msg_id: &str,
@@ -231,7 +228,7 @@ pub(crate) async fn family_max_attempt(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum FailedPreAcceptSweepOutcome {
+pub enum FailedPreAcceptSweepOutcome {
     Empty,
     Retried {
         source_id: i64,
@@ -249,16 +246,16 @@ pub(crate) enum FailedPreAcceptSweepOutcome {
 
 pub(crate) mod pre_accept_sweep;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use crate::services::cluster::pre_accept_sweep::sweep_failed_pre_accept_once;
+pub use crate::services::cluster::pre_accept_sweep::sweep_failed_pre_accept_once;
 
-pub(crate) mod consent_handoff;
-pub(crate) mod consent_projection;
+pub mod consent_handoff;
+pub mod consent_projection;
 mod worker_status;
 #[cfg(test)]
 use worker_status::confirm_claim;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use worker_status::{claim_pending_for_target, sweep_stale_pre_accept_claims};
-pub(crate) use worker_status::{
+pub use worker_status::{claim_pending_for_target, sweep_stale_pre_accept_claims};
+pub use worker_status::{
     claim_pending_for_target_except, mark_accepted, mark_done, mark_failed_post_accept,
     mark_failed_pre_accept, mark_spawned, return_claimed_to_pending, sweep_stamped_claims,
 };
@@ -267,7 +264,7 @@ pub(crate) use worker_status::{
 /// (or rows for a specific channel when `channel_id_filter` is Some),
 /// ordered by `created_at DESC`. Phase 5 ops CLI uses this for
 /// `agentdesk intake-outbox status`.
-pub(crate) async fn list_recent_rows(
+pub async fn list_recent_rows(
     pool: &PgPool,
     channel_id_filter: Option<&str>,
     limit: i64,

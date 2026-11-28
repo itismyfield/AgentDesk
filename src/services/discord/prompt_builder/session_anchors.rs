@@ -89,7 +89,7 @@ impl BuiltSystemPrompt {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::discord::settings::MemoryBackendKind;
+    use crate::domain::memory::MemoryBackendKind;
     use crate::services::memory::with_memento_test_endpoint;
     use crate::services::stream_json_cli::{
         dialects::agy, policy::ConfiguredToolPolicy, request::ProviderTurnRequest,

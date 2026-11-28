@@ -400,12 +400,12 @@ mod restored_session_cwd_channel_isolation_pg_tests {
             &agent_sessions,
             &provider,
             vec![
-                crate::services::discord::settings::RegisteredChannelBinding {
+                crate::services::channel_roles::RegisteredChannelBinding {
                     channel_id: 42,
                     owner_provider: provider.clone(),
                     fallback_name: Some("yaml-only".to_string()),
                 },
-                crate::services::discord::settings::RegisteredChannelBinding {
+                crate::services::channel_roles::RegisteredChannelBinding {
                     channel_id: 43,
                     owner_provider: ProviderKind::Claude,
                     fallback_name: Some("yaml-only".to_string()),

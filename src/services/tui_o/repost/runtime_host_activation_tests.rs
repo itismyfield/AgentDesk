@@ -926,7 +926,7 @@ async fn d4act2_gateway_repost_host_stop_and_rollback_quiescence_pg() {
                 notice_origin: None,
                 local_retry: None,
                 serial: 0,
-                unit_key: key.unit().clone(),
+                unit_key: key.unit_for_test().clone(),
                 piece_index: 0,
                 payload: "absent target".into(),
                 anchor_id: 100,

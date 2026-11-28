@@ -10,11 +10,9 @@ use std::time::Duration;
 
 use poise::serenity_prelude::ChannelId;
 
+use crate::domain::outbound::port::{DispatchMessagePostError, DispatchMessagePostErrorKind};
 use crate::services::discord::formatting::{
     byte_index_at_discord_message_units, discord_message_units,
-};
-use crate::services::dispatches::discord_delivery::{
-    DispatchMessagePostError, DispatchMessagePostErrorKind,
 };
 use crate::services::provider::{CancelToken, cancel_requested};
 
@@ -25,11 +23,11 @@ use super::decision::{
 use super::message::{
     DiscordOutboundMessage, OutboundDedupKey, OutboundOperation, OutboundReferenceContext,
 };
-use super::result::{DeliveredMessage, DeliveryResult, FallbackUsed};
 use super::transport::{
     OutboundDedupClaim, OutboundDedupReservation, OutboundDedupWait, OutboundDeduper,
 };
 use crate::domain::outbound::port::DiscordOutboundClient;
+use crate::domain::outbound::result::{DeliveredMessage, DeliveryResult, FallbackUsed};
 
 const DISCORD_EMPTY_CONTENT_PLACEHOLDER: &str = "\u{200B}";
 
@@ -271,7 +269,7 @@ where
     {
         Ok(raw_message_id) => {
             let messages = vec![DeliveredMessage::single_raw(
-                delivered_channel_id,
+                super::message::outbound_channel_id(delivered_channel_id),
                 raw_message_id,
             )];
             record_success(dedup, reservation.as_mut(), dedup_key, message, &messages);
@@ -325,7 +323,10 @@ where
                 .await
                 {
                     Ok(raw_message_id) => {
-                        let messages = vec![DeliveredMessage::single_raw(parent, raw_message_id)];
+                        let messages = vec![DeliveredMessage::single_raw(
+                            super::message::outbound_channel_id(parent),
+                            raw_message_id,
+                        )];
                         record_success(dedup, reservation.as_mut(), dedup_key, message, &messages);
                         return DeliveryResult::Fallback {
                             dedup_key: dedup_key.clone(),
@@ -386,7 +387,7 @@ where
         {
             Ok(raw_message_id) => {
                 let messages = vec![DeliveredMessage::single_raw(
-                    delivered_channel_id,
+                    super::message::outbound_channel_id(delivered_channel_id),
                     raw_message_id,
                 )];
                 record_success(
@@ -465,7 +466,7 @@ where
             }
         };
         messages.push(DeliveredMessage::chunk_raw(
-            delivered_channel_id,
+            super::message::outbound_channel_id(delivered_channel_id),
             raw_message_id,
             index,
             chunk_count,
@@ -679,10 +680,15 @@ fn decode_legacy_delivered_messages(stored: &str, channel_id: ChannelId) -> Vec<
     match serde_json::from_str::<Vec<String>>(stored) {
         Ok(raw_ids) if !raw_ids.is_empty() => raw_ids
             .into_iter()
-            .map(|raw| DeliveredMessage::single_raw(channel_id, raw))
+            .map(|raw| {
+                DeliveredMessage::single_raw(super::message::outbound_channel_id(channel_id), raw)
+            })
             .collect(),
         Ok(_) => Vec::new(),
-        Err(_) => vec![DeliveredMessage::single_raw(channel_id, stored)],
+        Err(_) => vec![DeliveredMessage::single_raw(
+            super::message::outbound_channel_id(channel_id),
+            stored,
+        )],
     }
 }
 

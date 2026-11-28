@@ -4,28 +4,8 @@ function sessionIsWorking(status: DispatchedSession["status"]): boolean {
   return status === "turn_active" || status === "awaiting_bg" || status === "working";
 }
 
-export function deriveDispatchedAsAgents(sessions: DispatchedSession[]): Agent[] {
-  const visible = sessions.filter((s) => s.status !== "disconnected" && !s.linked_agent_id);
-  return visible
-    .filter((s) => s.department_id)
-    .map((s) => ({
-      id: `dispatched:${s.id}`,
-      name: s.name || s.session_key,
-      name_ko: s.name || s.session_key,
-      department_id: s.department_id,
-      role: "intern" as const,
-      avatar_emoji: s.avatar_emoji || "📡",
-      personality: null,
-      status: sessionIsWorking(s.status) ? ("working" as const) : ("idle" as const),
-      current_task_id: null,
-      stats_tasks_done: 0,
-      stats_tokens: s.tokens || 0,
-      created_at: s.connected_at,
-      session_info: s.session_info,
-      department_name: s.department_name,
-      department_name_ko: s.department_name_ko,
-      department_color: s.department_color,
-    }));
+export function deriveDispatchedAsAgents(_sessions: DispatchedSession[]): Agent[] {
+  return [];
 }
 
 /** The server sends agent_status after each of the agent's session changes, without its visual status, so the

@@ -3,7 +3,7 @@
 use super::*;
 
 /// The execution a cancel's selected row records, when it is a Herdr record its row owns.
-pub(crate) fn herdr_execution(
+pub fn herdr_execution(
     raw: Option<&Value>,
     identity: &[Option<String>; 4],
 ) -> Option<HostedExecution> {
@@ -18,10 +18,7 @@ pub(crate) fn herdr_execution(
 }
 
 /// The row's active dispatch; a missing row is an error, never an idle one.
-pub(crate) async fn active_dispatch_pg(
-    pool: &PgPool,
-    session_id: i64,
-) -> Result<Option<String>, String> {
+pub async fn active_dispatch_pg(pool: &PgPool, session_id: i64) -> Result<Option<String>, String> {
     sqlx::query_scalar("SELECT active_dispatch_id FROM sessions WHERE id = $1")
         .bind(session_id)
         .fetch_one(pool)
@@ -31,7 +28,7 @@ pub(crate) async fn active_dispatch_pg(
 
 /// Disconnects the row only while it records `record` retired, field by field, with `dispatch` or,
 /// once its cancel cleared it, none active; `keep_provider_session` keeps the session id to resume.
-pub(crate) async fn disconnect_retired_pg(
+pub async fn disconnect_retired_pg(
     pool: &PgPool,
     session_id: i64,
     record: &HostedExecution,
@@ -72,7 +69,7 @@ pub(crate) async fn disconnect_retired_pg(
 
 /// Forgets the provider session selector only while the row records `record` retired, field by
 /// field; `Ok(false)` means the row moved on, so no other execution's selector is touched.
-pub(crate) async fn clear_retired_selector_pg(
+pub async fn clear_retired_selector_pg(
     pool: &PgPool,
     session_id: i64,
     record: &HostedExecution,

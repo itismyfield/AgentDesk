@@ -6,16 +6,16 @@ use super::ids::{OutboundChannelId, OutboundMessageId};
 use super::key::OutboundDedupKey;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct DiscordTransportReceipt {
-    pub(crate) requested_channel_id: String,
-    pub(crate) returned_channel_id: String,
-    pub(crate) message_id: String,
+pub struct DiscordTransportReceipt {
+    pub requested_channel_id: String,
+    pub returned_channel_id: String,
+    pub message_id: String,
 }
 
 /// Which degraded path a [`DeliveryResult::Fallback`] took.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum FallbackUsed {
+pub enum FallbackUsed {
     MinimalFallback,
     LengthCompacted,
     LengthSplit,
@@ -25,18 +25,29 @@ pub(crate) enum FallbackUsed {
 
 /// One Discord message produced by an outbound delivery.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct DeliveredMessage {
+pub struct DeliveredMessage {
     pub(crate) channel_id: OutboundChannelId,
     pub(crate) message_id: OutboundMessageId,
+    #[cfg(any(test, feature = "test-support"))]
+    /// Id as returned by the transport; test doubles may return non-numeric ids.
+    pub raw_message_id: String,
+    #[cfg(not(any(test, feature = "test-support")))]
     /// Id as returned by the transport; test doubles may return non-numeric ids.
     pub(crate) raw_message_id: String,
+    #[cfg(any(test, feature = "test-support"))]
+    /// `None` for anything that is not a split chunk.
+    pub chunk_index: Option<usize>,
+    #[cfg(not(any(test, feature = "test-support")))]
     /// `None` for anything that is not a split chunk.
     pub(crate) chunk_index: Option<usize>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub chunk_count: Option<usize>,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) chunk_count: Option<usize>,
 }
 
 impl DeliveredMessage {
-    pub(crate) fn single_raw(
+    pub fn single_raw(
         channel_id: impl Into<OutboundChannelId>,
         raw_message_id: impl Into<String>,
     ) -> Self {
@@ -50,7 +61,7 @@ impl DeliveredMessage {
         }
     }
 
-    pub(crate) fn chunk_raw(
+    pub fn chunk_raw(
         channel_id: impl Into<OutboundChannelId>,
         raw_message_id: impl Into<String>,
         chunk_index: usize,
@@ -76,7 +87,7 @@ fn parse_message_id_lossy(raw_message_id: &str) -> OutboundMessageId {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum DeliveryResult {
+pub enum DeliveryResult {
     Sent {
         dedup_key: OutboundDedupKey,
         messages: Vec<DeliveredMessage>,
@@ -109,7 +120,7 @@ pub(crate) enum DeliveryResult {
     },
 }
 
-pub(crate) fn first_raw_message_id(messages: &[DeliveredMessage]) -> Option<String> {
+pub fn first_raw_message_id(messages: &[DeliveredMessage]) -> Option<String> {
     messages
         .first()
         .map(|message| message.raw_message_id.clone())

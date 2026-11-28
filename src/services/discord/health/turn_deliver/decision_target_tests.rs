@@ -1,8 +1,9 @@
 //! The first attempt of an approved Decision event against fake ports and a real PG row.
-use super::super::{ExternalHold, InjectAttempt, InjectMode, MailboxHolder};
+use super::super::{InjectAttempt, InjectMode, MailboxHolder};
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::decisions::EventKind;
+use crate::domain::human_input::ExternalHold;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};

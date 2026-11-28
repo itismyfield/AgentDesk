@@ -90,7 +90,7 @@ async fn deliver_marked(
         &row.source,
         row.reason_code.as_deref(),
     ) {
-        crate::services::discord::dispatch_policy::prepend_inline_operational_alert_origin(
+        crate::domain::outbound::alert_origin::prepend_inline_operational_alert_origin(
             &notice.content,
         )
     } else {

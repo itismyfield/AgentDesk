@@ -314,7 +314,7 @@ pub(crate) async fn reconcile_boot_db_pg(
         crate::services::stale_turn_reconciler::reconcile_stale_turns_pg(
             pool,
             health_registry,
-            crate::services::discord::relay_recovery::AxisBSite::BootReconcileSweep,
+            crate::services::engine_runtime::health_port::AxisBSite::BootReconcileSweep,
             inflight_lookup,
         )
         .await?;

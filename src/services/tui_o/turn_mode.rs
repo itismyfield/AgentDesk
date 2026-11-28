@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub(crate) struct TurnConfig {
+pub struct TurnConfig {
     pub channels: BTreeSet<u64>,
     /// Selects every channel O owns; unset means on unless `channels` lists the selection.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -14,7 +14,7 @@ pub(crate) struct TurnConfig {
 
 impl TurnConfig {
     /// Explicitly off: no channel is selected.
-    pub(crate) fn off() -> Self {
+    pub fn off() -> Self {
         Self {
             channels: BTreeSet::new(),
             all_owned: Some(false),
@@ -26,11 +26,11 @@ impl TurnConfig {
     }
 
     /// Whether any channel can be selected.
-    pub(crate) fn selects_any(&self) -> bool {
+    pub fn selects_any(&self) -> bool {
         self.all_owned() || !self.channels.is_empty()
     }
 
-    pub(crate) fn selects(&self, channel: u64) -> bool {
+    pub fn selects(&self, channel: u64) -> bool {
         channel != 0 && (self.all_owned() || self.channels.contains(&channel))
     }
 }
@@ -38,7 +38,7 @@ impl TurnConfig {
 static CONFIRMED: OnceLock<RwLock<BTreeSet<u64>>> = OnceLock::new();
 
 // Configuration and current output ownership do not confirm a turn transition.
-pub(crate) fn transcript_turns(channel: u64) -> bool {
+pub fn transcript_turns(channel: u64) -> bool {
     CONFIRMED.get().is_some_and(|channels| {
         channels
             .read()
@@ -48,7 +48,7 @@ pub(crate) fn transcript_turns(channel: u64) -> bool {
 }
 
 /// The channels confirmed for turn mode in this process.
-pub(crate) fn confirmed_channels() -> Vec<u64> {
+pub fn confirmed_channels() -> Vec<u64> {
     CONFIRMED.get().map_or_else(Vec::new, |channels| {
         let channels = channels.read().unwrap_or_else(|e| e.into_inner());
         channels.iter().copied().collect()
@@ -75,7 +75,7 @@ pub(crate) fn admit_effect<T>(
 
 // The caller must read the retirement population before confirming a selected channel.
 // Returns whether this call added the channel to the confirmed set.
-pub(crate) fn confirm(channel: u64) -> bool {
+pub fn confirm(channel: u64) -> bool {
     channel != 0
         && CONFIRMED
             .get_or_init(|| RwLock::new(BTreeSet::new()))
@@ -86,7 +86,7 @@ pub(crate) fn confirm(channel: u64) -> bool {
 
 /// Confirms each channel of `owned` whose `policy` channel is selected, only after `retire` reports
 /// it fully retired. No config or an explicitly empty selection returns before `owned` or `retire` runs.
-pub(crate) fn confirm_selected(
+pub fn confirm_selected(
     config: Option<&TurnConfig>,
     owned: impl FnOnce() -> Vec<u64>,
     policy: impl Fn(u64) -> u64,
@@ -107,18 +107,18 @@ pub(crate) fn confirm_selected(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) struct TestConfirmation(u64);
+pub struct TestConfirmation(u64);
 
 #[cfg(any(test, feature = "test-support"))]
 impl TestConfirmation {
-    pub(crate) fn new(channel: u64) -> Self {
+    pub fn new(channel: u64) -> Self {
         assert!(!transcript_turns(channel));
         confirm(channel);
         Self(channel)
     }
 
     /// Takes over removal of a channel production code already confirmed.
-    pub(crate) fn confirmed(channel: u64) -> Self {
+    pub fn confirmed(channel: u64) -> Self {
         assert!(transcript_turns(channel));
         Self(channel)
     }
@@ -311,17 +311,17 @@ mod tests {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_tick {
+pub mod test_tick {
     static TICK: std::sync::Mutex<Option<(u64, tokio::sync::oneshot::Sender<()>)>> =
         std::sync::Mutex::new(None);
 
-    pub(crate) fn signal(channel: u64) -> tokio::sync::oneshot::Receiver<()> {
+    pub fn signal(channel: u64) -> tokio::sync::oneshot::Receiver<()> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         *TICK.lock().unwrap_or_else(|e| e.into_inner()) = Some((channel, tx));
         rx
     }
 
-    pub(crate) fn completed(channel: u64) {
+    pub fn completed(channel: u64) {
         let mut tick = TICK.lock().unwrap_or_else(|e| e.into_inner());
         if tick.as_ref().is_some_and(|(id, _)| *id == channel) {
             let (_, tx) = tick.take().unwrap();

@@ -6,14 +6,14 @@ use crate::services::agent_protocol::RuntimeHandoffKind;
 
 mod input;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use input::{InputProbe, install_probe};
-pub(crate) use input::{
+pub use input::{InputProbe, install_probe};
+pub use input::{
     for_claimed_input, for_input_placement, held_input_channels, selected_codex_input,
     text_for_input_placement,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum IntakeRoute {
+pub enum IntakeRoute {
     /// Not an O channel, or the writer is off: existing placement applies unchanged.
     Unselected,
     /// This process's writer can take the channel now.
@@ -22,7 +22,7 @@ pub(crate) enum IntakeRoute {
     Hold(String),
 }
 
-pub(crate) fn route(provider: &str, channel: u64) -> IntakeRoute {
+pub fn route(provider: &str, channel: u64) -> IntakeRoute {
     route_parsed(provider, || Some(channel))
 }
 
@@ -41,7 +41,7 @@ pub(crate) fn route_text(provider: &str, channel: &str) -> IntakeRoute {
 
 /// For a new placement rather than a claim: a selected channel is held off the O home, and on it a
 /// pending adoption is released before routing as `route` does.
-pub(crate) fn route_for_placement(provider: &str, channel: u64) -> IntakeRoute {
+pub fn route_for_placement(provider: &str, channel: u64) -> IntakeRoute {
     placed(provider, Some(channel))
 }
 
@@ -184,7 +184,7 @@ pub(super) fn accepts(channel: u64) -> bool {
 
 /// Stands in for this process's writer readiness on the current thread.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_probe {
+pub mod test_probe {
     use std::cell::RefCell;
 
     type Probe = Box<dyn FnMut(u64) -> bool>;
@@ -193,14 +193,14 @@ pub(crate) mod test_probe {
         static PROBE: RefCell<Option<Probe>> = const { RefCell::new(None) };
     }
 
-    pub(crate) struct ProbeGuard(Option<Probe>);
+    pub struct ProbeGuard(Option<Probe>);
 
-    pub(crate) fn answer_with(probe: impl FnMut(u64) -> bool + 'static) -> ProbeGuard {
+    pub fn answer_with(probe: impl FnMut(u64) -> bool + 'static) -> ProbeGuard {
         ProbeGuard(PROBE.with(|cell| cell.replace(Some(Box::new(probe)))))
     }
 
     /// Each readiness read takes the next answer; a read past the list fails the test.
-    pub(crate) fn answers(answers: &[bool]) -> ProbeGuard {
+    pub fn answers(answers: &[bool]) -> ProbeGuard {
         let mut answers = answers.to_vec().into_iter();
         answer_with(move |channel| {
             answers

@@ -431,7 +431,7 @@ impl HerdrLaunchHost for Successor {
     }
 
     fn launch_evidence(&self, probe: &EvidenceProbe) -> Result<ExpectedExecution, EvidenceGap> {
-        Ok(hosted::tests::expected(&probe.execution_nonce, 300))
+        Ok(hosted::test_support::expected(&probe.execution_nonce, 300))
     }
 }
 

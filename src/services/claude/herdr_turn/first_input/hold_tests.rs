@@ -5,6 +5,7 @@ use crate::services::claude::herdr_turn::{
 };
 use crate::services::claude_tui::guarded_outcome;
 use crate::services::claude_tui::host_input::InputRun;
+use crate::services::discord::health::turn_deliver::inject::first_input::pg_tests::v2_cold_fixture;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -40,7 +41,8 @@ fn hold_resolve_crash_after_hold_before_first_key_holds_front_then_releases_and_
     let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(channel));
     let target = serde_json::json!({"host":"herdr","owner":logical,"root":rig.socket().display().to_string(),"execution_nonce":"00112233445566778899aabbccddee01"});
     let attempt = serde_json::json!({"nonce":"hold-attempt-1","provider":"claude","target":target,"source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}});
-    let fixture = mailbox.v2_cold_fixture(
+    let fixture = v2_cold_fixture(
+        &mailbox,
         root.path().join("hold.json"),
         attempt.clone(),
         "next input".into(),

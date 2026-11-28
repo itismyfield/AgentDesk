@@ -27,6 +27,7 @@ import {
   loadRuntimeConfig,
   reconcileStaleSessionTurn,
   stopAgentTurn,
+  useAgentTurns,
   usePolled,
 } from "./useHomeData";
 
@@ -72,6 +73,11 @@ export default function HomePageView({
     () => buildHomeAgents(agents, sessions, sessionsFailed),
     [agents, sessions, sessionsFailed],
   );
+  const workingAgentIds = useMemo(
+    () => entries.filter((entry) => entry.state === "working" && !entry.agent.id.startsWith("dispatched:")).map((entry) => entry.agent.id),
+    [entries],
+  );
+  const liveTurns = useAgentTurns(workingAgentIds);
   const todo = useMemo(
     () =>
       buildTodoItems({
@@ -93,12 +99,13 @@ export default function HomePageView({
         rule,
         sessions,
         agentEntries: entries,
+        turns: liveTurns,
         reconciledKeys,
         health: health.failed ? null : health.data,
         tr,
         isKo,
       }),
-    [usageRows, rule, sessions, entries, reconciledKeys, health.failed, health.data, tr, isKo],
+    [usageRows, rule, sessions, entries, liveTurns, reconciledKeys, health.failed, health.data, tr, isKo],
   );
   const hasHealthTriage = useMemo(() => triageAlerts.some((alert) => alert.kind === "health"), [triageAlerts]);
 
@@ -232,6 +239,7 @@ export default function HomePageView({
         )}
         <HomeAgentsCard
           entries={entries}
+          turns={liveTurns}
           isMobile={isMobileViewport}
           tr={tr}
           isKo={isKo}

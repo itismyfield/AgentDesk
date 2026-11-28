@@ -3,7 +3,7 @@ use super::{PeerSource, Unverified, file::FileToken, peer::PeerSnapshot};
 
 /// Current whole-config validation, bound to the peer and both file identities.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct NextRestartProof {
+pub struct NextRestartProof {
     pub(super) peer: PeerSnapshot,
     pub(super) file: FileToken,
 }
@@ -37,7 +37,7 @@ impl NextRestartProof {
 
 /// Historical evidence; later config edits do not erase how this peer started.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StartupProof {
+pub struct StartupProof {
     pub(super) evidence: NextRestartProof,
 }
 

@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::snapshot_reader_tests::{Fixture, isolated};
+use crate::config::snapshot_reader_support::{Fixture, isolated};
 
 const A: &str = "agents:\n  - {id: self, name: Self, provider: claude}\n  - {id: peer-a, name: Peer A, provider: claude}\n";
 const B: &str = "agents:\n  - {id: disk-b, name: Disk B, provider: claude}\n";

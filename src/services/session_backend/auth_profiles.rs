@@ -7,7 +7,7 @@ use crate::services::tmux_common::{
 
 /// Fence a wrapper from a different account before checking warm-session reuse.
 /// The return value also governs whether its previous resume token is safe.
-pub(crate) fn prepare(session_name: &str, profile_id: &str) -> bool {
+pub fn prepare(session_name: &str, profile_id: &str) -> bool {
     let matches = tmux_session_auth_profile_matches(session_name, profile_id);
     if !matches && let Some(handle) = remove_process_session(session_name) {
         terminate_process_handle(handle);
@@ -17,7 +17,7 @@ pub(crate) fn prepare(session_name: &str, profile_id: &str) -> bool {
 
 /// Publish account identity only after launch succeeds. If recording it fails,
 /// stop the new process instead of leaving an untracked account in the registry.
-pub(crate) fn record_launch(
+pub fn record_launch(
     session_name: &str,
     profile_id: &str,
     handle: SessionHandle,

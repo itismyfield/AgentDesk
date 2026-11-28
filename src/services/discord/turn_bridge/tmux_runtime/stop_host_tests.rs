@@ -955,7 +955,7 @@ async fn runtime_kept(
 // slot clear the safety filter let through; a legacy session clears and kills as in main.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_runtime_clear_refuses_another_hosts_session_before_any_change_pg() {
-    use crate::services::discord::admin_host_guard::ManagedReset;
+    use crate::services::discord::health::slot_row_host_refusal;
     use crate::services::discord::host_defer_gate::tests::{Case, postgres};
     use crate::services::discord::host_teardown_gate::test_support::{
         Stored, busy_turn, channel_key, runtime, seed,
@@ -1104,15 +1104,21 @@ async fn a_runtime_clear_refuses_another_hosts_session_before_any_change_pg() {
     }
     let _ = fx.take_calls();
     let clear = crate::services::auto_queue::runtime::clear_slot_threads_for_slot_pg;
-    clear(Some(registry.clone()), &pool, "agent-p6ao-slot", 0)
-        .await
-        .unwrap();
+    clear(
+        slot_row_host_refusal,
+        Some(registry.clone()),
+        &pool,
+        "agent-p6ao-slot",
+        0,
+    )
+    .await
+    .unwrap();
     let ids: Vec<u64> = threads.iter().map(|thread| thread.get()).collect();
     let after =
         crate::services::auto_queue::runtime::slot_reset_host_pg_tests::runtime_clears_after_done;
     let clears = after(&ids).await;
     assert!(
-        matches!(clears.as_slice(), [(thread, Some(ManagedReset::Applied(_)))] if *thread == ids[2]),
+        matches!(clears.as_slice(), [(thread, Ok(_))] if *thread == ids[2]),
         "{clears:?}"
     );
     assert!(runtime_kept(&shared, threads[1], &seeded[1].1).await);

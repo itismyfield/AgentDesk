@@ -28,9 +28,6 @@ use crate::services::discord::herdr_terminate::{
     OperatorTerminate, TerminationResult, terminate_explicit_herdr, test_turn,
 };
 use crate::services::discord::krx_session_host_test_host::herdr_termination_rig as herdr;
-use crate::services::discord::recovery_engine::host_reconcile::{
-    HerdrEndpointId, HerdrExecutionReader, HerdrPaneEvidence, HerdrPaneReading,
-};
 use crate::services::discord::tui_prompt_relay::herdr_source::{
     HerdrSourceAttach, attach_launched_codex_herdr_source, attach_launched_herdr_source,
 };
@@ -40,6 +37,9 @@ use crate::services::herdr_launch::{
 };
 use crate::services::provider::ProviderKind;
 use crate::services::session_host::{EvidenceGap, RestoreResume, ServerWitness};
+use crate::services::session_host::{
+    HerdrEndpointId, HerdrExecutionReader, HerdrPaneEvidence, HerdrPaneReading,
+};
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
 use crate::services::tui_o::shadow::capture::SourceCapture;
@@ -852,7 +852,8 @@ async fn launch_and_attach_successor(
 }
 
 fn successor_stamps(nonce: &str, provider: &str) -> ExpectedExecution {
-    let mut stamps = crate::db::dispatched_sessions::hosted_execution::tests::expected(nonce, 300);
+    let mut stamps =
+        crate::db::dispatched_sessions::hosted_execution::test_support::expected(nonce, 300);
     stamps.binding_provider = provider.into();
     stamps
 }

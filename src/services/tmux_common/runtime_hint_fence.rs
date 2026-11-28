@@ -227,7 +227,7 @@ impl Entry {
 }
 
 #[cfg(unix)]
-pub(crate) struct TmuxPublisherObservation {
+pub struct TmuxPublisherObservation {
     session: String,
     entries: Vec<Entry>,
     witnesses: Vec<Vec<Option<Witness>>>,
@@ -280,7 +280,7 @@ impl TmuxPublisherObservation {
 }
 
 #[derive(Debug)]
-pub(crate) struct RuntimeHintFence {
+pub struct RuntimeHintFence {
     #[cfg(unix)]
     entries: Vec<Entry>,
     #[cfg(unix)]
@@ -288,7 +288,7 @@ pub(crate) struct RuntimeHintFence {
 }
 
 impl RuntimeHintFence {
-    pub(crate) fn acquire(session: &str) -> Result<Self, String> {
+    pub fn acquire(session: &str) -> Result<Self, String> {
         Self::acquire_initialized(session, true)
     }
 
@@ -342,7 +342,7 @@ impl RuntimeHintFence {
     }
 
     #[cfg(unix)]
-    pub(crate) fn try_acquire(session: &str) -> Result<Option<Self>, String> {
+    pub fn try_acquire(session: &str) -> Result<Option<Self>, String> {
         let _ = super::agentdesk_temp_dir();
         Self::acquire_mode(session, true)
     }
@@ -472,7 +472,7 @@ impl RuntimeHintFence {
         Ok(Some(fence))
     }
 
-    pub(crate) fn validate(&self, session: &str) -> Result<(), String> {
+    pub fn validate(&self, session: &str) -> Result<(), String> {
         #[cfg(unix)]
         {
             let mut keys = Self::paths(session)
@@ -506,7 +506,7 @@ impl RuntimeHintFence {
     }
 
     #[cfg(unix)]
-    pub(crate) fn validate_tmux_publisher(&self, session: &str) -> Result<(), String> {
+    pub fn validate_tmux_publisher(&self, session: &str) -> Result<(), String> {
         self.validate(session)?;
         use super::host_marker::{HostKindMarker, read_host_kind_marker};
         match read_host_kind_marker(session) {

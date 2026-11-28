@@ -5,15 +5,12 @@ use serde_json::json;
 // Keep operator history responses bounded even after repeated event revisions.
 const MAX_OPERATION_HISTORY: i64 = 200;
 
-pub(crate) async fn event_accounts(
-    pool: &PgPool,
-    event: Uuid,
-) -> Result<Vec<String>, CalendarDbError> {
+pub async fn event_accounts(pool: &PgPool, event: Uuid) -> Result<Vec<String>, CalendarDbError> {
     Ok(sqlx::query_scalar("SELECT b.account_id FROM kakao_calendar_targets t JOIN kakao_calendar_bindings b USING(binding_id) WHERE t.event_id=$1 ORDER BY b.account_id")
         .bind(event).fetch_all(pool).await?)
 }
 
-pub(crate) async fn account_checks(
+pub async fn account_checks(
     pool: &PgPool,
     accounts: &[String],
 ) -> Result<Vec<Value>, CalendarDbError> {
@@ -115,14 +112,14 @@ async fn read_events(
     Ok(rows.into_iter().map(EventRow::into_json).collect())
 }
 
-pub(crate) async fn get(pool: &PgPool, event: Uuid) -> Result<Value, CalendarDbError> {
+pub async fn get(pool: &PgPool, event: Uuid) -> Result<Value, CalendarDbError> {
     read_events(pool, Some(event), None, None, 1)
         .await?
         .pop()
         .ok_or(CalendarDbError::NotFound)
 }
 
-pub(crate) async fn list(
+pub async fn list(
     pool: &PgPool,
     accounts: &[String],
     before: Option<Uuid>,
@@ -131,7 +128,7 @@ pub(crate) async fn list(
     read_events(pool, None, Some(accounts), before, limit).await
 }
 
-pub(crate) async fn operations(pool: &PgPool, event: Uuid) -> Result<Vec<Value>, CalendarDbError> {
+pub async fn operations(pool: &PgPool, event: Uuid) -> Result<Vec<Value>, CalendarDbError> {
     let rows = sqlx::query("SELECT o.id,o.revision,o.action,o.status,o.error_code,o.dispatched_at,o.attempts,o.recovery_note,b.account_id
         FROM kakao_calendar_operations o JOIN kakao_calendar_targets t ON t.id=o.target_id JOIN kakao_calendar_bindings b USING(binding_id)
         WHERE t.event_id=$1 ORDER BY o.revision DESC,b.account_id LIMIT $2").bind(event).bind(MAX_OPERATION_HISTORY).fetch_all(pool).await?;

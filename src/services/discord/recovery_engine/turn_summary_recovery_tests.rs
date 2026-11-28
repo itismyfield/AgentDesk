@@ -24,9 +24,7 @@ async fn actual_recovery_completion_never_posts_a_summary_for_empty_suppressed_r
         state.relay_ownership_only = kind == "suppressed";
         state.rebind_origin = kind == "rebind";
         if kind == "planned_restart" {
-            state.set_restart_mode(
-                crate::services::discord::restart_mode::InflightRestartMode::DrainRestart,
-            );
+            state.set_restart_mode(crate::domain::lifecycle::InflightRestartMode::DrainRestart);
         }
         assert_ne!(state.effective_finalizer_turn_id(), 0);
         let _ = complete_recovery_visible_turn(

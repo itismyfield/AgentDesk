@@ -1,4 +1,5 @@
 use super::HttpDispatchTransport;
+use crate::services::discord::health::slot_row_host_refusal;
 
 /// The dispatch thread owner is `discord.owner_id`; a legacy `escalation`
 /// owner in the same YAML no longer redirects it.
@@ -12,10 +13,10 @@ fn dispatch_thread_owner_comes_from_discord_owner_id() {
     )
     .unwrap();
     let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_CONFIG", &path);
-    let transport = HttpDispatchTransport::from_runtime_with_pg(None);
+    let transport = HttpDispatchTransport::from_runtime_with_pg(None, slot_row_host_refusal);
     assert_eq!(transport.thread_owner_user_id, Some(111));
 
     std::fs::write(&path, "server:\n  port: 8791\n").unwrap();
-    let transport = HttpDispatchTransport::from_runtime_with_pg(None);
+    let transport = HttpDispatchTransport::from_runtime_with_pg(None, slot_row_host_refusal);
     assert_eq!(transport.thread_owner_user_id, None);
 }

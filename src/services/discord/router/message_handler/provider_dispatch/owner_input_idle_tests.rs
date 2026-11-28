@@ -1910,7 +1910,7 @@ fn pending_observer_becomes_readable(via_hook: bool) {
         last_offset: 0,
         relay_last_offset: None,
     };
-    let proposal = Proposal::for_binding(
+    let proposal = Proposal::for_binding_for_test(
         Some(owner.rig.channel),
         &owner.rig.name,
         &missing,
@@ -1972,7 +1972,7 @@ fn pending_observer_becomes_readable(via_hook: bool) {
     .unwrap();
     std::os::unix::fs::symlink(owner.rig.transcript(), &path).unwrap();
     if via_hook {
-        let hook = HookSignal::from_payload("stop", &json!({"transcript_path":path}));
+        let hook = HookSignal::from_payload_for_test("stop", &json!({"transcript_path":path}));
         let adopted = {
             let _entered = owner.rig.runtime.enter();
             dedupe::adopt_claude_continuation_explained(&command_session, &session, &hook).unwrap()
@@ -2155,7 +2155,7 @@ fn a_verified_hook_adds_no_wake_for_an_already_readable_observer() {
                 counted.fetch_add(1, Ordering::SeqCst);
             }),
         );
-    let hook = HookSignal::from_payload("stop", &json!({"transcript_path":path}));
+    let hook = HookSignal::from_payload_for_test("stop", &json!({"transcript_path":path}));
     let adopted = {
         let _entered = owner.rig.runtime.enter();
         dedupe::adopt_claude_continuation_explained(&command, &session, &hook).unwrap()

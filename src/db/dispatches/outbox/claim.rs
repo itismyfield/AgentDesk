@@ -10,9 +10,9 @@ use super::model::{DispatchOutboxClaimCandidate, StaleDispatchOutboxClaimOwnerCa
 /// that this threshold stays `<=` the delivery reservation TTL (a reclaim firing
 /// after the reservation expired but before the `notified` anchor lands could
 /// otherwise re-send).
-pub(crate) const DISPATCH_OUTBOX_CLAIM_STALE_SECS: i64 = 300;
+pub const DISPATCH_OUTBOX_CLAIM_STALE_SECS: i64 = 300;
 
-pub(crate) async fn select_pending_dispatch_outbox_claim_candidates_pg(
+pub async fn select_pending_dispatch_outbox_claim_candidates_pg(
     tx: &mut Transaction<'_, Postgres>,
     claim_owner: &str,
 ) -> Result<Vec<DispatchOutboxClaimCandidate>, sqlx::Error> {
@@ -66,7 +66,7 @@ pub(crate) async fn select_pending_dispatch_outbox_claim_candidates_pg(
         .collect()
 }
 
-pub(crate) async fn mark_dispatch_outbox_claimed_pg(
+pub async fn mark_dispatch_outbox_claimed_pg(
     tx: &mut Transaction<'_, Postgres>,
     outbox_id: i64,
     claim_owner: &str,
@@ -88,7 +88,7 @@ pub(crate) async fn mark_dispatch_outbox_claimed_pg(
     Ok(claimed_at)
 }
 
-pub(crate) async fn select_stale_dispatch_outbox_claim_owner_candidates_pg(
+pub async fn select_stale_dispatch_outbox_claim_owner_candidates_pg(
     tx: &mut Transaction<'_, Postgres>,
     stale_threshold_secs: i64,
     limit: i64,
@@ -135,7 +135,7 @@ pub(crate) async fn select_stale_dispatch_outbox_claim_owner_candidates_pg(
         .collect()
 }
 
-pub(crate) async fn update_dispatch_outbox_claim_owner_pg(
+pub async fn update_dispatch_outbox_claim_owner_pg(
     tx: &mut Transaction<'_, Postgres>,
     outbox_id: i64,
     claim_owner: Option<&str>,

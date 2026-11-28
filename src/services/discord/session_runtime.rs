@@ -29,55 +29,27 @@ pub(super) use self::worktree::{
 };
 use self::worktree::{is_managed_worktree_path, sync_inflight_worktree_context};
 
+use crate::services::engine_runtime::session::EngineSession;
 pub(super) use crate::services::engine_runtime::session::EngineSession as DiscordSession;
 
-impl DiscordSession {
-    pub(super) fn clear_provider_session(&mut self) {
-        self.session_id = None;
-        self.memento_context_loaded = false;
-        self.memento_reflected = false;
+/// Return the usable path, or log and clear the stale path and worktree.
+pub(super) fn validated_path(
+    session: &mut EngineSession,
+    channel_id: impl std::fmt::Display,
+) -> Option<String> {
+    let current_path = session.current_path.as_ref()?;
+    if session_path_is_usable(current_path) {
+        return Some(current_path.clone());
     }
-
-    pub(super) fn restore_provider_session(&mut self, session_id: Option<String>) {
-        self.memento_context_loaded = restored_memento_context_loaded(
-            self.memento_context_loaded,
-            self.session_id.as_deref(),
-            session_id.as_deref(),
-        );
-        self.session_id = session_id;
-        self.memento_reflected = false;
-    }
-
-    pub(super) fn note_memento_context_loaded(&mut self) {
-        self.memento_context_loaded = true;
-        self.memento_reflected = false;
-    }
-
-    /// Validate `current_path` and return it if it exists on disk.
-    /// If the path is stale (deleted), clear `current_path` and `worktree`, log, and return `None`.
-    pub(super) fn validated_path(&mut self, channel_id: impl std::fmt::Display) -> Option<String> {
-        let current_path = self.current_path.as_ref()?;
-        if session_path_is_usable(current_path) {
-            return Some(current_path.clone());
-        }
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!(
-            "  [{ts}] ⚠ Ignoring stale local session path for channel {}: {}",
-            channel_id,
-            current_path
-        );
-        self.current_path = None;
-        self.worktree = None;
-        None
-    }
-}
-
-pub(super) fn restored_memento_context_loaded(
-    previous_loaded: bool,
-    previous_session_id: Option<&str>,
-    next_session_id: Option<&str>,
-) -> bool {
-    previous_loaded && previous_session_id == next_session_id && next_session_id.is_some()
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::info!(
+        "  [{ts}] ⚠ Ignoring stale local session path for channel {}: {}",
+        channel_id,
+        current_path
+    );
+    session.current_path = None;
+    session.worktree = None;
+    None
 }
 
 /// #4790 `/resume` rebind: repoint a channel's in-memory session at a previous

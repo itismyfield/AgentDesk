@@ -45,7 +45,7 @@ impl AgentChannelBindings {
             .find(|provider| self.provider_specific_channel(provider).is_some())
     }
 
-    pub(crate) fn provider_specific_channel(&self, provider: &ProviderKind) -> Option<String> {
+    pub fn provider_specific_channel(&self, provider: &ProviderKind) -> Option<String> {
         match provider {
             ProviderKind::Claude => self.claude_channel(),
             ProviderKind::Codex => self.codex_channel(),
@@ -154,7 +154,7 @@ impl AgentChannelBindings {
             .or_else(ProviderKind::default_channel_provider)
     }
 
-    pub(crate) fn resolved_primary_provider_kind(&self) -> Option<ProviderKind> {
+    pub fn resolved_primary_provider_kind(&self) -> Option<ProviderKind> {
         self.resolved_primary_provider_kind_with_provider(self.primary_provider_kind())
     }
 
@@ -178,10 +178,7 @@ impl AgentChannelBindings {
     }
 
     /// Explicit provider columns win over the legacy primary channel.
-    pub(crate) fn provider_for_channel(
-        &self,
-        matches: impl Fn(&str) -> bool,
-    ) -> Option<ProviderKind> {
+    pub fn provider_for_channel(&self, matches: impl Fn(&str) -> bool) -> Option<ProviderKind> {
         let claude = self
             .discord_channel_cc
             .as_deref()
@@ -316,7 +313,7 @@ mod tests {
 
     /// #3594 (T3, codex R2 Finding 2): the dispatch-channel resolver
     /// (`resolve_agent_dispatch_channel_pg`) and the delivery router
-    /// (`outbox_route::use_counter_model_channel`) MUST classify counter-model
+    /// (`domain::dispatch_route::use_counter_model_channel`) MUST classify counter-model
     /// channels identically. The resolver now calls the shared predicate, so this
     /// pins the contract: `plan-review` (the channel that regressed) and the
     /// review family resolve to the counter-model channel, while the
@@ -430,7 +427,7 @@ pub async fn resolve_agent_channel_for_provider_pg(
 
 /// Seeds a Claude-primary agent row with the given cc/cdx channel bindings.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn insert_agent_channels_for_tests(
+pub async fn insert_agent_channels_for_tests(
     pool: &PgPool,
     agent_id: &str,
     cc: Option<&str>,

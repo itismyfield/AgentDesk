@@ -27,8 +27,8 @@ fn rr_intake_live_guard_restores_snapshot_under_the_runtime_root_lock() {
 
 struct IntakeGate {
     _live: crate::config_live_reload::TestLiveGuard,
-    trace: crate::services::platform::tmux::session_inventory::tests::ChannelProbeTrace,
-    _namespace: crate::services::platform::tmux::session_inventory::tests::ChannelNamespace,
+    trace: crate::services::platform::tmux::session_inventory::test_support::ChannelProbeTrace,
+    _namespace: crate::services::platform::tmux::session_inventory::test_support::ChannelNamespace,
     _confirmed: crate::services::tui_o::turn_mode::TestConfirmation,
 }
 
@@ -39,11 +39,11 @@ impl IntakeGate {
         let gate = Self {
             _live: crate::config_live_reload::test_live_guard_after_shared_test_env_lock(),
             trace:
-                crate::services::platform::tmux::session_inventory::tests::ChannelProbeTrace::new(
+                crate::services::platform::tmux::session_inventory::test_support::ChannelProbeTrace::new(
                     CHANNEL,
                 ),
             _namespace:
-                crate::services::platform::tmux::session_inventory::tests::ChannelNamespace::new(
+                crate::services::platform::tmux::session_inventory::test_support::ChannelNamespace::new(
                     CHANNEL,
                     root.join("rr-private-tmux.sock"),
                 ),

@@ -28,8 +28,7 @@ fn misbound_row(
     state.turn_source = crate::services::discord::inflight::TurnSource::ExternalInput;
     state.injected_prompt_message_id = Some(user_msg_id);
     state.set_relay_owner_kind(owner);
-    state.restart_mode =
-        Some(crate::services::discord::restart_mode::InflightRestartMode::DrainRestart);
+    state.restart_mode = Some(crate::domain::lifecycle::InflightRestartMode::DrainRestart);
     state.full_response = HEADLESS_OUTPUT.to_string();
     state.current_msg_id = user_msg_id + 7;
     stamp_claude_ready_for_input_evidence(&mut state, output_path);

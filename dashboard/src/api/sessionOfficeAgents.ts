@@ -1,4 +1,4 @@
-import type { Agent, AuditLogEntry, Department } from "../types";
+import type { Agent, AuditLogEntry } from "../types";
 import { getDashboardSession } from "./dashboardAuth";
 import { readCachedSnapshot, request, type CachedApiSnapshot, type RequestOptions } from "./httpClient";
 
@@ -145,40 +145,3 @@ export async function getAuditLogs(
   );
   return data.logs;
 }
-
-// ── Departments ──
-
-export async function getDepartments(): Promise<Department[]> {
-  const data = await request<{ departments: Department[] }>("/api/departments");
-  return data.departments;
-}
-
-export async function createDepartment(
-  dept: Partial<Department>,
-): Promise<Department> {
-  return request("/api/departments", {
-    method: "POST",
-    body: JSON.stringify(dept),
-  });
-}
-
-export async function updateDepartment(
-  id: string,
-  patch: Partial<Department>,
-): Promise<Department> {
-  return request(`/api/departments/${id}`, {
-    method: "PATCH",
-    body: JSON.stringify(patch),
-  });
-}
-
-/** Sets every listed department's `sort_order` in one transaction. */
-export async function reorderDepartments(order: Array<{ id: string; sort_order: number }>): Promise<void> {
-  await request("/api/departments/reorder", { method: "PATCH", body: JSON.stringify({ order }) });
-}
-
-export async function deleteDepartment(id: string): Promise<void> {
-  await request(`/api/departments/${id}`, { method: "DELETE" });
-}
-
-// ── Settings ──

@@ -158,7 +158,12 @@ fn test_engine_with_pg(pg_pool: sqlx::PgPool) -> PolicyEngine {
     let mut config = Config::default();
     config.policies.dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
     config.policies.hot_reload = false;
-    PolicyEngine::new_with_pg(&config, Some(pg_pool)).expect("create pg-backed policy engine")
+    PolicyEngine::new_with_pg(
+        &config,
+        Some(pg_pool),
+        crate::services::discord::health::slot_row_host_refusal,
+    )
+    .expect("create pg-backed policy engine")
 }
 
 async fn seed_agent_pg(pool: &sqlx::PgPool) {
