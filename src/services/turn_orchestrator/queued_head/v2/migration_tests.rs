@@ -347,6 +347,7 @@ fn adoption_forgets_the_ledger_entry_of_a_proven_unsent_paste() {
             unfinished_handoff: None,
             effort_restart: None,
             retry: Default::default(),
+            rotation: None,
         };
         let file = seed(channel, &serde_json::to_string_pretty(&snapshot).unwrap());
         let register = || {

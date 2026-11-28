@@ -79,6 +79,7 @@ pub(crate) mod skills_manifest_audit;
 pub mod state;
 pub mod stats;
 pub mod termination_events;
+mod transcript_rotation;
 mod turn_lease;
 // Herdr hosting exists only on unix; elsewhere the route is absent.
 #[cfg(unix)]

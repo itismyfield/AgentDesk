@@ -22,6 +22,7 @@ mod readiness_hold;
 mod refused;
 mod retained;
 pub(crate) mod retry_wait;
+pub(crate) mod rotation;
 pub(crate) mod routine_settlement;
 pub(crate) mod source_admission;
 mod sources;
@@ -205,6 +206,7 @@ impl Owner {
                 unfinished_handoff: None,
                 effort_restart: None,
                 retry: Default::default(),
+                rotation: None,
             },
         };
         let mut owner = Self {

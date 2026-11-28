@@ -146,6 +146,7 @@ pub const FIELDS: &[FieldReload] = &[
     row("runtime.herdr_codex_turn_enabled", Live, "`src/services/turn_host.rs` herdr_turn_switched_on_for (current())"),
     row("runtime.herdr_cancel_enabled", Live, "`src/services/provider/cancel_token_claude_interrupt.rs` herdr_cancel_enabled (current())"),
     row("runtime.herdr_terminate_enabled", Live, "`src/services/session_host/herdr_gate.rs` send_close_pinned (current())"),
+    row("runtime.transcript_rotation_soft_bytes", Restart, "`src/server/routes/transcript_rotation.rs` (boot config)"),
     row("runtime.reset_overrides_on_restart", Restart, "`src/services/settings.rs` config_default_seed_actions / seeded_runtime_config_map (consumed only by startup_reseed)"),
     row("routines.enabled", Restart, "`src/server/worker_registry/registry.rs` start_worker (RoutineRuntime gate)"),
     row("routines.dir", Restart, "`src/server/mod.rs` routine_runtime_loop (script_dirs captured; hot-reload pass reuses boot dirs)"),

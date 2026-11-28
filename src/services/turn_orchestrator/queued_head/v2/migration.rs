@@ -58,6 +58,7 @@ pub(super) fn legacy(items: Vec<PendingQueueItem>, meta: Option<Box<SnapshotMeta
         unfinished_handoff: None,
         effort_restart: None,
         retry: Default::default(),
+        rotation: None,
     }
 }
 
